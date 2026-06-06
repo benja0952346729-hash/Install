@@ -321,4 +321,4 @@ def run_training(num_games=5000):
     print(f"⏰ {datetime.now().strftime('%H:%M:%S')}")
 
 if __name__ == "__main__":
-    run_training(5000)
+    run_training(500)
