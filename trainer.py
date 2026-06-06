@@ -1,6 +1,6 @@
 import random
 import json
-import psycopg2
+import requests
 from datetime import datetime, timedelta
 from config import get_game_config, DATABASE_URL
 from game_logic import Board, parse_request
@@ -229,42 +229,66 @@ def simulate_game(game_id):
 
     return events
 
-# ─── Save to PostgreSQL ──────────────────────────────────────────
-def save_events(events, conn):
-    cur = conn.cursor()
-    cur.execute("""
+# ─── Neon HTTP API ───────────────────────────────────────────────
+def get_neon_http_url():
+    """postgresql:// → https:// Neon HTTP endpoint"""
+    url = DATABASE_URL
+    url = url.replace("postgresql://", "https://")
+    url = url.replace("postgres://", "https://")
+    # extract host
+    parts = url.split("@")
+    creds = parts[0].replace("https://", "")
+    host_path = parts[1].split("/")[0]
+    db = parts[1].split("/")[1].split("?")[0]
+    user, password = creds.split(":")
+    return f"https://{host_path}/sql", user, password, db
+
+def neon_query(sql, params=None):
+    """Neon HTTP API ይጠቀማል"""
+    endpoint, user, password, db = get_neon_http_url()
+    payload = {"query": sql, "params": params or []}
+    resp = requests.post(
+        endpoint,
+        json=payload,
+        auth=(user, password),
+        headers={"Content-Type": "application/json"},
+        timeout=30
+    )
+    return resp.json()
+
+def create_table():
+    neon_query("""
         CREATE TABLE IF NOT EXISTS training_events (
-            id          SERIAL PRIMARY KEY,
-            game_id     INTEGER,
-            event_type  TEXT,
-            data        JSONB,
-            timestamp   TIMESTAMP
+            id SERIAL PRIMARY KEY,
+            game_id INTEGER,
+            event_type TEXT,
+            data JSONB,
+            timestamp TIMESTAMP
         )
     """)
+
+def save_events(events):
     for e in events:
-        cur.execute(
-            "INSERT INTO training_events (game_id, event_type, data, timestamp) VALUES (%s, %s, %s, %s)",
-            (e["game_id"], e["event_type"], json.dumps(e["data"], ensure_ascii=False), e["timestamp"])
+        neon_query(
+            "INSERT INTO training_events (game_id, event_type, data, timestamp) VALUES ($1, $2, $3, $4)",
+            [e["game_id"], e["event_type"], json.dumps(e["data"], ensure_ascii=False), e["timestamp"]]
         )
-    conn.commit()
-    cur.close()
 
 # ─── Main ────────────────────────────────────────────────────────
 def run_training(num_games=5000):
     print(f"🚀 {num_games} games simulation ጀምሯል...")
 
-    conn = psycopg2.connect(DATABASE_URL)
+    create_table()
     total_events = 0
 
     for game_id in range(1, num_games + 1):
         events = simulate_game(game_id)
-        save_events(events, conn)
+        save_events(events)
         total_events += len(events)
 
         if game_id % 500 == 0:
             print(f"✅ {game_id}/{num_games} games — {total_events} events")
 
-    conn.close()
     print(f"\n🎉 ተጠናቋል! {num_games} games, {total_events} events → PostgreSQL")
 
 if __name__ == "__main__":
