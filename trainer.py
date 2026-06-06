@@ -4,7 +4,7 @@ import psycopg2
 import psycopg2.extras
 from datetime import datetime, timedelta
 from config import get_game_config, DATABASE_URL
-from game_logic import Board, parse_request
+from game_logic import Board
 
 cfg = get_game_config()
 
@@ -15,33 +15,47 @@ AMHARIC_NAMES = [
     "እስቲፋኖስ", "ቤዛዊት", "ሙሉወርቅ", "ትዕግስት", "ፀጋዬ", "ገብሩ", "አስቴር",
     "ሕይወት", "ዘሪቱ", "ቃልኪዳን", "ኤፍሬም", "ቢኒያም", "ስምረት", "ዲና"
 ]
-
 ENGLISH_NAMES = [
     "Abel", "Yonas", "Miki", "Sara", "Helen", "Biruk", "Nati", "Sam",
     "John", "Mary", "Alex", "Liya", "Eden", "Soli", "Bini"
 ]
-
 ALL_NAMES = AMHARIC_NAMES + ENGLISH_NAMES
 
-# ─── Request Styles ──────────────────────────────────────────────
+# ─── Helpers ─────────────────────────────────────────────────────
 def random_half_keyword():
     return random.choice(["+", "g", "gm", "gmash", "half", "÷", "ግ", "ግማሽ", "በግማሽ"])
 
-def random_full_keyword():
-    return random.choice(["ሙሉ", "mulu", "bemulu", "full", ""])
-
 def format_block_request(block, is_half, lang="am"):
     kw = random_half_keyword() if is_half else ""
-    styles = [
-        f"{block:02d}{kw}",
-        f"{block}{kw}",
-        f"{block:02d} {kw}".strip(),
-    ]
+    styles = [f"{block:02d}{kw}", f"{block}{kw}"]
     if lang == "en":
         styles += [f"{block} take", f"give me {block}"]
     else:
         styles += [f"{block} ያዝ", f"{block:02d} ያዝ"]
     return random.choice(styles)
+
+def display_board(board):
+    cfg = get_game_config()
+    lines = []
+    for i in range(1, cfg["slots_total"] + 1):
+        slot = board.slots[i]
+        block_start = ((i-1) // cfg["slots_per_person"]) * cfg["slots_per_person"] + 1
+        if i == block_start and slot.name:
+            mark     = "✅" if slot.paid_main else ""
+            reminder = "❓" if slot.reminder  else ""
+            if slot.partner:
+                pmark = "✅" if slot.paid_partner else ""
+                lines.append(f"{i:02d}# {slot.name}{mark}{reminder}+ {slot.partner}{pmark}")
+            elif slot.is_half:
+                lines.append(f"{i:02d}# {slot.name}{mark}{reminder}+")
+            else:
+                lines.append(f"{i:02d}# {slot.name}{mark}{reminder}")
+        else:
+            lines.append(f"{i:02d}#")
+    return "\n".join(lines)
+
+def display_remaining(free_blocks, keyword="ቀሪ"):
+    return keyword + "\n" + "\n".join(f"{b:02d}" for b in free_blocks)
 
 # ─── Simulate 1 Game ─────────────────────────────────────────────
 def simulate_game(game_id):
@@ -52,6 +66,8 @@ def simulate_game(game_id):
 
     total_blocks = cfg["slots_total"] // cfg["slots_per_person"]
     used_names   = []
+    msg_count    = 0
+    board_active = False  # 7 ቁጥር አልፏል?
 
     def log(event_type, data):
         events.append({
@@ -81,33 +97,70 @@ def simulate_game(game_id):
 
         if success:
             used_names.append(name)
-            req = format_block_request(block, is_half, lang)
+            req         = format_block_request(block, is_half, lang)
+            free_blocks = board.get_free_blocks()
+            remaining   = len(free_blocks)
 
-            remaining_blocks = sum(1 for b in range(1, total_blocks+1) if board.is_block_free(b))
-            if remaining_blocks == 0:
-                bot_reply = "ተሞልቷል! ✅" if lang == "en" else "ጨዋታ ተሞልቷል 🙏"
-            elif remaining_blocks <= cfg["low_slots_threshold"]:
-                bot_reply = "Hurry up! 🙏" if lang == "en" else "እሺ ይፍጠን 🙏"
+            # Bot reply
+            if remaining == 0:
+                bot_reply = "ጨዋታ ተሞልቷል 🙏" if lang == "am" else "Game is full 🙏"
+            elif remaining <= cfg["low_slots_threshold"]:
+                bot_reply = "እሺ ይፍጠን 🙏" if lang == "am" else "Hurry up! 🙏"
             else:
-                bot_reply = random.choice([
-                    "እሺ 🙏 ገቢ", "ቤተሰብ ገቢ 🙏", "ገቢ እንዳይረሳ 🙏"
-                ]) if lang == "am" else random.choice([
-                    "Done 🙏 registered", "Got it 🙏"
-                ])
+                bot_reply = random.choice(
+                    ["እሺ 🙏 ገቢ", "ቤተሰብ ገቢ 🙏", "ገቢ እንዳይረሳ 🙏"]
+                ) if lang == "am" else random.choice(
+                    ["Done 🙏 registered", "Got it 🙏"]
+                )
 
             log("registration", {
-                "user_request": req,
-                "block": block,
-                "name": name,
-                "is_half": is_half,
-                "partner": partner,
-                "bot_reply": bot_reply,
-                "lang": lang,
+                "user_request": req, "block": block,
+                "name": name, "is_half": is_half,
+                "partner": partner, "bot_reply": bot_reply,
+                "lang": lang, "remaining_blocks": remaining,
             })
+
+            msg_count += 1
+
+            # ── Board/ቀሪ trigger ──────────────────────────────
+            keyword = random.choice(["ቀሪ", "ነቃይ"])
+
+            if remaining == cfg["low_slots_threshold"]:
+                # 7 ቁጥር ሲቀር — 1ኛ ጊዜ board + ቀሪ
+                board_active = True
+                msg_count    = 0
+                log("board_with_remaining", {
+                    "trigger":           "low_slots",
+                    "board":             display_board(board),
+                    "remaining":         display_remaining(free_blocks, keyword),
+                    "remaining_keyword": keyword,
+                    "free_count":        remaining,
+                    "bot_action":        "send_board_and_remaining",
+                })
+
+            elif board_active:
+                # ቀሪ → ሁሌ 1 message ሲመጣ ይሰረዛል
+                log("remaining_update", {
+                    "trigger":           "slot_taken",
+                    "remaining":         display_remaining(free_blocks, keyword),
+                    "remaining_keyword": keyword,
+                    "bot_action":        "delete_old_remaining_send_new",
+                })
+
+                # 4 messages → board ይሰረዛል
+                if msg_count >= 4:
+                    msg_count = 0
+                    log("board_move", {
+                        "trigger":           "4_messages",
+                        "board":             display_board(board),
+                        "remaining":         display_remaining(free_blocks, keyword),
+                        "remaining_keyword": keyword,
+                        "bot_action":        "delete_old_board_send_new",
+                    })
+
         else:
             log("registration_failed", {
-                "block": block,
-                "reason": reason,
+                "block": block, "reason": reason,
                 "bot_reply": "ተቀደምክ 🙏" if reason == "taken" else "ይቅርታ 🙏",
             })
 
@@ -117,90 +170,85 @@ def simulate_game(game_id):
     for num, slot in board.slots.items():
         if not slot.is_taken:
             continue
-        block = (num - 1) // cfg["slots_per_person"] + 1
-        if num != board.get_block_start(block):
+        blk = (num - 1) // cfg["slots_per_person"] + 1
+        if num != board.get_block_start(blk):
             continue
-
         if random.random() < 0.8:
             amount = cfg["price_half"] if slot.is_half else cfg["price_full"]
             if slot.partner and random.random() < 0.5:
                 amount = cfg["price_half"]
-
-            updated, remaining = board.apply_payment(slot.name, amount)
-
-            if remaining == 0:
-                bot_reply = f"{slot.name} ✅ ገቢ 🙏"
-            else:
-                bot_reply = f"{slot.name} {remaining}ብር ቀርቷል ጨምር 🙏"
-
+            updated, rem = board.apply_payment(slot.name, amount)
             log("payment", {
-                "name": slot.name,
-                "amount": amount,
-                "updated_slots": updated,
-                "remaining": remaining,
-                "bot_reply": bot_reply,
+                "name": slot.name, "amount": amount,
+                "updated_slots": updated, "remaining": rem,
+                "bot_reply": f"{slot.name} ✅ ገቢ 🙏" if rem == 0
+                             else f"{slot.name} {rem}ብር ቀርቷል ጨምር 🙏",
             })
-
         now += timedelta(minutes=random.randint(1, 5))
 
     # ── 3. Unpaid Warning ─────────────────────────────────────────
     unpaid = board.get_unpaid_blocks()
     if unpaid:
-        warning_text = "⚠️ 2 ደቂቃ ይቀራል! ያልከፈሉ:\n" + "\n".join(unpaid)
         log("unpaid_warning", {
             "unpaid_blocks": unpaid,
-            "bot_message": warning_text,
+            "bot_message":   "⚠️ 2 ደቂቃ ይቀራል! ያልከፈሉ:\n" + "\n".join(unpaid),
         })
-
         for b_str in unpaid:
             b     = int(b_str.replace("+", ""))
             start = board.get_block_start(b)
             slot  = board.slots[start]
             if random.random() < 0.6:
                 amount = cfg["price_half"] if "+" in b_str else cfg["price_full"]
-                updated, _ = board.apply_payment(slot.name, amount)
+                board.apply_payment(slot.name, amount)
                 log("late_payment", {"block": b, "name": slot.name, "amount": amount})
             else:
                 for i in range(cfg["slots_per_person"]):
                     board.slots[start + i].__init__(start + i)
                 log("slot_removed", {"block": b, "reason": "unpaid timeout"})
-
         now += timedelta(minutes=2)
 
-    # ── 4. Winner Selection ──────────────────────────────────────
-    taken_blocks  = [b for b in range(1, total_blocks + 1) if not board.is_block_free(b)]
-    winners_count = min(cfg["winners_count"], len(taken_blocks))
-    winner_blocks = random.sample(taken_blocks, winners_count)
-    prizes        = [cfg["prize_1st"], cfg["prize_2nd"], cfg["prize_3rd"]]
-    winner_names  = []
+    # ── 4. All Paid → መልካም ዕድል ─────────────────────────────────
+    log("all_paid_board", {
+        "board":       display_board(board),
+        "bot_message": "🎰 ዕጣ ማውጫ ሰዓት ደረሰ! መልካም ዕድል 🙏",
+        "bot_action":  "send_final_board_keep_forever",
+    })
 
-    for rank, block in enumerate(winner_blocks):
-        start = board.get_block_start(block)
+    # ── 5. Winner ────────────────────────────────────────────────
+    taken   = [b for b in range(1, total_blocks+1) if not board.is_block_free(b)]
+    w_count = min(cfg["winners_count"], len(taken))
+    w_blocks= random.sample(taken, w_count)
+    prizes  = [cfg["prize_1st"], cfg["prize_2nd"], cfg["prize_3rd"]]
+    medals  = ["🥇 1ኛ", "🥈 2ኛ", "🥉 3ኛ"]
+    w_names = []
+
+    for rank, blk in enumerate(w_blocks):
+        start = board.get_block_start(blk)
         name  = board.slots[start].name
         prize = prizes[rank] if rank < len(prizes) else 0
-        winner_names.append(name)
-        log("winner", {"rank": rank + 1, "block": block, "name": name, "prize": prize})
-
-    # ── 5. Winner Balance ─────────────────────────────────────────
-    for rank, (block, name) in enumerate(zip(winner_blocks, winner_names)):
-        prize   = prizes[rank] if rank < len(prizes) else 0
-        sent    = random.randint(0, prize)
-        sent    = (sent // cfg["price_half"]) * cfg["price_half"]
-        updated, removed, balance = board.apply_winner_balance(name, prize, sent)
-        log("winner_balance", {
-            "name": name,
-            "prize": prize,
-            "admin_sent": sent,
-            "balance": balance,
-            "auto_approved": updated,
-            "auto_removed": removed,
-            "admin_message": f"{rank+1}={sent}",
+        w_names.append(name)
+        log("winner", {
+            "rank": rank+1, "block": blk, "name": name, "prize": prize,
+            "bot_message": f"{medals[rank]}: {name} — {prize}ብር",
         })
 
-    # ── 6. New Board ─────────────────────────────────────────────
-    log("new_board", {
-        "message": "አዲስ ጨዋታ ተጀምሯል 🎰",
-        "board": board.display(),
+    # ── 6. Winner Balance ─────────────────────────────────────────
+    for rank, (blk, name) in enumerate(zip(w_blocks, w_names)):
+        prize   = prizes[rank] if rank < len(prizes) else 0
+        sent    = (random.randint(0, prize) // cfg["price_half"]) * cfg["price_half"]
+        updated, removed, balance = board.apply_winner_balance(name, prize, sent)
+        log("winner_balance", {
+            "name": name, "prize": prize,
+            "admin_sent": sent, "balance": balance,
+            "auto_approved": updated, "auto_removed": removed,
+            "admin_message": f"{rank+1}={sent}",
+            "note": "✅ ብቻ ይጠፋል — slot/ስም አይጠፋም",
+        })
+
+    # ── 7. New Game ───────────────────────────────────────────────
+    log("new_game", {
+        "bot_message": "🎰 አዲስ ጨዋታ ተጀምሯል! መልካም ዕድል 🙏",
+        "bot_action":  "send_new_empty_board",
     })
 
     return events
@@ -209,32 +257,39 @@ def simulate_game(game_id):
 def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
-def create_table():
-    print("📦 Table እየተፈጠረ ነው...")
+def setup_db():
+    """Table ይፍጠር + አሮጌ data ያጸዳ"""
+    print("📦 DB setup...")
     conn = get_conn()
     cur  = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS training_events (
-            id SERIAL PRIMARY KEY,
-            game_id INTEGER,
+            id         SERIAL PRIMARY KEY,
+            game_id    INTEGER,
             event_type TEXT,
-            data JSONB,
-            timestamp TIMESTAMP
+            data       JSONB,
+            timestamp  TIMESTAMP
         )
     """)
+    # አሮጌ data ጥፋ — duplicate እንዳይሆን
+    cur.execute("TRUNCATE TABLE training_events RESTART IDENTITY;")
     conn.commit()
     cur.close()
     conn.close()
-    print("✅ Table ተፈጠረ!")
+    print("✅ DB ready — አሮጌ data ጠፍቷል!")
 
 def save_events(events):
+    if not events:
+        return
     conn = get_conn()
     cur  = conn.cursor()
-    for e in events:
-        cur.execute(
-            "INSERT INTO training_events (game_id, event_type, data, timestamp) VALUES (%s, %s, %s, %s)",
-            [e["game_id"], e["event_type"], json.dumps(e["data"], ensure_ascii=False), e["timestamp"]]
-        )
+    psycopg2.extras.execute_values(
+        cur,
+        "INSERT INTO training_events (game_id, event_type, data, timestamp) VALUES %s",
+        [(e["game_id"], e["event_type"],
+          json.dumps(e["data"], ensure_ascii=False),
+          e["timestamp"]) for e in events]
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -242,25 +297,28 @@ def save_events(events):
 # ─── Main ────────────────────────────────────────────────────────
 def run_training(num_games=5000):
     print(f"🚀 {num_games} games simulation ጀምሯል...")
-    print(f"⏰ {datetime.now().strftime('%H:%M:%S')} — DB connection እየሞከረ ነው...")
-    create_table()
-    print(f"✅ {datetime.now().strftime('%H:%M:%S')} — DB ready! Training ጀምሯል...\n")
+    setup_db()
 
     total_events = 0
+    chunk_events = []
+    CHUNK        = 100  # 100 games አንድ ጊዜ → DB
 
     for game_id in range(1, num_games + 1):
-        print(f"🎮 Game {game_id}/{num_games} እየሠራ ነው...", flush=True)
         events = simulate_game(game_id)
-        save_events(events)
+        chunk_events.extend(events)
         total_events += len(events)
-        print(f"   ✅ Game {game_id} ተጠናቀቀ — {len(events)} events → DB", flush=True)
 
-        if game_id % 100 == 0:
-            print(f"\n📊 Progress: {game_id}/{num_games} ({int(game_id/num_games*100)}%) — Total events: {total_events}", flush=True)
-            print(f"⏰ Time: {datetime.now().strftime('%H:%M:%S')}\n", flush=True)
+        if game_id % CHUNK == 0:
+            save_events(chunk_events)
+            chunk_events = []
+            print(f"✅ {game_id}/{num_games} ({int(game_id/num_games*100)}%) — {total_events} events", flush=True)
 
-    print(f"\n🎉 ተጠናቋል! {num_games} games, {total_events} events → PostgreSQL")
-    print(f"⏰ Finished: {datetime.now().strftime('%H:%M:%S')}")
+    # ቀሪ
+    if chunk_events:
+        save_events(chunk_events)
+
+    print(f"\n🎉 ተጠናቋል! {num_games} games → {total_events} events → PostgreSQL")
+    print(f"⏰ {datetime.now().strftime('%H:%M:%S')}")
 
 if __name__ == "__main__":
     run_training(5000)
