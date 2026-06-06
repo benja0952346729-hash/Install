@@ -34,12 +34,58 @@ def format_block_request(block, is_half, lang="am"):
         styles += [f"{block} ያዝ", f"{block:02d} ያዝ"]
     return random.choice(styles)
 
-def display_board(board):
-    cfg = get_game_config()
+def get_block_start(block_number, slots_per_person):
+    """Block number → first slot number"""
+    return (block_number - 1) * slots_per_person + 1
+
+def build_board_header(cfg):
+    """Board ከላይ — game rules"""
+    spp   = cfg["slots_per_person"]
+    total = cfg["slots_total"]
+    users = total // spp
+    pf    = cfg["price_full"]
+    ph    = cfg["price_half"]
+    p1    = cfg["prize_1st"]
+    p2    = cfg["prize_2nd"]
+    p3    = cfg["prize_3rd"]
+
+    return (
+        f"በ {pf} ብር {spp} ቁጥሮችን በተከታታይ በመያዝ እድሎን ይሞክሩ "
+        f"ለ {users} ሰው ብቻ ፈጣን ዕድል መልካም ዕድል\n\n"
+        f"መደብ 👉በ {pf} ብር \n"
+        f"       👉ግማሽ {ph} ብር \n\n"
+        f"1ኛ 🥇{p1} ብር \n"
+        f"2ኛ 🥈{p2}\n"
+        f"3ኛ 🥉{p3}\n"
+    )
+
+def build_board_footer(cfg):
+    """Board ከታች — payment accounts"""
     lines = []
-    for i in range(1, cfg["slots_total"] + 1):
-        slot = board.slots[i]
-        block_start = ((i-1) // cfg["slots_per_person"]) * cfg["slots_per_person"] + 1
+    if cfg.get("cbe_account"):
+        lines.append(f"CBE {cfg['cbe_account']} {cfg.get('cbe_name','')}")
+    if cfg.get("awash_account"):
+        lines.append(f"አዋሽ  {cfg['awash_account']}")
+    if cfg.get("dashen_account"):
+        lines.append(f"ዳሽን  {cfg['dashen_account']}")
+    if cfg.get("tele_birr"):
+        lines.append(f"ቴሌ ብር {cfg['tele_birr']}")
+    return "\n".join(lines)
+
+def display_board(board):
+    """Board display — blank line between blocks"""
+    cfg   = get_game_config()
+    spp   = cfg["slots_per_person"]
+    total = cfg["slots_total"]
+    lines = []
+
+    # Header
+    lines.append(build_board_header(cfg))
+
+    for i in range(1, total + 1):
+        slot        = board.slots[i]
+        block_start = ((i - 1) // spp) * spp + 1
+
         if i == block_start and slot.name:
             mark     = "✅" if slot.paid_main else ""
             reminder = "❓" if slot.reminder  else ""
@@ -52,10 +98,24 @@ def display_board(board):
                 lines.append(f"{i:02d}# {slot.name}{mark}{reminder}")
         else:
             lines.append(f"{i:02d}#")
+
+        # Blank line after each block
+        if i % spp == 0 and i < total:
+            lines.append("")
+
+    # Footer
+    lines.append("")
+    lines.append(build_board_footer(cfg))
+
     return "\n".join(lines)
 
-def display_remaining(free_blocks, keyword="ቀሪ"):
-    return keyword + "\n" + "\n".join(f"{b:02d}" for b in free_blocks)
+def display_remaining(free_blocks, slots_per_person, keyword="ቀሪ"):
+    """ቀሪ/ነቃይ — block start slot ያሳያል (vertical)"""
+    lines = [keyword]
+    for b in free_blocks:
+        start = get_block_start(b, slots_per_person)
+        lines.append(f"{start:02d}")
+    return "\n".join(lines)
 
 # ─── Simulate 1 Game ─────────────────────────────────────────────
 def simulate_game(game_id):
@@ -63,11 +123,12 @@ def simulate_game(game_id):
     events = []
     cfg    = get_game_config()
     now    = datetime(2024, 1, 1) + timedelta(days=random.randint(0, 365))
+    spp    = cfg["slots_per_person"]
 
-    total_blocks = cfg["slots_total"] // cfg["slots_per_person"]
+    total_blocks = cfg["slots_total"] // spp
     used_names   = []
     msg_count    = 0
-    board_active = False  # 7 ቁጥር አልፏል?
+    board_active = False
 
     def log(event_type, data):
         events.append({
@@ -101,7 +162,6 @@ def simulate_game(game_id):
             free_blocks = board.get_free_blocks()
             remaining   = len(free_blocks)
 
-            # Bot reply
             if remaining == 0:
                 bot_reply = "ጨዋታ ተሞልቷል 🙏" if lang == "am" else "Game is full 🙏"
             elif remaining <= cfg["low_slots_threshold"]:
@@ -121,28 +181,26 @@ def simulate_game(game_id):
             })
 
             msg_count += 1
-
-            # ── Board/ቀሪ trigger ──────────────────────────────
             keyword = random.choice(["ቀሪ", "ነቃይ"])
 
+            # 7 ቁጥር ሲቀር → board + ቀሪ
             if remaining == cfg["low_slots_threshold"]:
-                # 7 ቁጥር ሲቀር — 1ኛ ጊዜ board + ቀሪ
                 board_active = True
                 msg_count    = 0
                 log("board_with_remaining", {
                     "trigger":           "low_slots",
                     "board":             display_board(board),
-                    "remaining":         display_remaining(free_blocks, keyword),
+                    "remaining":         display_remaining(free_blocks, spp, keyword),
                     "remaining_keyword": keyword,
                     "free_count":        remaining,
                     "bot_action":        "send_board_and_remaining",
                 })
 
             elif board_active:
-                # ቀሪ → ሁሌ 1 message ሲመጣ ይሰረዛል
+                # ቀሪ ሁሌ ይሰረዛል
                 log("remaining_update", {
                     "trigger":           "slot_taken",
-                    "remaining":         display_remaining(free_blocks, keyword),
+                    "remaining":         display_remaining(free_blocks, spp, keyword),
                     "remaining_keyword": keyword,
                     "bot_action":        "delete_old_remaining_send_new",
                 })
@@ -153,7 +211,7 @@ def simulate_game(game_id):
                     log("board_move", {
                         "trigger":           "4_messages",
                         "board":             display_board(board),
-                        "remaining":         display_remaining(free_blocks, keyword),
+                        "remaining":         display_remaining(free_blocks, spp, keyword),
                         "remaining_keyword": keyword,
                         "bot_action":        "delete_old_board_send_new",
                     })
@@ -170,7 +228,7 @@ def simulate_game(game_id):
     for num, slot in board.slots.items():
         if not slot.is_taken:
             continue
-        blk = (num - 1) // cfg["slots_per_person"] + 1
+        blk = (num - 1) // spp + 1
         if num != board.get_block_start(blk):
             continue
         if random.random() < 0.8:
@@ -202,7 +260,7 @@ def simulate_game(game_id):
                 board.apply_payment(slot.name, amount)
                 log("late_payment", {"block": b, "name": slot.name, "amount": amount})
             else:
-                for i in range(cfg["slots_per_person"]):
+                for i in range(spp):
                     board.slots[start + i].__init__(start + i)
                 log("slot_removed", {"block": b, "reason": "unpaid timeout"})
         now += timedelta(minutes=2)
@@ -242,7 +300,6 @@ def simulate_game(game_id):
             "admin_sent": sent, "balance": balance,
             "auto_approved": updated, "auto_removed": removed,
             "admin_message": f"{rank+1}={sent}",
-            "note": "✅ ብቻ ይጠፋል — slot/ስም አይጠፋም",
         })
 
     # ── 7. New Game ───────────────────────────────────────────────
@@ -258,7 +315,6 @@ def get_conn():
     return psycopg2.connect(DATABASE_URL)
 
 def setup_db():
-    """Table ይፍጠር + አሮጌ data ያጸዳ"""
     print("📦 DB setup...")
     conn = get_conn()
     cur  = conn.cursor()
@@ -271,7 +327,6 @@ def setup_db():
             timestamp  TIMESTAMP
         )
     """)
-    # አሮጌ data ጥፋ — duplicate እንዳይሆን
     cur.execute("TRUNCATE TABLE training_events RESTART IDENTITY;")
     conn.commit()
     cur.close()
@@ -301,7 +356,7 @@ def run_training(num_games=5000):
 
     total_events = 0
     chunk_events = []
-    CHUNK        = 100  # 100 games አንድ ጊዜ → DB
+    CHUNK        = 100
 
     for game_id in range(1, num_games + 1):
         events = simulate_game(game_id)
@@ -313,7 +368,6 @@ def run_training(num_games=5000):
             chunk_events = []
             print(f"✅ {game_id}/{num_games} ({int(game_id/num_games*100)}%) — {total_events} events", flush=True)
 
-    # ቀሪ
     if chunk_events:
         save_events(chunk_events)
 
@@ -321,4 +375,4 @@ def run_training(num_games=5000):
     print(f"⏰ {datetime.now().strftime('%H:%M:%S')}")
 
 if __name__ == "__main__":
-    run_training(500)
+    run_training(5000)
