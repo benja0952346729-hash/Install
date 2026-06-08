@@ -1,0 +1,273 @@
+import os
+import re
+import json
+import base64
+import logging
+from typing import Optional
+
+import httpx
+from groq import Groq
+from database import (
+    save_sms_payment,
+    save_screenshot_payment,
+    get_sms_payment_by_ref,
+    is_ref_matched_already,
+    cleanup_old_payments,
+)
+
+logger = logging.getLogger(__name__)
+
+groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
+
+
+# ============================================================
+# SMS WEBHOOK
+# ============================================================
+async def handle_sms_webhook(raw_sms: str) -> dict:
+    """Android SMS Forwarder ከሚልከው SMS ይቀበላል"""
+    logger.info(f"[SMS] Received: {raw_sms}")
+
+    parsed = await parse_sms(raw_sms)
+    if not parsed:
+        logger.info("[SMS] Could not parse SMS")
+        return {"success": False, "reason": "unparseable"}
+
+    ref_no = parsed.get("refNo")
+    amount = parsed.get("amount")
+    sms_type = parsed.get("type")
+
+    logger.info(f"[SMS] Parsed → Type: {sms_type} | Ref: {ref_no} | Amount: {amount}")
+
+    if not ref_no:
+        return {"success": False, "reason": "no_ref"}
+
+    # Duplicate check
+    if get_sms_payment_by_ref(ref_no):
+        logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
+        return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
+
+    result = save_sms_payment(ref_no, amount, sms_type, raw_sms)
+    return {"success": True, "matched": result.get("matched"), **parsed}
+
+
+# ============================================================
+# PAYMENT PHOTO HANDLER
+# ============================================================
+async def handle_payment_photo(bot, msg):
+    """Group ውስጥ screenshot ሲላክ"""
+    chat_id = msg.chat.id
+    telegram_id = msg.from_user.id
+    username = msg.from_user.username or msg.from_user.first_name or "Unknown"
+
+    if str(chat_id) != str(GROUP_CHAT_ID):
+        return
+
+    try:
+        photo = msg.photo[-1]
+        file = await bot.get_file(photo.file_id)
+        file_url = f"https://api.telegram.org/file/bot{os.getenv('BOT_TOKEN')}/{file.file_path}"
+        image_base64 = await download_image_as_base64(file_url)
+
+        await msg.reply_text("⏳ Screenshot እየተረጋገጠ ነው...")
+
+        analysis = await analyze_screenshot(image_base64)
+        photo_type = analysis.get("photoType")
+        ref_no = analysis.get("refNo")
+
+        # Payment ያልሆነ ፎቶ
+        if photo_type not in ("CBE", "Telebirr"):
+            desc = await describe_photo_in_amharic(analysis.get("description", ""))
+            await msg.reply_text(desc)
+            return
+
+        if not ref_no:
+            await msg.reply_text("⚠️ Reference number ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
+            return
+
+        # Duplicate check
+        if is_ref_matched_already(ref_no):
+            await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
+            return
+
+        result = save_screenshot_payment(telegram_id, ref_no, photo_type, analysis.get("description", ""))
+
+        if result.get("matched"):
+            await notify_match(bot, result["matched"], msg.message_id, chat_id)
+        else:
+            await msg.reply_text(
+                f"✅ Screenshot ተቀብሏል። SMS ሲረጋገጥ ይወጣዋል...\n🔖 Ref: {ref_no}"
+            )
+
+    except Exception as e:
+        logger.error(f"[Payment] Photo handler error: {e}")
+        await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይሞክሩ።")
+
+
+# ============================================================
+# SMS PARSER
+# ============================================================
+async def parse_sms(sms: str) -> Optional[dict]:
+
+    # CBE — Direct credit
+    m = re.search(r"Credited with ETB ([\d,]+\.?\d*).+?Ref No\s+([A-Z0-9]+)", sms, re.DOTALL)
+    if m:
+        return {"type": "CBE", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
+
+    # CBE — Transfer with URL receipt
+    m = re.search(
+        r"(?:received|transferred) ETB ([\d,]+\.?\d*).+(https://Mbreciept\S+)",
+        sms, re.DOTALL | re.IGNORECASE
+    )
+    if m:
+        amount = float(m.group(1).replace(",", ""))
+        ref_no = await fetch_ref_from_url(m.group(2).strip())
+        return {"type": "CBE", "amount": amount, "refNo": ref_no}
+
+    # Telebirr → CBE transfer
+    m = re.search(
+        r"transferred ETB ([\d,]+\.?\d*).+?bank transaction number is\s+([A-Z0-9]+)",
+        sms, re.DOTALL
+    )
+    if m:
+        return {"type": "Telebirr", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
+
+    # Telebirr — Received
+    m = re.search(
+        r"received ETB ([\d,]+\.?\d*).+?transaction number is\s+([A-Z0-9]+)",
+        sms, re.DOTALL
+    )
+    if m:
+        return {"type": "Telebirr", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
+
+    return None
+
+
+# ============================================================
+# CBE RECEIPT URL → REF
+# ============================================================
+async def fetch_ref_from_url(url: str) -> Optional[str]:
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.get(jina_url, headers={
+                "Accept": "text/plain",
+                "User-Agent": "Mozilla/5.0",
+            })
+            if res.status_code != 200:
+                return None
+            text = res.text
+
+        patterns = [
+            r"VAT Receipt No[:\s]+([A-Z0-9]+)",
+            r"Reference No\.\s*\(VAT Invoice No\)[:\s]+([A-Z0-9]+)",
+            r"Reference No[:\s]+([A-Z0-9]+)",
+            r"Ref No[:\s]+([A-Z0-9]+)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                return m.group(1)
+        return None
+    except Exception as e:
+        logger.error(f"[RefFetch] Error: {e}")
+        return None
+
+
+# ============================================================
+# GROQ — SCREENSHOT ANALYZER
+# ============================================================
+async def analyze_screenshot(image_base64: str) -> dict:
+    prompt = """You are a payment receipt analyzer. Look at this image and extract information.
+
+CRITICAL: Read the reference number with extreme care — check 0/O, 1/I, 5/S confusion.
+
+Respond ONLY in this exact JSON format:
+{
+  "photoType": "CBE" | "Telebirr" | "other",
+  "refNo": "reference number or null",
+  "description": "brief description"
+}
+
+- CBE = Commercial Bank of Ethiopia receipt
+- Telebirr = Telebirr payment receipt
+- refNo: CBE → "VAT Receipt No" or "Ref No" | Telebirr → "transaction number\""""
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            max_tokens=300,
+            temperature=0.1,
+        )
+        text = response.choices[0].message.content.strip()
+        return json.loads(text.replace("```json", "").replace("```", "").strip())
+    except Exception as e:
+        logger.error(f"[Screenshot] Analysis error: {e}")
+        return {"photoType": "other", "refNo": None, "description": "Could not analyze"}
+
+
+# ============================================================
+# GROQ — አማርኛ ማብራሪያ
+# ============================================================
+async def describe_photo_in_amharic(description: str) -> str:
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'ይህ ምስል "{description}" ነው። '
+                    "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
+                ),
+            }],
+            max_tokens=100,
+            temperature=0.3,
+        )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"[Describe] Error: {e}")
+        return "⚠️ ምስሉ ሊነበብ አልቻለም።"
+
+
+# ============================================================
+# MATCH NOTIFICATION
+# ============================================================
+async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
+    telegram_id = match_data["telegram_id"]
+    amount = match_data["amount"]
+    pay_type = match_data["type"]
+    ref_no = match_data["refNo"]
+
+    message = (
+        f"✅ ክፍያ ተረጋግጧል!\n"
+        f"💰 Amount: ETB {amount}\n"
+        f"🏦 Via: {pay_type}\n"
+        f"🔖 Ref: {ref_no}\n"
+        f"👤 Telegram ID: {telegram_id}"
+    )
+
+    logger.info(f"[Match] ✅ Payment approved — TelegramID: {telegram_id} | ETB {amount} | {pay_type}")
+
+    target_chat = chat_id or GROUP_CHAT_ID
+    if target_chat:
+        if reply_msg_id:
+            await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
+        else:
+            await bot.send_message(chat_id=target_chat, text=message)
+
+
+# ============================================================
+# HELPERS
+# ============================================================
+async def download_image_as_base64(url: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        res = await client.get(url)
+        res.raise_for_status()
+        return base64.b64encode(res.content).decode("utf-8")
