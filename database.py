@@ -72,7 +72,6 @@ def init_db():
         );
     """)
 
-    # Existing database ላይ column እና table ካልተጨመረ ጨምር
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
     cur.execute("""
         DO $$
@@ -178,14 +177,12 @@ def register_number(game_id, user_id, user_name, number, is_half):
     """, (game_id, number))
     existing = cur.fetchall()
 
-    # ዋጋ ያግኝ
     cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
     price_row = cur.fetchone()
     price_full = float(price_row[0] or 0)
     price_half = float(price_row[1] or 0)
     cost = price_half if is_half else price_full
 
-    # Balance ያግኝ
     cur.execute("""
         SELECT balance FROM user_balance
         WHERE game_id=%s AND telegram_id=%s
@@ -230,6 +227,7 @@ def register_number(game_id, user_id, user_name, number, is_half):
     conn.close()
     return "taken"
 
+
 def get_taken_numbers(game_id):
     rows = get_registrations(game_id)
     result = {}
@@ -241,7 +239,7 @@ def get_taken_numbers(game_id):
 
 
 # ============================================================
-# PAYMENT CONFIRMATION — ✅ ዋናው logic
+# PAYMENT CONFIRMATION
 # ============================================================
 
 def confirm_payment(telegram_id: int, amount: float) -> dict:
@@ -319,6 +317,48 @@ def get_paid_numbers(game_id: int) -> dict:
             result[number] = set()
         result[number].add(slot)
     return result
+
+
+# ============================================================
+# ADMIN — MANUAL REMOVE & PAY MARK
+# ============================================================
+
+def admin_remove_player(game_id: int, number: int, slot: int = None):
+    """
+    slot=None  → ያ number ላይ ያሉ ሁሉም ይወጣሉ
+    slot=1/2   → ያ slot ብቻ ይወጣል
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    if slot is None:
+        cur.execute("""
+            DELETE FROM registrations
+            WHERE game_id=%s AND number=%s
+        """, (game_id, number))
+    else:
+        cur.execute("""
+            DELETE FROM registrations
+            WHERE game_id=%s AND number=%s AND slot=%s
+        """, (game_id, number, slot))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def admin_mark_paid(game_id: int, number: int, slot: int, paid: bool = True):
+    """
+    paid=True  → ✅ ያደርጋል
+    paid=False → ✅ ያነሳል
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE registrations SET is_paid=%s
+        WHERE game_id=%s AND number=%s AND slot=%s
+    """, (paid, game_id, number, slot))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 # ============================================================
