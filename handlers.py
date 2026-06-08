@@ -43,10 +43,10 @@ async def handle_sms_webhook(raw_sms: str) -> dict:
     if not ref_no:
         return {"success": False, "reason": "no_ref"}
 
-    # Duplicate check — ለጊዜው disabled (testing)
-    # if get_sms_payment_by_ref(ref_no):
-    #     logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
-    #     return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
+    # Duplicate check
+    if get_sms_payment_by_ref(ref_no):
+        logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
+        return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
 
     result = save_sms_payment(ref_no, amount, sms_type, raw_sms)
     return {"success": True, "matched": result.get("matched"), **parsed}
@@ -98,10 +98,10 @@ async def handle_payment_photo(bot, msg):
             await msg.reply_text("⚠️ Reference number ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
-        # Duplicate check — ለጊዜው disabled (testing)
-        # if is_ref_matched_already(ref_no):
-        #     await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
-        #     return
+        # Duplicate check
+        if is_ref_matched_already(ref_no):
+            await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
+            return
 
         result = save_screenshot_payment(
             telegram_id, ref_no, photo_type, analysis.get("description", "")
