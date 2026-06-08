@@ -1,4 +1,5 @@
 import psycopg2
+import json as _json
 from datetime import datetime, timedelta
 from config import DATABASE_URL
 
@@ -52,7 +53,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS screenshot_payments (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
-            ref_no TEXT UNIQUE NOT NULL,
+            ref_no TEXT,
             pay_type TEXT,
             description TEXT,
             matched BOOLEAN DEFAULT FALSE,
@@ -187,67 +188,123 @@ def get_taken_numbers(game_id):
 
 
 # ============================================================
-# SMS PAYMENTS
+# FUZZY MATCH — 0/O, 1/I, 5/S confusion ይፈቅዳል
 # ============================================================
 
-def save_sms_payment(ref_no: str, amount, pay_type: str, raw_sms: str) -> dict:
+def fuzzy_ref_match(ref1: str, ref2: str) -> bool:
     """
-    SMS payment ያስቀምጣል። Screenshot ጋር match ካለ ያዛምዳል።
+    ሁለት ref numbers ያወዳድራል።
+    0↔O, 1↔I, 5↔S confusion ድረስ ይፈቅዳል (እስከ 2 ስህተት)
     """
-    import json as _json
+    if not ref1 or not ref2:
+        return False
+    if ref1 == ref2:
+        return True
+
+    r1 = ref1.upper()
+    r2 = ref2.upper()
+
+    if len(r1) != len(r2):
+        return False
+
+    known_confusions = [('5', 'S'), ('0', 'O'), ('1', 'I')]
+
+    def is_known(a, b):
+        return any((a == x and b == y) or (a == y and b == x) for x, y in known_confusions)
+
+    known_errors = 0
+    unknown_errors = 0
+
+    for c1, c2 in zip(r1, r2):
+        if c1 == c2:
+            continue
+        if is_known(c1, c2):
+            known_errors += 1
+        else:
+            unknown_errors += 1
+
+        if unknown_errors >= 2:
+            return False
+        if known_errors > 2:
+            return False
+        if known_errors + unknown_errors > 2:
+            return False
+
+    return True
+
+
+# ============================================================
+# TRY MATCH — ሁሉንም unmatched SMS እና screenshot cross-check
+# ============================================================
+
+def try_match(ref_no: str) -> dict:
+    """
+    አዲስ SMS ወይም screenshot ሲመጣ ሁሉንም unmatched records ያወዳድራል
+    """
+    if not ref_no:
+        return {"matched": None}
+
     conn = get_conn()
     cur = conn.cursor()
 
-    # ቀደም ሲል screenshot ከተላከ match ያድርግ
-    cur.execute("""
-        SELECT id, telegram_id, ref_no, pay_type
-        FROM screenshot_payments
-        WHERE ref_no = %s AND matched = FALSE
-    """, (ref_no,))
-    screenshot = cur.fetchone()
+    cur.execute("SELECT id, ref_no, amount, pay_type FROM sms_payments WHERE matched = FALSE")
+    all_sms = cur.fetchall()
+
+    cur.execute("SELECT id, telegram_id, ref_no FROM screenshot_payments WHERE matched = FALSE")
+    all_screenshots = cur.fetchall()
 
     matched_data = None
 
-    if screenshot:
-        scr_id, telegram_id, scr_ref, scr_type = screenshot
-        matched_data = {
-            "telegram_id": telegram_id,
-            "refNo": ref_no,
-            "amount": amount,
-            "type": pay_type,
-        }
-        matched_json = _json.dumps(matched_data)
+    for sms_id, sms_ref, amount, pay_type in all_sms:
+        for scr_id, telegram_id, scr_ref in all_screenshots:
+            if fuzzy_ref_match(sms_ref, scr_ref):
+                matched_data = {
+                    "telegram_id": telegram_id,
+                    "amount": float(amount),
+                    "type": pay_type,
+                    "refNo": sms_ref,
+                    "screenshotRef": scr_ref,
+                }
+                matched_json = _json.dumps(matched_data)
 
-        # SMS record ይፍጠር — matched=True
-        cur.execute("""
-            INSERT INTO sms_payments (ref_no, amount, pay_type, raw_sms, matched, matched_data)
-            VALUES (%s, %s, %s, %s, TRUE, %s)
-            ON CONFLICT (ref_no) DO UPDATE
-            SET matched = TRUE, matched_data = EXCLUDED.matched_data
-        """, (ref_no, amount, pay_type, raw_sms, matched_json))
+                cur.execute("""
+                    UPDATE sms_payments SET matched = TRUE, matched_data = %s WHERE id = %s
+                """, (matched_json, sms_id))
 
-        # Screenshot ን update ያድርግ
-        cur.execute("""
-            UPDATE screenshot_payments
-            SET matched = TRUE, matched_data = %s
-            WHERE id = %s
-        """, (matched_json, scr_id))
-    else:
-        # Screenshot የለም — SMS ብቻ ያስቀምጥ
-        cur.execute("""
-            INSERT INTO sms_payments (ref_no, amount, pay_type, raw_sms)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (ref_no) DO NOTHING
-        """, (ref_no, amount, pay_type, raw_sms))
+                cur.execute("""
+                    UPDATE screenshot_payments SET matched = TRUE, matched_data = %s WHERE id = %s
+                """, (matched_json, scr_id))
+
+                conn.commit()
+                cur.close()
+                conn.close()
+                return {"matched": matched_data}
 
     conn.commit()
     cur.close()
     conn.close()
-    return {"matched": matched_data}
+    return {"matched": None}
+
+
+# ============================================================
+# SMS PAYMENTS
+# ============================================================
+
+def save_sms_payment(ref_no: str, amount, pay_type: str, raw_sms: str) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO sms_payments (ref_no, amount, pay_type, raw_sms)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (ref_no) DO NOTHING
+    """, (ref_no, amount, pay_type, raw_sms))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return try_match(ref_no)
 
 
 def get_sms_payment_by_ref(ref_no: str):
-    """Ref number ያለ SMS payment ይፈልጋል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT id, ref_no, amount, pay_type FROM sms_payments WHERE ref_no = %s", (ref_no,))
@@ -264,63 +321,19 @@ def get_sms_payment_by_ref(ref_no: str):
 # ============================================================
 
 def save_screenshot_payment(telegram_id: int, ref_no: str, pay_type: str, description: str) -> dict:
-    """
-    Screenshot payment ያስቀምጣል። SMS ቀደም ሲል ከተላከ match ያድርግ።
-    """
-    import json as _json
     conn = get_conn()
     cur = conn.cursor()
-
-    # ቀደም ሲል SMS ከተላከ match ያድርግ
     cur.execute("""
-        SELECT id, ref_no, amount, pay_type
-        FROM sms_payments
-        WHERE ref_no = %s AND matched = FALSE
-    """, (ref_no,))
-    sms = cur.fetchone()
-
-    matched_data = None
-
-    if sms:
-        sms_id, sms_ref, amount, sms_type = sms
-        matched_data = {
-            "telegram_id": telegram_id,
-            "refNo": ref_no,
-            "amount": amount,
-            "type": sms_type,
-        }
-        matched_json = _json.dumps(matched_data)
-
-        # Screenshot record ይፍጠር — matched=True
-        cur.execute("""
-            INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description, matched, matched_data)
-            VALUES (%s, %s, %s, %s, TRUE, %s)
-            ON CONFLICT (ref_no) DO UPDATE
-            SET matched = TRUE, matched_data = EXCLUDED.matched_data
-        """, (telegram_id, ref_no, pay_type, description, matched_json))
-
-        # SMS ን update ያድርግ
-        cur.execute("""
-            UPDATE sms_payments
-            SET matched = TRUE, matched_data = %s
-            WHERE id = %s
-        """, (matched_json, sms_id))
-    else:
-        # SMS የለም — Screenshot ብቻ ያስቀምጥ
-        cur.execute("""
-            INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (ref_no) DO NOTHING
-        """, (telegram_id, ref_no, pay_type, description))
-
+        INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description)
+        VALUES (%s, %s, %s, %s)
+    """, (telegram_id, ref_no, pay_type, description))
     conn.commit()
     cur.close()
     conn.close()
-    return {"matched": matched_data}
+    return try_match(ref_no)
 
 
 def is_ref_matched_already(ref_no: str) -> bool:
-    """Ref number ቀደም ሲል matched ሆኗል?"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -339,21 +352,11 @@ def is_ref_matched_already(ref_no: str) -> bool:
 # ============================================================
 
 def cleanup_old_payments(days: int = 7):
-    """ያረጁ (unmatched) payment records ያጸዳል"""
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(days=days)
-
-    cur.execute("""
-        DELETE FROM sms_payments
-        WHERE matched = FALSE AND created_at < %s
-    """, (cutoff,))
-
-    cur.execute("""
-        DELETE FROM screenshot_payments
-        WHERE matched = FALSE AND created_at < %s
-    """, (cutoff,))
-
+    cur.execute("DELETE FROM sms_payments WHERE matched = FALSE AND created_at < %s", (cutoff,))
+    cur.execute("DELETE FROM screenshot_payments WHERE matched = FALSE AND created_at < %s", (cutoff,))
     conn.commit()
     cur.close()
     conn.close()
