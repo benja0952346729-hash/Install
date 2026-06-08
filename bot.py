@@ -320,9 +320,16 @@ async def sms_endpoint(request):
         return web.json_response({"success": False, "reason": "server_error"}, status=500)
 
 
+async def health_check(request):
+    from datetime import datetime
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return web.Response(text=f"🤖 Bot is running!\n🕐 Server time: {now}")
+
+
 async def start_server():
     web_app = web.Application()
     web_app.router.add_post("/sms", sms_endpoint)
+    web_app.router.add_get("/", health_check)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
