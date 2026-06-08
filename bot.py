@@ -13,7 +13,8 @@ from database import (
     init_db, save_settings, get_active_settings,
     register_number, get_taken_numbers, get_paid_numbers,
     update_board_message_id, update_remaining_message_id,
-    admin_remove_player, admin_mark_paid
+    admin_remove_player, admin_mark_paid,
+    clear_game
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -396,6 +397,45 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# ADMIN — /newgame
+# ============================================================
+
+async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    settings = get_active_settings()
+    if not settings:
+        await update.message.reply_text("❌ Active game የለም!")
+        return
+
+    clear_game(settings["id"])
+
+    # አሮጌ board ይሰርዛል
+    board_msg_id = settings.get("board_message_id")
+    if board_msg_id:
+        try:
+            await ctx.bot.delete_message(chat_id=GROUP_ID, message_id=board_msg_id)
+        except Exception:
+            pass
+
+    # አሮጌ remaining ይሰርዛል
+    rem_msg_id = settings.get("remaining_message_id")
+    if rem_msg_id:
+        try:
+            await ctx.bot.delete_message(chat_id=GROUP_ID, message_id=rem_msg_id)
+        except Exception:
+            pass
+
+    # አዲስ ባዶ board ይላካል
+    board_text = build_board(settings, {}, {})
+    new_msg = await ctx.bot.send_message(chat_id=GROUP_ID, text=board_text)
+    update_board_message_id(settings["id"], new_msg.message_id)
+    update_remaining_message_id(settings["id"], None)
+
+    await update.message.reply_text("✅ አዲስ ጨዋታ ተጀምሯል!")
+
+
+# ============================================================
 # SMS WEBHOOK SERVER
 # ============================================================
 
@@ -464,6 +504,7 @@ def main():
     app.add_handler(CommandHandler("remove", handle_remove))
     app.add_handler(CommandHandler("paid", handle_paid_cmd))
     app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
+    app.add_handler(CommandHandler("newgame", handle_newgame))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.GROUPS,
         lambda u, c: handle_payment_photo(c.bot, u.message)
