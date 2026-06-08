@@ -1,11 +1,8 @@
 import psycopg2
-from config import DB_HOST, DB_PORT, DB_NAME, DB_USER, DB_PASS
+from config import DATABASE_URL
 
 def get_conn():
-    return psycopg2.connect(
-        host=DB_HOST, port=DB_PORT,
-        dbname=DB_NAME, user=DB_USER, password=DB_PASS
-    )
+    return psycopg2.connect(DATABASE_URL, sslmode='require')
 
 def init_db():
     conn = get_conn()
@@ -45,7 +42,6 @@ def init_db():
 def save_settings(data: dict):
     conn = get_conn()
     cur = conn.cursor()
-    # Deactivate old settings
     cur.execute("UPDATE game_settings SET is_active = FALSE")
     cur.execute("""
         INSERT INTO game_settings
@@ -110,7 +106,6 @@ def get_registrations(game_id):
 def register_number(game_id, user_id, user_name, number, is_half):
     conn = get_conn()
     cur = conn.cursor()
-    # Check existing
     cur.execute("""
         SELECT id, is_half, slot FROM registrations
         WHERE game_id=%s AND number=%s ORDER BY slot
@@ -118,7 +113,6 @@ def register_number(game_id, user_id, user_name, number, is_half):
     existing = cur.fetchall()
 
     if not existing:
-        # Empty slot
         cur.execute("""
             INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot)
             VALUES (%s, %s, %s, %s, %s, 1)
@@ -129,7 +123,6 @@ def register_number(game_id, user_id, user_name, number, is_half):
         return "registered"
 
     if len(existing) == 1 and existing[0][1] == True and is_half:
-        # First person took half, second person takes other half
         cur.execute("""
             INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot)
             VALUES (%s, %s, %s, %s, %s, 2)
@@ -144,7 +137,6 @@ def register_number(game_id, user_id, user_name, number, is_half):
     return "taken"
 
 def get_taken_numbers(game_id):
-    """Returns dict: number -> list of (user_name, is_half, slot)"""
     rows = get_registrations(game_id)
     result = {}
     for number, user_name, is_half, slot in rows:
