@@ -12,7 +12,8 @@ from config import BOT_TOKEN, ADMIN_IDS, GROUP_ID
 from database import (
     init_db, save_settings, get_active_settings,
     register_number, get_taken_numbers, get_paid_numbers,
-    update_board_message_id, update_remaining_message_id
+    update_board_message_id, update_remaining_message_id,
+    admin_remove_player, admin_mark_paid
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -310,8 +311,94 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
 
 # ============================================================
+# ADMIN — BOARD REFRESH HELPER
+# ============================================================
+
+async def _refresh_board(ctx, settings):
+    game_id = settings["id"]
+    taken = get_taken_numbers(game_id)
+    paid = get_paid_numbers(game_id)
+    board_text = build_board(settings, taken, paid)
+    board_msg_id = settings.get("board_message_id")
+
+    if board_msg_id:
+        try:
+            await ctx.bot.edit_message_text(
+                chat_id=GROUP_ID,
+                message_id=board_msg_id,
+                text=board_text
+            )
+        except Exception:
+            new_msg = await ctx.bot.send_message(chat_id=GROUP_ID, text=board_text)
+            update_board_message_id(game_id, new_msg.message_id)
+    else:
+        new_msg = await ctx.bot.send_message(chat_id=GROUP_ID, text=board_text)
+        update_board_message_id(game_id, new_msg.message_id)
+
+
+# ============================================================
+# ADMIN — /remove
+# ============================================================
+
+async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ ምሳሌ: /remove 5  ወይም  /remove 5 2")
+        return
+    try:
+        number = int(parts[1])
+        slot = int(parts[2]) if len(parts) > 2 else None
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        return
+
+    settings = get_active_settings()
+    if not settings:
+        return
+
+    admin_remove_player(settings["id"], number, slot)
+    await _refresh_board(ctx, settings)
+
+    label = f"{format_number(number)} slot {slot}" if slot else format_number(number)
+    await update.message.reply_text(f"✅ {label} ተወጣ!")
+
+
+# ============================================================
+# ADMIN — /paid /unpaid
+# ============================================================
+
+async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ ምሳሌ: /paid 5  ወይም  /paid 5 2")
+        return
+    try:
+        number = int(parts[1])
+        slot = int(parts[2]) if len(parts) > 2 else 1
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        return
+
+    is_paid = update.message.text.startswith("/paid")
+    settings = get_active_settings()
+    if not settings:
+        return
+
+    admin_mark_paid(settings["id"], number, slot, is_paid)
+    await _refresh_board(ctx, settings)
+
+    mark = "✅" if is_paid else "❌"
+    await update.message.reply_text(f"{mark} {format_number(number)} slot {slot} updated!")
+
+
+# ============================================================
 # SMS WEBHOOK SERVER
 # ============================================================
+
 async def sms_endpoint(request):
     try:
         raw = await request.text()
@@ -351,6 +438,7 @@ async def start_server():
 # ============================================================
 # MAIN
 # ============================================================
+
 def main():
     init_db()
 
@@ -373,6 +461,9 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(setup_conv)
+    app.add_handler(CommandHandler("remove", handle_remove))
+    app.add_handler(CommandHandler("paid", handle_paid_cmd))
+    app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.GROUPS,
         lambda u, c: handle_payment_photo(c.bot, u.message)
