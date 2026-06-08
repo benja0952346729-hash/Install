@@ -4,7 +4,7 @@ import json
 import base64
 import logging
 from typing import Optional
-
+from config import BOT_TOKEN
 import httpx
 from groq import Groq
 from database import (
@@ -66,7 +66,7 @@ async def handle_payment_photo(bot, msg):
     try:
         photo = msg.photo[-1]
         file = await bot.get_file(photo.file_id)
-        file_url = f"https://api.telegram.org/file/bot{os.getenv('BOT_TOKEN')}/{file.file_path}"
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
         image_base64 = await download_image_as_base64(file_url)
 
         await msg.reply_text("⏳ Screenshot እየተረጋገጠ ነው...")
