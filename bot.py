@@ -1,3 +1,4 @@
+import os
 import logging
 import asyncio
 from aiohttp import web
@@ -19,7 +20,10 @@ from board import (
 )
 from handlers import handle_payment_photo, handle_sms_webhook
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
+)
 
 (
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
@@ -29,18 +33,22 @@ logging.basicConfig(level=logging.INFO)
 
 pending_ambiguous = {}
 
+
 def is_admin(user_id):
     return user_id in ADMIN_IDS
+
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🤖 Bot ተሰናድቷል!")
 
+
 async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ Admin ብቻ ነው!")
-        return
+        return ConversationHandler.END
     await update.message.reply_text("🎮 ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)")
     return ASK_TOTAL
+
 
 async def ask_total(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
@@ -51,6 +59,7 @@ async def ask_total(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("👥 ለ1 ሰው ስንት ቁጥሮች? (ለምሳሌ: 5)")
     return ASK_PER_PERSON
 
+
 async def ask_per_person(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["numbers_per_person"] = int(update.message.text.strip())
@@ -60,6 +69,7 @@ async def ask_per_person(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("💰 ሙሉ ዋጋ ስንት ብር?")
     return ASK_PRICE_FULL
 
+
 async def ask_price_full(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["price_full"] = int(update.message.text.strip())
@@ -68,6 +78,7 @@ async def ask_price_full(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ASK_PRICE_FULL
     await update.message.reply_text("💳 ግማሽ ዋጋ አለ? (ቁጥር ጻፍ ወይም 'አይደለም')")
     return ASK_PRICE_HALF
+
 
 async def ask_price_half(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
@@ -82,6 +93,7 @@ async def ask_price_half(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🥇 1ኛ ሽልማት ስንት ብር?")
     return ASK_PRIZE_1
 
+
 async def ask_prize_1(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["prize_1st"] = int(update.message.text.strip())
@@ -90,6 +102,7 @@ async def ask_prize_1(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ASK_PRIZE_1
     await update.message.reply_text("🥈 2ኛ ሽልማት? (ከሌለ 'አይደለም')")
     return ASK_PRIZE_2
+
 
 async def ask_prize_2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
@@ -104,6 +117,7 @@ async def ask_prize_2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("🥉 3ኛ ሽልማት? (ከሌለ 'አይደለም')")
     return ASK_PRIZE_3
 
+
 async def ask_prize_3(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
     if text in ["አይደለም", "aydelem", "no", "የለም"]:
@@ -116,6 +130,7 @@ async def ask_prize_3(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return ASK_PRIZE_3
     await update.message.reply_text("💳 Payment info ጻፍ (CBE, Telebirr...):")
     return ASK_PAYMENT
+
 
 async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["payment_info"] = update.message.text.strip()
@@ -134,9 +149,11 @@ async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+
 async def cancel_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Setup ተሰርዟል።")
     return ConversationHandler.END
+
 
 async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
@@ -183,6 +200,7 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
 
+
 async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
     pending = pending_ambiguous.get(user_id)
     if not pending:
@@ -204,13 +222,12 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
         if yes:
             numbers = [(n, True) for n, _ in numbers]
     elif ambiguous == "last_half":
-        if yes:
-            pass
-        else:
+        if not yes:
             numbers = [(n, False) for n, _ in numbers]
 
     del pending_ambiguous[user_id]
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, update.message)
+
 
 async def process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg):
     game_id = settings["id"]
@@ -294,9 +311,14 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 # SMS WEBHOOK SERVER
 # ============================================================
 async def sms_endpoint(request):
-    body = await request.json()
-    result = await handle_sms_webhook(body.get("sms", ""))
-    return web.json_response(result)
+    try:
+        body = await request.json()
+        result = await handle_sms_webhook(body.get("sms", ""))
+        return web.json_response(result)
+    except Exception as e:
+        logging.error(f"[SMS Endpoint] Error: {e}", exc_info=True)
+        return web.json_response({"success": False, "reason": "server_error"}, status=500)
+
 
 async def start_server():
     web_app = web.Application()
@@ -333,7 +355,6 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(setup_conv)
-    app.add_handler(CommandHandler("setgroup", lambda u, c: None))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.GROUPS,
         lambda u, c: handle_payment_photo(c.bot, u.message)
@@ -348,6 +369,7 @@ def main():
 
     print("🤖 Bot started!")
     app.run_polling()
+
 
 if __name__ == "__main__":
     main()
