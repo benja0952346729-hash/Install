@@ -43,10 +43,10 @@ async def handle_sms_webhook(raw_sms: str) -> dict:
     if not ref_no:
         return {"success": False, "reason": "no_ref"}
 
-    # Duplicate check
-    if get_sms_payment_by_ref(ref_no):
-        logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
-        return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
+    # Duplicate check — ለጊዜው disabled (testing)
+    # if get_sms_payment_by_ref(ref_no):
+    #     logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
+    #     return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
 
     result = save_sms_payment(ref_no, amount, sms_type, raw_sms)
     return {"success": True, "matched": result.get("matched"), **parsed}
