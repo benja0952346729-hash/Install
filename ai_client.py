@@ -1,11 +1,10 @@
 import os
-import random
 from dotenv import load_dotenv
 
 load_dotenv()
 
-PROVIDER = os.getenv("AI_PROVIDER", "groq").lower()
-MODEL = os.getenv("AI_MODEL", "llama-3.3-70b-versatile")
+PROVIDER = os.getenv("AI_PROVIDER", "").lower()
+MODEL = os.getenv("AI_MODEL", "deepseek-ai/deepseek-r1-0528")
 
 # Load all available keys
 def load_keys():
@@ -14,7 +13,6 @@ def load_keys():
         key = os.getenv(f"AI_API_KEY_{i}")
         if key:
             keys.append(key)
-    # fallback single key
     single = os.getenv("AI_API_KEY")
     if single and single not in keys:
         keys.append(single)
@@ -39,14 +37,12 @@ async def call_ai(system_prompt: str, user_message: str) -> str:
     for attempt in range(len(API_KEYS) or 1):
         api_key = get_next_key()
         try:
-            if PROVIDER in ("groq", "openai", "deepseek", "together", "mistral"):
-                return await _call_openai_compatible(api_key, system_prompt, user_message)
-            elif PROVIDER == "anthropic":
+            if PROVIDER == "anthropic":
                 return await _call_anthropic(api_key, system_prompt, user_message)
             elif PROVIDER == "gemini":
                 return await _call_gemini(api_key, system_prompt, user_message)
             else:
-                # Default: try openai-compatible
+                # openai-compatible: groq, openai, deepseek, nvidia, together, mistral, or AI_BASE_URL
                 return await _call_openai_compatible(api_key, system_prompt, user_message)
         except Exception as e:
             last_error = e
@@ -65,8 +61,10 @@ async def _call_openai_compatible(api_key: str, system_prompt: str, user_message
         "deepseek": "https://api.deepseek.com/v1",
         "together": "https://api.together.xyz/v1",
         "mistral": "https://api.mistral.ai/v1",
+        "nvidia": "https://integrate.api.nvidia.com/v1",
     }
-    base_url = base_urls.get(PROVIDER, os.getenv("AI_BASE_URL", "https://api.openai.com/v1"))
+    # AI_BASE_URL ካለ → ሁሌ ያሸንፋዋል, provider ሳያስፈልግ
+    base_url = os.getenv("AI_BASE_URL") or base_urls.get(PROVIDER, "https://api.openai.com/v1")
 
     async with httpx.AsyncClient(timeout=60) as client:
         response = await client.post(
