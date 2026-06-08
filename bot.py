@@ -4,7 +4,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ConversationHandler, ContextTypes, filters
 )
-from config import BOT_TOKEN, ADMIN_IDS
+from config import BOT_TOKEN, ADMIN_IDS, GROUP_ID
 from database import (
     init_db, save_settings, get_active_settings,
     register_number, get_taken_numbers,
@@ -18,25 +18,23 @@ from board import (
 
 logging.basicConfig(level=logging.INFO)
 
-# ── ConversationHandler States ──
 (
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
     ASK_PRIZE_3, ASK_PAYMENT
 ) = range(8)
 
-# Ambiguous pending: {user_id: {numbers, ambiguous, ambiguous_number, game_id}}
 pending_ambiguous = {}
 
-# ── Helper ──
 def is_admin(user_id):
     return user_id in ADMIN_IDS
 
-# ══════════════════════════════════════════
-#  /setgame - Admin Game Setup
-# ══════════════════════════════════════════
+async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🤖 Bot ተሰናድቷል!")
+
 async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Admin ብቻ ነው!")
         return
     await update.message.reply_text("🎮 ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)")
     return ASK_TOTAL
@@ -124,15 +122,12 @@ async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     taken = {}
     board_text = build_board(settings, taken)
 
-    # Group ላይ board ላክ
-    group_id = ctx.bot_data.get("group_id")
-    if group_id:
-        msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+    if GROUP_ID:
+        msg = await ctx.bot.send_message(chat_id=GROUP_ID, text=board_text)
         update_board_message_id(game_id, msg.message_id)
 
     await update.message.reply_text(
-        f"✅ Settings ተቀምጧል! Board group ላይ ተልኳል።\n"
-        f"Game ID: {game_id}"
+        f"✅ Settings ተቀምጧል!\nGame ID: {game_id}"
     )
     return ConversationHandler.END
 
@@ -140,19 +135,6 @@ async def cancel_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Setup ተሰርዟል።")
     return ConversationHandler.END
 
-# ══════════════════════════════════════════
-#  /setgroup - Group ID ያስቀምጣል
-# ══════════════════════════════════════════
-async def setgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not is_admin(update.effective_user.id):
-        return
-    group_id = update.effective_chat.id
-    ctx.bot_data["group_id"] = group_id
-    await update.message.reply_text(f"✅ Group ID ተቀምጧል: {group_id}")
-
-# ══════════════════════════════════════════
-#  Group Message Handler - ቁጥር ሲጻፍ
-# ══════════════════════════════════════════
 async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = update.message
     if not msg or not msg.text:
@@ -164,7 +146,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     group_id = update.effective_chat.id
 
-    # Ambiguous reply check
     if user_id in pending_ambiguous:
         await handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id)
         return
@@ -209,7 +190,6 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
     no = text_lower in ["አይደለም", "aydelem", "no", "የለም"]
 
     if not yes and not no:
-        # User wrote something else (like "41 በግማሽ") - treat as "no"
         no = True
 
     numbers = pending["numbers"]
@@ -220,11 +200,9 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
     if ambiguous == "all_half":
         if yes:
             numbers = [(n, True) for n, _ in numbers]
-        # if no → keep as is (last one is half, others not)
-
     elif ambiguous == "last_half":
         if yes:
-            pass  # keep last as half
+            pass
         else:
             numbers = [(n, False) for n, _ in numbers]
 
@@ -239,10 +217,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     failed = []
 
     for num, is_half in numbers:
-        # Map to group start if per_person > 1
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
-        # Validate range
         if actual_num < 1 or actual_num > settings["total_numbers"]:
             failed.append(format_number(num))
             continue
@@ -258,7 +234,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             await msg.reply_text(f"❌ {', '.join(failed)} ቀድሞ ተወስዷል!")
         return
 
-    # Board update
     taken = get_taken_numbers(game_id)
     board_text = build_board(settings, taken)
     remaining_count = count_remaining(settings, taken)
@@ -266,7 +241,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     board_msg_id = settings.get("board_message_id")
 
     if remaining_count <= 7:
-        # Delete old board → resend
         if board_msg_id:
             try:
                 await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
@@ -275,7 +249,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
         update_board_message_id(game_id, new_board.message_id)
 
-        # Remaining message
         remaining_text = build_remaining(settings, taken)
         rem_msg_id = settings.get("remaining_message_id")
         if remaining_text:
@@ -286,11 +259,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                     pass
             rem_msg = await ctx.bot.send_message(chat_id=group_id, text=remaining_text)
             update_remaining_message_id(game_id, rem_msg.message_id)
-            # Refresh settings for next time
             settings["board_message_id"] = new_board.message_id
             settings["remaining_message_id"] = rem_msg.message_id
     else:
-        # Just edit board
         if board_msg_id:
             try:
                 await ctx.bot.edit_message_text(
@@ -302,7 +273,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 update_board_message_id(game_id, new_board.message_id)
 
-    # Warning message
     reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
     warning = ""
     for n, is_half in numbers:
@@ -316,14 +286,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     else:
         await msg.reply_text(f"✅ {reg_list} ተመዘገበ!{warning}")
 
-# ══════════════════════════════════════════
-#  Main
-# ══════════════════════════════════════════
 def main():
     init_db()
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
 
-    # setgame conversation
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.bot_data["group_id"] = GROUP_ID
+
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setgame", setgame_start)],
         states={
@@ -339,8 +307,9 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_setup)],
     )
 
+    app.add_handler(CommandHandler("start", start))
     app.add_handler(setup_conv)
-    app.add_handler(CommandHandler("setgroup", setgroup))
+    app.add_handler(CommandHandler("setgroup", lambda u, c: None))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_group_message
