@@ -206,16 +206,9 @@ def get_taken_numbers(game_id):
 # ============================================================
 
 def confirm_payment(telegram_id: int, amount: float) -> dict:
-    """
-    Match ሲሆን ይህ function ይጠራል።
-    - telegram_id ያለው balance ይጨምራል (cumulative)
-    - ሊከፈሉ የሚችሉ ቁጥሮች ✅ ያደርጋል (ቅደም ተከተል: registered_at, slot)
-    - ✅ የሆኑ ቁጥሮች list ይመልሳል
-    """
     conn = get_conn()
     cur = conn.cursor()
 
-    # Active game ያግኝ
     cur.execute("""
         SELECT id, price_full, price_half
         FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
@@ -230,7 +223,6 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
     price_full = float(price_full or 0)
     price_half = float(price_half or 0)
 
-    # Balance ጨምር (cumulative)
     cur.execute("""
         INSERT INTO user_balance (game_id, telegram_id, balance)
         VALUES (%s, %s, %s)
@@ -241,7 +233,6 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
     total_balance = float(cur.fetchone()[0])
     conn.commit()
 
-    # ያልከፈሉ registrations ያግኝ (ቅደም ተከተል: registered_at, slot)
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -260,9 +251,7 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
             cur.execute("UPDATE registrations SET is_paid = TRUE WHERE id = %s", (reg_id,))
             remaining -= cost
             confirmed.append({"number": number, "is_half": is_half, "slot": slot})
-        # ብር ካልሸፈነ ዝለለው
 
-    # ቀሪ balance ዘምን
     cur.execute("""
         UPDATE user_balance SET balance = %s, updated_at = NOW()
         WHERE game_id = %s AND telegram_id = %s
@@ -275,10 +264,6 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
 
 
 def get_paid_numbers(game_id: int) -> dict:
-    """
-    is_paid = TRUE ያሉ ቁጥሮች ያወጣል
-    return: {number: set(slot1, slot2, ...)}
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -429,6 +414,7 @@ def save_screenshot_payment(telegram_id: int, ref_no: str, pay_type: str, descri
     cur.execute("""
         INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description)
         VALUES (%s, %s, %s, %s)
+        ON CONFLICT (ref_no) DO NOTHING
     """, (telegram_id, ref_no, pay_type, description))
     conn.commit()
     cur.close()
