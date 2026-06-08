@@ -178,11 +178,33 @@ def register_number(game_id, user_id, user_name, number, is_half):
     """, (game_id, number))
     existing = cur.fetchall()
 
+    # ዋጋ ያግኝ
+    cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
+    price_row = cur.fetchone()
+    price_full = float(price_row[0] or 0)
+    price_half = float(price_row[1] or 0)
+    cost = price_half if is_half else price_full
+
+    # Balance ያግኝ
+    cur.execute("""
+        SELECT balance FROM user_balance
+        WHERE game_id=%s AND telegram_id=%s
+    """, (game_id, user_id))
+    bal_row = cur.fetchone()
+    balance = float(bal_row[0]) if bal_row else 0.0
+    can_pay = balance >= cost
+
     if not existing:
         cur.execute("""
-            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot)
-            VALUES (%s, %s, %s, %s, %s, 1)
-        """, (game_id, user_id, user_name, number, is_half))
+            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid)
+            VALUES (%s, %s, %s, %s, %s, 1, %s)
+        """, (game_id, user_id, user_name, number, is_half, can_pay))
+        if can_pay:
+            new_balance = balance - cost
+            cur.execute("""
+                UPDATE user_balance SET balance=%s, updated_at=NOW()
+                WHERE game_id=%s AND telegram_id=%s
+            """, (new_balance, game_id, user_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -190,9 +212,15 @@ def register_number(game_id, user_id, user_name, number, is_half):
 
     if len(existing) == 1 and existing[0][1] == True and is_half:
         cur.execute("""
-            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot)
-            VALUES (%s, %s, %s, %s, %s, 2)
-        """, (game_id, user_id, user_name, number, is_half))
+            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid)
+            VALUES (%s, %s, %s, %s, %s, 2, %s)
+        """, (game_id, user_id, user_name, number, is_half, can_pay))
+        if can_pay:
+            new_balance = balance - cost
+            cur.execute("""
+                UPDATE user_balance SET balance=%s, updated_at=NOW()
+                WHERE game_id=%s AND telegram_id=%s
+            """, (new_balance, game_id, user_id))
         conn.commit()
         cur.close()
         conn.close()
@@ -201,7 +229,6 @@ def register_number(game_id, user_id, user_name, number, is_half):
     cur.close()
     conn.close()
     return "taken"
-
 
 def get_taken_numbers(game_id):
     rows = get_registrations(game_id)
