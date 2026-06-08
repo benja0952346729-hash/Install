@@ -63,7 +63,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS screenshot_payments (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
-            ref_no TEXT,
+            ref_no TEXT UNIQUE,
             pay_type TEXT,
             description TEXT,
             matched BOOLEAN DEFAULT FALSE,
@@ -74,6 +74,18 @@ def init_db():
 
     # Existing database ላይ column እና table ካልተጨመረ ጨምር
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'screenshot_payments_ref_no_key'
+            ) THEN
+                ALTER TABLE screenshot_payments ADD CONSTRAINT screenshot_payments_ref_no_key UNIQUE (ref_no);
+            END IF;
+        END
+        $$;
+    """)
 
     conn.commit()
     cur.close()
@@ -382,9 +394,10 @@ def save_sms_payment(ref_no: str, amount, pay_type: str, raw_sms: str) -> dict:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO sms_payments (ref_no, amount, pay_type, raw_sms)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (ref_no) DO NOTHING
+        INSERT INTO sms_payments (ref_no, amount, pay_type, raw_sms, matched)
+        VALUES (%s, %s, %s, %s, FALSE)
+        ON CONFLICT (ref_no) DO UPDATE
+            SET matched = FALSE
     """, (ref_no, amount, pay_type, raw_sms))
     conn.commit()
     cur.close()
