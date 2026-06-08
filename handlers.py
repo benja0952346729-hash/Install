@@ -98,10 +98,10 @@ async def handle_payment_photo(bot, msg):
             await msg.reply_text("⚠️ Reference number ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
-        # Duplicate check
-        if is_ref_matched_already(ref_no):
-            await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
-            return
+        # Duplicate check — ለጊዜው disabled (testing)
+        # if is_ref_matched_already(ref_no):
+        #     await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
+        #     return
 
         result = save_screenshot_payment(
             telegram_id, ref_no, photo_type, analysis.get("description", "")
