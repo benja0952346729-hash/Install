@@ -1,6 +1,7 @@
 import os
 import logging
 import asyncio
+import json
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
@@ -312,12 +313,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 # ============================================================
 async def sms_endpoint(request):
     try:
-        content_type = request.content_type or ""
-        if "application/json" in content_type:
-            body = await request.json()
-            sms_text = body.get("sms", "")
-        else:
-            sms_text = await request.text()
+        raw = await request.text()
+        try:
+            parsed = json.loads(raw)
+            sms_text = parsed.get("sms", raw)
+        except Exception:
+            sms_text = raw
 
         if not sms_text:
             return web.json_response({"success": False, "reason": "empty_body"})
