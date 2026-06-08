@@ -36,7 +36,17 @@ def init_db():
             number INT,
             is_half BOOLEAN DEFAULT FALSE,
             slot INT DEFAULT 1,
+            is_paid BOOLEAN DEFAULT FALSE,
             registered_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS user_balance (
+            id SERIAL PRIMARY KEY,
+            game_id INT REFERENCES game_settings(id),
+            telegram_id BIGINT,
+            balance NUMERIC DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(game_id, telegram_id)
         );
 
         CREATE TABLE IF NOT EXISTS sms_payments (
@@ -61,6 +71,10 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );
     """)
+
+    # Existing database ላይ column እና table ካልተጨመረ ጨምር
+    cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
+
     conn.commit()
     cur.close()
     conn.close()
@@ -188,14 +202,106 @@ def get_taken_numbers(game_id):
 
 
 # ============================================================
-# FUZZY MATCH — 0/O, 1/I, 5/S confusion ይፈቅዳል
+# PAYMENT CONFIRMATION — ✅ ዋናው logic
+# ============================================================
+
+def confirm_payment(telegram_id: int, amount: float) -> dict:
+    """
+    Match ሲሆን ይህ function ይጠራል።
+    - telegram_id ያለው balance ይጨምራል (cumulative)
+    - ሊከፈሉ የሚችሉ ቁጥሮች ✅ ያደርጋል (ቅደም ተከተል: registered_at, slot)
+    - ✅ የሆኑ ቁጥሮች list ይመልሳል
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Active game ያግኝ
+    cur.execute("""
+        SELECT id, price_full, price_half
+        FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
+    """)
+    game_row = cur.fetchone()
+    if not game_row:
+        cur.close()
+        conn.close()
+        return {"confirmed": [], "remaining_balance": amount}
+
+    game_id, price_full, price_half = game_row
+    price_full = float(price_full or 0)
+    price_half = float(price_half or 0)
+
+    # Balance ጨምር (cumulative)
+    cur.execute("""
+        INSERT INTO user_balance (game_id, telegram_id, balance)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (game_id, telegram_id)
+        DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
+        RETURNING balance
+    """, (game_id, telegram_id, amount, amount))
+    total_balance = float(cur.fetchone()[0])
+    conn.commit()
+
+    # ያልከፈሉ registrations ያግኝ (ቅደም ተከተል: registered_at, slot)
+    cur.execute("""
+        SELECT id, number, is_half, slot
+        FROM registrations
+        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE
+        ORDER BY registered_at, slot
+    """, (game_id, telegram_id))
+    unpaid = cur.fetchall()
+
+    confirmed = []
+    remaining = total_balance
+
+    for reg_id, number, is_half, slot in unpaid:
+        cost = price_half if is_half else price_full
+
+        if remaining >= cost:
+            cur.execute("UPDATE registrations SET is_paid = TRUE WHERE id = %s", (reg_id,))
+            remaining -= cost
+            confirmed.append({"number": number, "is_half": is_half, "slot": slot})
+        # ብር ካልሸፈነ ዝለለው
+
+    # ቀሪ balance ዘምን
+    cur.execute("""
+        UPDATE user_balance SET balance = %s, updated_at = NOW()
+        WHERE game_id = %s AND telegram_id = %s
+    """, (remaining, game_id, telegram_id))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"confirmed": confirmed, "remaining_balance": remaining}
+
+
+def get_paid_numbers(game_id: int) -> dict:
+    """
+    is_paid = TRUE ያሉ ቁጥሮች ያወጣል
+    return: {number: set(slot1, slot2, ...)}
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, slot FROM registrations
+        WHERE game_id = %s AND is_paid = TRUE
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    result = {}
+    for number, slot in rows:
+        if number not in result:
+            result[number] = set()
+        result[number].add(slot)
+    return result
+
+
+# ============================================================
+# FUZZY MATCH
 # ============================================================
 
 def fuzzy_ref_match(ref1: str, ref2: str) -> bool:
-    """
-    ሁለት ref numbers ያወዳድራል።
-    0↔O, 1↔I, 5↔S confusion ድረስ ይፈቅዳል (እስከ 2 ስህተት)
-    """
     if not ref1 or not ref2:
         return False
     if ref1 == ref2:
@@ -234,13 +340,10 @@ def fuzzy_ref_match(ref1: str, ref2: str) -> bool:
 
 
 # ============================================================
-# TRY MATCH — ሁሉንም unmatched SMS እና screenshot cross-check
+# TRY MATCH
 # ============================================================
 
 def try_match(ref_no: str) -> dict:
-    """
-    አዲስ SMS ወይም screenshot ሲመጣ ሁሉንም unmatched records ያወዳድራል
-    """
     if not ref_no:
         return {"matched": None}
 
