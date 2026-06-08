@@ -64,9 +64,8 @@ async def handle_payment_photo(bot, msg):
 
     try:
         photo = msg.photo[-1]
-        file = await bot.get_file(photo.file_id)
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file.file_path}"
-        image_base64 = await download_image_as_base64(file_url)
+        # ✅ FIX: file_id ቀጥታ ይላካል — download_image_as_base64 ውስጥ fresh link ይሠራል
+        image_base64 = await download_image_as_base64(photo.file_id)
 
         await msg.reply_text("⏳ Screenshot እየተረጋገጠ ነው...")
 
@@ -300,8 +299,22 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
 # ============================================================
 # HELPERS
 # ============================================================
-async def download_image_as_base64(url: str) -> str:
+async def download_image_as_base64(file_id: str) -> str:
+    """
+    ✅ FIX: file_id ተቀብሎ getFile API ጠርቶ fresh file_path ያወጣል።
+    ቀጥታ URL ማስተላለፍ 404 ያስከትላል ምክንያቱም Telegram links ለ1 ሰዓት ብቻ valid ናቸው።
+    """
     async with httpx.AsyncClient(timeout=30) as client:
-        res = await client.get(url)
+        # Step 1: Fresh file_path ያግኝ
+        get_file_res = await client.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id}
+        )
+        get_file_res.raise_for_status()
+        file_path = get_file_res.json()["result"]["file_path"]
+
+        # Step 2: ፋይሉን አውርድ
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        res = await client.get(file_url)
         res.raise_for_status()
         return base64.b64encode(res.content).decode("utf-8")
