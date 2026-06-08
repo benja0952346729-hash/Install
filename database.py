@@ -320,6 +320,19 @@ def get_paid_numbers(game_id: int) -> dict:
 
 
 # ============================================================
+# ADMIN — NEW GAME CLEAR
+# ============================================================
+
+def clear_game(game_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM registrations WHERE game_id=%s", (game_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
 # ADMIN — MANUAL REMOVE & PAY MARK
 # ============================================================
 
