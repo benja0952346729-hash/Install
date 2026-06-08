@@ -1,9 +1,10 @@
 from parser import format_number
 
-def build_board(settings: dict, taken: dict) -> str:
+def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
     """
     Board message ይሰራል።
     taken = {number: [(user_name, is_half, slot), ...]}
+    paid  = {number: set(slot1, slot2, ...)}  ← ✅ ለማሳየት
     """
     total = settings["total_numbers"]
     per_person = settings["numbers_per_person"]
@@ -13,6 +14,9 @@ def build_board(settings: dict, taken: dict) -> str:
     prize_2nd = settings.get("prize_2nd")
     prize_3rd = settings.get("prize_3rd")
     payment_info = settings["payment_info"]
+
+    if paid is None:
+        paid = {}
 
     lines = []
 
@@ -28,32 +32,30 @@ def build_board(settings: dict, taken: dict) -> str:
 
     # ── ቁጥሮች ──
     if per_person == 1:
-        # Simple board - እያንዳንዱ ቁጥር
         for n in range(1, total + 1):
             label = format_number(n)
             entry = taken.get(n, [])
+            paid_slots = paid.get(n, set())
             if not entry:
                 lines.append(f"{label}#")
             else:
-                display = _format_entry(entry)
+                display = _format_entry(entry, paid_slots)
                 lines.append(f"{label}# {display}")
     else:
-        # Group board - በ per_person ቡድን
         n = 1
         while n <= total:
             group_start = n
             group_end = min(n + per_person - 1, total)
 
-            # Group leader (first number)
             label = format_number(group_start)
             entry = taken.get(group_start, [])
+            paid_slots = paid.get(group_start, set())
             if not entry:
                 lines.append(f"{label}#")
             else:
-                display = _format_entry(entry)
+                display = _format_entry(entry, paid_slots)
                 lines.append(f"{label}# {display}")
 
-            # Rest of group (no name)
             for sub in range(group_start + 1, group_end + 1):
                 lines.append(f"{format_number(sub)}#")
 
@@ -66,28 +68,52 @@ def build_board(settings: dict, taken: dict) -> str:
 
     return "\n".join(lines)
 
-def _format_entry(entry: list) -> str:
+
+def _format_entry(entry: list, paid_slots: set = None) -> str:
     """
     entry = [(user_name, is_half, slot), ...]
-    01# አበበ       → ሙሉ
-    01# አበበ+      → ግማሽ (ሌላ ሰው ሊሞላ)
-    01# አበበ+አየለ  → ሁለቱም ግማሽ
+    paid_slots = {1, 2, ...}  ← ✅ ያሳያል
+
+    ሙሉ:
+      01# አበበ✅      ← ከፍሏል
+      01# አበበ        ← አልከፈለም
+
+    ግማሽ (1 ሰው):
+      01# አበበ✅+     ← አበበ ከፍሏል፣ ሌላ ሰው አልተቀላቀለም
+      01# አበበ+       ← አልከፈለም፣ ሌላ ሰው አልተቀላቀለም
+
+    ግማሽ (2 ሰው):
+      01# አበበ✅+አየለ✅  ← ሁለቱም ከፈሉ
+      01# አበበ✅+አየለ   ← አበበ ብቻ ከፍሏል
+      01# አበበ+አየለ✅   ← አየለ ብቻ ከፍሏል
+      01# አበበ+አየለ    ← ማንም አልከፈለም
     """
+    if paid_slots is None:
+        paid_slots = set()
+
     if len(entry) == 1:
-        name, is_half, _ = entry[0]
-        return f"{name}+" if is_half else name
+        name, is_half, slot = entry[0]
+        check = "✅" if slot in paid_slots else ""
+        if is_half:
+            return f"{name}{check}+"
+        else:
+            return f"{name}{check}"
+
     elif len(entry) == 2:
-        name1 = entry[0][0]
-        name2 = entry[1][0]
-        return f"{name1}+{name2}"
+        name1, _, slot1 = entry[0]
+        name2, _, slot2 = entry[1]
+        check1 = "✅" if slot1 in paid_slots else ""
+        check2 = "✅" if slot2 in paid_slots else ""
+        return f"{name1}{check1}+{name2}{check2}"
+
     return ""
 
+
 def get_group_start(number: int, per_person: int) -> int:
-    """ቁጥሩ የሚገኝበት group የመጀመሪያ ቁጥር ይመልሳል"""
     return ((number - 1) // per_person) * per_person + 1
 
+
 def build_remaining(settings: dict, taken: dict) -> str:
-    """ቀሪ ቁጥሮች message ይሰራል"""
     total = settings["total_numbers"]
     per_person = settings["numbers_per_person"]
 
@@ -98,7 +124,7 @@ def build_remaining(settings: dict, taken: dict) -> str:
             entry = taken.get(n, [])
             if not entry:
                 remaining.append((n, False))
-            elif len(entry) == 1 and entry[0][1]:  # ግማሽ ብቻ
+            elif len(entry) == 1 and entry[0][1]:
                 remaining.append((n, True))
     else:
         n = 1
@@ -121,8 +147,8 @@ def build_remaining(settings: dict, taken: dict) -> str:
 
     return "\n".join(lines)
 
+
 def count_remaining(settings: dict, taken: dict) -> int:
-    """ቀሪ blocks ስንት እንደሆኑ ይቆጥራል"""
     total = settings["total_numbers"]
     per_person = settings["numbers_per_person"]
     count = 0
