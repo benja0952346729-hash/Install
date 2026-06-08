@@ -1,230 +1,353 @@
 import logging
-import os
-import json
-from dotenv import load_dotenv
 from telegram import Update
-from telegram.ext import Application, MessageHandler, filters, ContextTypes
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ConversationHandler, ContextTypes, filters
+)
+from config import BOT_TOKEN, ADMIN_IDS
+from database import (
+    init_db, save_settings, get_active_settings,
+    register_number, get_taken_numbers,
+    update_board_message_id, update_remaining_message_id
+)
+from parser import parse_numbers, format_number
+from board import (
+    build_board, build_remaining,
+    count_remaining, get_group_start
+)
 
-from ai_client import call_ai
-from board import load_board, save_board, reset_board, board_to_json_str, parse_ai_response
+logging.basicConfig(level=logging.INFO)
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-logger = logging.getLogger(__name__)
+# ── ConversationHandler States ──
+(
+    ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
+    ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
+    ASK_PRIZE_3, ASK_PAYMENT
+) = range(8)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-GROUP_ID = os.getenv("GROUP_ID")
-STATE_FILE = "state.json"
+# Ambiguous pending: {user_id: {numbers, ambiguous, ambiguous_number, game_id}}
+pending_ambiguous = {}
 
+# ── Helper ──
+def is_admin(user_id):
+    return user_id in ADMIN_IDS
 
-def load_state() -> dict:
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {"board_message_id": None}
-
-
-def save_state(state: dict):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-def load_readme() -> str:
-    for name in ["README.md", "readme.md", "Readme.md"]:
-        if os.path.exists(name):
-            with open(name, "r", encoding="utf-8") as f:
-                return f.read()
-    raise FileNotFoundError("README.md not found!")
-
-
-README = load_readme()
-logger.info("README.md loaded successfully.")
-
-SYSTEM_PROMPT = f"""
-{README}
-
----
-
-## 🤖 Response Format (REQUIRED)
-
-ሁሌ ሁለት ክፍል ይስጥ:
-
-1. Updated board JSON (```json ``` ውስጥ)
-2. Reply text (group ላይ የሚላከው — አጭር)
-
-ምሳሌ:
-```json
-{{
-  "slots": {{
-    "06": {{"name": "አበበ", "type": "full", "paid1": false, "paid2": false, "partner": null}}
-  }},
-  "game_active": true,
-  "send_board": true,
-  "new_game": false
-}}
-```
-ቤተሰብ ገቢ! 🙏
-
----
-
-## JSON Fields:
-- `slots` → የተቀየሩ slots ብቻ
-- `send_board` → true ከሆነ bot updated board group ላይ ይልካዋል (አሮጌውን ይሰርዛዋል)
-- `new_game` → true ከሆነ አዲስ ባዶ game ይጀምራዋል
-- `game_active` → game status
-
-## Rules:
-- Reply አጭር ይሁን
-- User ቋንቋ ተቀበልና ተመሳሳይ ቋንቋ ምለስ
-- send_board መቼ true እንደሚሆን README ይነግርሃል
-"""
-
-
-def build_board_text(board: dict) -> str:
-    slots = board.get("slots", {})
-    lines = []
-    for block_start in range(1, 101, 5):
-        for i in range(block_start, block_start + 5):
-            slot_key = str(i).zfill(2)
-            slot = slots.get(slot_key, {})
-            name = slot.get("name")
-            if not name:
-                lines.append(f"{slot_key}#")
-            else:
-                paid1 = slot.get("paid1", False)
-                paid2 = slot.get("paid2", False)
-                partner = slot.get("partner")
-                stype = slot.get("type", "full")
-                if stype == "full":
-                    check = "✅" if paid1 else ""
-                    lines.append(f"{slot_key}# {name}{check}")
-                else:
-                    check1 = "✅" if paid1 else ""
-                    if partner:
-                        check2 = "✅" if paid2 else ""
-                        lines.append(f"{slot_key}# {name}{check1}+{partner}{check2}")
-                    else:
-                        lines.append(f"{slot_key}# {name}{check1}+")
-        lines.append("")
-    return "\n".join(lines).strip()
-
-
-NEW_GAME_HEADER = os.getenv("NEW_GAME_HEADER", """በ 400 ብር 5 ቁጥሮችን በተከታታይ በመያዝ እድሎን ይሞክሩ ለ 20 ሰው ብቻ ፈጣን ዕድል መልካም ዕድል
-
-መደብ 👉በ 4️⃣0️⃣0️⃣ ብር
-       👉ግማሽ 2️⃣0️⃣0️⃣ ብር
-
-1ኛ 🥇5️⃣,0️⃣0️⃣0️⃣ ብር
-2ኛ 🥈1000
-3ኛ 🥇400
-
-""")
-
-NEW_GAME_FOOTER = os.getenv("NEW_GAME_FOOTER", """
-
-CBE 1000641057146 biniyam dawit
-አዋሽ  01335630641400
-ዳሽን  5389857825011
-ቴሌ ብር 0952346729""")
-
-
-async def send_board(app: Application, board: dict, is_new_game: bool = False):
-    if not GROUP_ID:
-        logger.warning("GROUP_ID not set")
+# ══════════════════════════════════════════
+#  /setgame - Admin Game Setup
+# ══════════════════════════════════════════
+async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
         return
+    await update.message.reply_text("🎮 ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)")
+    return ASK_TOTAL
 
-    state = load_state()
-    board_text = build_board_text(board)
-    text = (NEW_GAME_HEADER + board_text + NEW_GAME_FOOTER) if is_new_game else board_text
-
-    # አሮጌ board ይሰርዛዋል
-    if state.get("board_message_id"):
-        try:
-            await app.bot.delete_message(chat_id=GROUP_ID, message_id=state["board_message_id"])
-        except Exception:
-            pass
-
-    # አዲስ board ይልካዋል
-    msg = await app.bot.send_message(chat_id=GROUP_ID, text=text)
-    state["board_message_id"] = msg.message_id
-    save_state(state)
-    logger.info(f"Board sent (message_id={msg.message_id})")
-
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    message = update.message
-    if not message or not message.text:
-        return
-
-    user = message.from_user
-    first_name = user.first_name if user else "User"
-    text = message.text.strip()
-
-    board = load_board()
-    board_json = board_to_json_str(board)
-
-    user_input = f"""User: {first_name}
-Message: {text}
-
-Current Board JSON:
-{board_json}"""
-
-    logger.info(f"[{first_name}]: {text}")
-
+async def ask_total(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        response = await call_ai(SYSTEM_PROMPT, user_input)
-        logger.info(f"AI Response: {response[:300]}...")
+        ctx.user_data["total_numbers"] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        return ASK_TOTAL
+    await update.message.reply_text("👥 ለ1 ሰው ስንት ቁጥሮች? (ለምሳሌ: 5)")
+    return ASK_PER_PERSON
 
-        updated_data, reply_text = parse_ai_response(response)
+async def ask_per_person(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        ctx.user_data["numbers_per_person"] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        return ASK_PER_PERSON
+    await update.message.reply_text("💰 ሙሉ ዋጋ ስንት ብር?")
+    return ASK_PRICE_FULL
 
-        # Board JSON update
-        if updated_data and "slots" in updated_data:
-            board["slots"].update(updated_data["slots"])
-            if "game_active" in updated_data:
-                board["game_active"] = updated_data["game_active"]
-            save_board(board)
+async def ask_price_full(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        ctx.user_data["price_full"] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        return ASK_PRICE_FULL
+    await update.message.reply_text("💳 ግማሽ ዋጋ አለ? (ቁጥር ጻፍ ወይም 'አይደለም')")
+    return ASK_PRICE_HALF
 
-        # New game
-        if updated_data and updated_data.get("new_game"):
-            board = reset_board()
-            await send_board(context.application, board, is_new_game=True)
-        # Board refresh
-        elif updated_data and updated_data.get("send_board"):
-            await send_board(context.application, board)
-
-        if reply_text:
-            await message.reply_text(reply_text)
-
-    except Exception as e:
-        logger.error(f"AI Error: {e}")
-        await message.reply_text("ይቅርታ ትንሽ ችግር ተፈጥሯል። እንደገና ሞክር 🙏")
-
-
-async def post_init(app: Application):
-    board = load_board()
-    slots = board.get("slots", {})
-    has_game = any(s.get("name") for s in slots.values())
-
-    if has_game:
-        logger.info("Existing game — resending board.")
-        await send_board(app, board)
+async def ask_price_half(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    if text in ["አይደለም", "aydelem", "no", "የለም"]:
+        ctx.user_data["price_half"] = None
     else:
-        logger.info("No game — starting new game.")
-        board = reset_board()
-        await send_board(app, board, is_new_game=True)
+        try:
+            ctx.user_data["price_half"] = int(text)
+        except ValueError:
+            await update.message.reply_text("❌ ቁጥር ወይም 'አይደለም' ጻፍ!")
+            return ASK_PRICE_HALF
+    await update.message.reply_text("🥇 1ኛ ሽልማት ስንት ብር?")
+    return ASK_PRIZE_1
 
+async def ask_prize_1(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        ctx.user_data["prize_1st"] = int(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        return ASK_PRIZE_1
+    await update.message.reply_text("🥈 2ኛ ሽልማት? (ከሌለ 'አይደለም')")
+    return ASK_PRIZE_2
 
-def main():
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
+async def ask_prize_2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    if text in ["አይደለም", "aydelem", "no", "የለም"]:
+        ctx.user_data["prize_2nd"] = None
+    else:
+        try:
+            ctx.user_data["prize_2nd"] = int(text)
+        except ValueError:
+            await update.message.reply_text("❌ ቁጥር ወይም 'አይደለም' ጻፍ!")
+            return ASK_PRIZE_2
+    await update.message.reply_text("🥉 3ኛ ሽልማት? (ከሌለ 'አይደለም')")
+    return ASK_PRIZE_3
+
+async def ask_prize_3(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    if text in ["አይደለም", "aydelem", "no", "የለም"]:
+        ctx.user_data["prize_3rd"] = None
+    else:
+        try:
+            ctx.user_data["prize_3rd"] = int(text)
+        except ValueError:
+            await update.message.reply_text("❌ ቁጥር ወይም 'አይደለም' ጻፍ!")
+            return ASK_PRIZE_3
+    await update.message.reply_text("💳 Payment info ጻፍ (CBE, Telebirr...):")
+    return ASK_PAYMENT
+
+async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    ctx.user_data["payment_info"] = update.message.text.strip()
+    game_id = save_settings(ctx.user_data)
+
+    settings = get_active_settings()
+    taken = {}
+    board_text = build_board(settings, taken)
+
+    # Group ላይ board ላክ
+    group_id = ctx.bot_data.get("group_id")
+    if group_id:
+        msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+        update_board_message_id(game_id, msg.message_id)
+
+    await update.message.reply_text(
+        f"✅ Settings ተቀምጧል! Board group ላይ ተልኳል።\n"
+        f"Game ID: {game_id}"
     )
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    logger.info("Bot started...")
-    app.run_polling(drop_pending_updates=True)
+    return ConversationHandler.END
 
+async def cancel_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ Setup ተሰርዟል።")
+    return ConversationHandler.END
+
+# ══════════════════════════════════════════
+#  /setgroup - Group ID ያስቀምጣል
+# ══════════════════════════════════════════
+async def setgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    group_id = update.effective_chat.id
+    ctx.bot_data["group_id"] = group_id
+    await update.message.reply_text(f"✅ Group ID ተቀምጧል: {group_id}")
+
+# ══════════════════════════════════════════
+#  Group Message Handler - ቁጥር ሲጻፍ
+# ══════════════════════════════════════════
+async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    user = msg.from_user
+    user_id = user.id
+    user_name = user.first_name or "Unknown"
+    text = msg.text.strip()
+    group_id = update.effective_chat.id
+
+    # Ambiguous reply check
+    if user_id in pending_ambiguous:
+        await handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id)
+        return
+
+    settings = get_active_settings()
+    if not settings:
+        return
+
+    result = parse_numbers(text)
+    if not result:
+        return
+
+    numbers = result["numbers"]
+    ambiguous = result["ambiguous"]
+    ambiguous_number = result["ambiguous_number"]
+
+    if ambiguous:
+        pending_ambiguous[user_id] = {
+            "numbers": numbers,
+            "ambiguous": ambiguous,
+            "ambiguous_number": ambiguous_number,
+            "game_id": settings["id"],
+            "settings": settings,
+            "group_id": group_id,
+            "user_name": user_name
+        }
+        if ambiguous == "all_half":
+            await msg.reply_text("ሁሉንም በግማሽ ነው? (አዎ/አይደለም)")
+        elif ambiguous == "last_half":
+            await msg.reply_text(f"{format_number(ambiguous_number)} ብቻ በግማሽ ነው? (አዎ/አይደለም)")
+        return
+
+    await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
+
+async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
+    pending = pending_ambiguous.get(user_id)
+    if not pending:
+        return
+
+    text_lower = text.lower()
+    yes = text_lower in ["አዎ", "awo", "yes", "aha", "አዎን"]
+    no = text_lower in ["አይደለም", "aydelem", "no", "የለም"]
+
+    if not yes and not no:
+        # User wrote something else (like "41 በግማሽ") - treat as "no"
+        no = True
+
+    numbers = pending["numbers"]
+    ambiguous = pending["ambiguous"]
+    ambiguous_number = pending["ambiguous_number"]
+    settings = pending["settings"]
+
+    if ambiguous == "all_half":
+        if yes:
+            numbers = [(n, True) for n, _ in numbers]
+        # if no → keep as is (last one is half, others not)
+
+    elif ambiguous == "last_half":
+        if yes:
+            pass  # keep last as half
+        else:
+            numbers = [(n, False) for n, _ in numbers]
+
+    del pending_ambiguous[user_id]
+    await process_registration(ctx, settings, numbers, user_id, user_name, group_id, update.message)
+
+async def process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg):
+    game_id = settings["id"]
+    per_person = settings["numbers_per_person"]
+
+    registered = []
+    failed = []
+
+    for num, is_half in numbers:
+        # Map to group start if per_person > 1
+        actual_num = get_group_start(num, per_person) if per_person > 1 else num
+
+        # Validate range
+        if actual_num < 1 or actual_num > settings["total_numbers"]:
+            failed.append(format_number(num))
+            continue
+
+        result = register_number(game_id, user_id, user_name, actual_num, is_half)
+        if result in ["registered", "registered_half"]:
+            registered.append((actual_num, is_half))
+        else:
+            failed.append(format_number(num))
+
+    if not registered:
+        if failed:
+            await msg.reply_text(f"❌ {', '.join(failed)} ቀድሞ ተወስዷል!")
+        return
+
+    # Board update
+    taken = get_taken_numbers(game_id)
+    board_text = build_board(settings, taken)
+    remaining_count = count_remaining(settings, taken)
+
+    board_msg_id = settings.get("board_message_id")
+
+    if remaining_count <= 7:
+        # Delete old board → resend
+        if board_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+            except Exception:
+                pass
+        new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+        update_board_message_id(game_id, new_board.message_id)
+
+        # Remaining message
+        remaining_text = build_remaining(settings, taken)
+        rem_msg_id = settings.get("remaining_message_id")
+        if remaining_text:
+            if rem_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                except Exception:
+                    pass
+            rem_msg = await ctx.bot.send_message(chat_id=group_id, text=remaining_text)
+            update_remaining_message_id(game_id, rem_msg.message_id)
+            # Refresh settings for next time
+            settings["board_message_id"] = new_board.message_id
+            settings["remaining_message_id"] = rem_msg.message_id
+    else:
+        # Just edit board
+        if board_msg_id:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=group_id,
+                    message_id=board_msg_id,
+                    text=board_text
+                )
+            except Exception:
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
+
+    # Warning message
+    reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
+    warning = ""
+    for n, is_half in numbers:
+        if is_half:
+            warning = "\n\n⚠️ በሚቀጥለው መጨረሻ ላይ ይህን ምልክት + አይጠቀሙ 🙏 ግራ ያጋባል"
+            break
+
+    if failed:
+        fail_list = ", ".join(failed)
+        await msg.reply_text(f"✅ {reg_list} ተመዘገበ!\n❌ {fail_list} ቀድሞ ተወስዷል!{warning}")
+    else:
+        await msg.reply_text(f"✅ {reg_list} ተመዘገበ!{warning}")
+
+# ══════════════════════════════════════════
+#  Main
+# ══════════════════════════════════════════
+def main():
+    init_db()
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    # setgame conversation
+    setup_conv = ConversationHandler(
+        entry_points=[CommandHandler("setgame", setgame_start)],
+        states={
+            ASK_TOTAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_total)],
+            ASK_PER_PERSON: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_per_person)],
+            ASK_PRICE_FULL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_price_full)],
+            ASK_PRICE_HALF: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_price_half)],
+            ASK_PRIZE_1: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_1)],
+            ASK_PRIZE_2: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_2)],
+            ASK_PRIZE_3: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_3)],
+            ASK_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_payment)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_setup)],
+    )
+
+    app.add_handler(setup_conv)
+    app.add_handler(CommandHandler("setgroup", setgroup))
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+        handle_group_message
+    ))
+
+    print("🤖 Bot started!")
+    app.run_polling()
 
 if __name__ == "__main__":
     main()
