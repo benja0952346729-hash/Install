@@ -312,8 +312,17 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 # ============================================================
 async def sms_endpoint(request):
     try:
-        body = await request.json()
-        result = await handle_sms_webhook(body.get("sms", ""))
+        content_type = request.content_type or ""
+        if "application/json" in content_type:
+            body = await request.json()
+            sms_text = body.get("sms", "")
+        else:
+            sms_text = await request.text()
+
+        if not sms_text:
+            return web.json_response({"success": False, "reason": "empty_body"})
+
+        result = await handle_sms_webhook(sms_text)
         return web.json_response(result)
     except Exception as e:
         logging.error(f"[SMS Endpoint] Error: {e}", exc_info=True)
