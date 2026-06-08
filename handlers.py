@@ -13,6 +13,8 @@ from database import (
     get_sms_payment_by_ref,
     is_ref_matched_already,
     cleanup_old_payments,
+    confirm_payment,      
+    get_paid_numbers,     
 )
 
 logger = logging.getLogger(__name__)
@@ -269,22 +271,44 @@ async def describe_photo_in_amharic(description: str) -> str:
 # MATCH NOTIFICATION
 # ============================================================
 async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
+    from database import confirm_payment, get_paid_numbers, get_active_settings
+    from board import build_board, build_remaining, count_remaining
+    from database import get_taken_numbers
+
     telegram_id = match_data["telegram_id"]
     amount = match_data["amount"]
     pay_type = match_data["type"]
     ref_no = match_data["refNo"]
 
-    message = (
-        f"✅ ክፍያ ተረጋግጧል!\n"
-        f"💰 Amount: ETB {amount}\n"
-        f"🏦 Via: {pay_type}\n"
-        f"🔖 Ref: {ref_no}\n"
-        f"👤 Telegram ID: {telegram_id}"
-    )
+    # ✅ ቁጥሮች አረጋግጥ
+    result = confirm_payment(telegram_id, amount)
+    confirmed = result["confirmed"]
+    remaining_balance = result["remaining_balance"]
 
-    logger.info(
-        f"[Match] ✅ Payment approved — TelegramID: {telegram_id} | ETB {amount} | {pay_type}"
-    )
+    # Message ሰራ
+    if confirmed:
+        nums = ", ".join(
+            str(c["number"]) + ("(ግማሽ)" if c["is_half"] else "")
+            for c in confirmed
+        )
+        message = (
+            f"✅ ክፍያ ተረጋግጧል!\n"
+            f"💰 Amount: ETB {amount}\n"
+            f"🏦 Via: {pay_type}\n"
+            f"🔖 Ref: {ref_no}\n"
+            f"👤 Telegram ID: {telegram_id}\n"
+            f"🎯 ✅ ቁጥሮች: {nums}"
+        )
+        if remaining_balance > 0:
+            message += f"\n💳 ቀሪ ባላንስ: ETB {remaining_balance}"
+    else:
+        message = (
+            f"💰 ETB {amount} ተቀብሏል — ነገር ግን የሚሸፈን ቁጥር የለም።\n"
+            f"👤 Telegram ID: {telegram_id}\n"
+            f"💳 ባላንስ: ETB {remaining_balance}"
+        )
+
+    logger.info(f"[Match] ✅ TelegramID: {telegram_id} | ETB {amount} | confirmed: {len(confirmed)}")
 
     target_chat = chat_id or GROUP_CHAT_ID
     if target_chat:
@@ -295,6 +319,27 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
         else:
             await bot.send_message(chat_id=target_chat, text=message)
 
+    # Board ዘምን
+    if confirmed and target_chat:
+        settings = get_active_settings()
+        if settings:
+            game_id = settings["id"]
+            taken = get_taken_numbers(game_id)
+            paid = get_paid_numbers(game_id)
+            board_text = build_board(settings, taken, paid)
+            board_msg_id = settings.get("board_message_id")
+
+            if board_msg_id:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=target_chat,
+                        message_id=board_msg_id,
+                        text=board_text
+                    )
+                except Exception:
+                    new_msg = await bot.send_message(chat_id=target_chat, text=board_text)
+                    from database import update_board_message_id
+                    update_board_message_id(game_id, new_msg.message_id)
 
 # ============================================================
 # HELPERS
