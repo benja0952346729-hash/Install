@@ -1,1 +1,1 @@
-worker: python trainer.py
+web: python bot.py
