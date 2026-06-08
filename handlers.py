@@ -4,7 +4,7 @@ import json
 import base64
 import logging
 from typing import Optional
-from config import BOT_TOKEN
+from config import BOT_TOKEN, GROUP_CHAT_ID
 import httpx
 from groq import Groq
 from database import (
@@ -18,7 +18,6 @@ from database import (
 logger = logging.getLogger(__name__)
 
 groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
-GROUP_CHAT_ID = os.getenv("GROUP_CHAT_ID")
 
 
 # ============================================================
@@ -72,12 +71,25 @@ async def handle_payment_photo(bot, msg):
         await msg.reply_text("⏳ Screenshot እየተረጋገጠ ነው...")
 
         analysis = await analyze_screenshot(image_base64)
-        photo_type = analysis.get("photoType")
+
+        # analysis None ወይም ባዶ ከሆነ
+        if not analysis:
+            await msg.reply_text("⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።")
+            return
+
+        photo_type = analysis.get("photoType", "other")
         ref_no = analysis.get("refNo")
+
+        logger.info(f"[Payment] photoType={photo_type} | refNo={ref_no} | user={username}")
 
         # Payment ያልሆነ ፎቶ
         if photo_type not in ("CBE", "Telebirr"):
-            desc = await describe_photo_in_amharic(analysis.get("description", ""))
+            description = analysis.get("description", "ክፍያ ያልሆነ ምስል")
+            try:
+                desc = await describe_photo_in_amharic(description)
+            except Exception as e:
+                logger.warning(f"[Describe] Failed: {e}")
+                desc = "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
             await msg.reply_text(desc)
             return
 
@@ -90,7 +102,9 @@ async def handle_payment_photo(bot, msg):
             await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
             return
 
-        result = save_screenshot_payment(telegram_id, ref_no, photo_type, analysis.get("description", ""))
+        result = save_screenshot_payment(
+            telegram_id, ref_no, photo_type, analysis.get("description", "")
+        )
 
         if result.get("matched"):
             await notify_match(bot, result["matched"], msg.message_id, chat_id)
@@ -100,8 +114,8 @@ async def handle_payment_photo(bot, msg):
             )
 
     except Exception as e:
-        logger.error(f"[Payment] Photo handler error: {e}")
-        await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይሞክሩ።")
+        logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
 
 
 # ============================================================
@@ -182,16 +196,17 @@ async def analyze_screenshot(image_base64: str) -> dict:
 
 CRITICAL: Read the reference number with extreme care — check 0/O, 1/I, 5/S confusion.
 
-Respond ONLY in this exact JSON format:
+Respond ONLY in this exact JSON format with no extra text:
 {
-  "photoType": "CBE" | "Telebirr" | "other",
+  "photoType": "CBE" or "Telebirr" or "other",
   "refNo": "reference number or null",
-  "description": "brief description"
+  "description": "brief description in English"
 }
 
 - CBE = Commercial Bank of Ethiopia receipt
 - Telebirr = Telebirr payment receipt
-- refNo: CBE → "VAT Receipt No" or "Ref No" | Telebirr → "transaction number\""""
+- refNo: CBE → "VAT Receipt No" or "Ref No" | Telebirr → "transaction number"
+- If not a payment receipt, set photoType to "other" and refNo to null"""
 
     try:
         response = groq_client.chat.completions.create(
@@ -199,7 +214,10 @@ Respond ONLY in this exact JSON format:
             messages=[{
                 "role": "user",
                 "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                    },
                     {"type": "text", "text": prompt},
                 ],
             }],
@@ -207,9 +225,21 @@ Respond ONLY in this exact JSON format:
             temperature=0.1,
         )
         text = response.choices[0].message.content.strip()
-        return json.loads(text.replace("```json", "").replace("```", "").strip())
+        # JSON ብቻ ያስወጣ
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        text = text.strip()
+        parsed = json.loads(text)
+        # refNo "null" string ከሆነ None አድርገው
+        if parsed.get("refNo") in ("null", "None", "", "N/A"):
+            parsed["refNo"] = None
+        return parsed
+    except json.JSONDecodeError as e:
+        logger.error(f"[Screenshot] JSON parse error: {e} | Raw: {text}")
+        return {"photoType": "other", "refNo": None, "description": "Could not parse response"}
     except Exception as e:
-        logger.error(f"[Screenshot] Analysis error: {e}")
+        logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
         return {"photoType": "other", "refNo": None, "description": "Could not analyze"}
 
 
@@ -233,7 +263,7 @@ async def describe_photo_in_amharic(description: str) -> str:
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"[Describe] Error: {e}")
-        return "⚠️ ምስሉ ሊነበብ አልቻለም።"
+        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
 
 
 # ============================================================
@@ -253,12 +283,16 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
         f"👤 Telegram ID: {telegram_id}"
     )
 
-    logger.info(f"[Match] ✅ Payment approved — TelegramID: {telegram_id} | ETB {amount} | {pay_type}")
+    logger.info(
+        f"[Match] ✅ Payment approved — TelegramID: {telegram_id} | ETB {amount} | {pay_type}"
+    )
 
     target_chat = chat_id or GROUP_CHAT_ID
     if target_chat:
         if reply_msg_id:
-            await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
+            await bot.send_message(
+                chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id
+            )
         else:
             await bot.send_message(chat_id=target_chat, text=message)
 
