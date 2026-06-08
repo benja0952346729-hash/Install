@@ -11,7 +11,7 @@ from telegram.ext import (
 from config import BOT_TOKEN, ADMIN_IDS, GROUP_ID
 from database import (
     init_db, save_settings, get_active_settings,
-    register_number, get_taken_numbers,
+    register_number, get_taken_numbers, get_paid_numbers,
     update_board_message_id, update_remaining_message_id
 )
 from parser import parse_numbers, format_number
@@ -256,7 +256,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         return
 
     taken = get_taken_numbers(game_id)
-    board_text = build_board(settings, taken)
+    paid = get_paid_numbers(game_id)
+    board_text = build_board(settings, taken, paid)
     remaining_count = count_remaining(settings, taken)
 
     board_msg_id = settings.get("board_message_id")
