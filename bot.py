@@ -1,4 +1,6 @@
 import logging
+import asyncio
+from aiohttp import web
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -15,6 +17,7 @@ from board import (
     build_board, build_remaining,
     count_remaining, get_group_start
 )
+from handlers import handle_payment_photo, handle_sms_webhook
 
 logging.basicConfig(level=logging.INFO)
 
@@ -286,11 +289,32 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     else:
         await msg.reply_text(f"✅ {reg_list} ተመዘገበ!{warning}")
 
+
+# ============================================================
+# SMS WEBHOOK SERVER
+# ============================================================
+async def sms_endpoint(request):
+    body = await request.json()
+    result = await handle_sms_webhook(body.get("sms", ""))
+    return web.json_response(result)
+
+async def start_server():
+    web_app = web.Application()
+    web_app.router.add_post("/sms", sms_endpoint)
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    site = web.TCPSite(runner, "0.0.0.0", 8080)
+    await site.start()
+    print("🌐 SMS Server started on port 8080")
+
+
+# ============================================================
+# MAIN
+# ============================================================
 def main():
     init_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.bot_data["group_id"] = GROUP_ID
 
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setgame", setgame_start)],
@@ -311,9 +335,16 @@ def main():
     app.add_handler(setup_conv)
     app.add_handler(CommandHandler("setgroup", lambda u, c: None))
     app.add_handler(MessageHandler(
+        filters.PHOTO & filters.ChatType.GROUPS,
+        lambda u, c: handle_payment_photo(c.bot, u.message)
+    ))
+    app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_group_message
     ))
+
+    loop = asyncio.get_event_loop()
+    loop.run_until_complete(start_server())
 
     print("🤖 Bot started!")
     app.run_polling()
