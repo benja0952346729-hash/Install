@@ -412,9 +412,11 @@ def save_screenshot_payment(telegram_id: int, ref_no: str, pay_type: str, descri
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description)
-        VALUES (%s, %s, %s, %s)
-        ON CONFLICT (ref_no) DO NOTHING
+        INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description, matched)
+        VALUES (%s, %s, %s, %s, FALSE)
+        ON CONFLICT (ref_no) DO UPDATE
+            SET matched = FALSE,
+                telegram_id = EXCLUDED.telegram_id
     """, (telegram_id, ref_no, pay_type, description))
     conn.commit()
     cur.close()
