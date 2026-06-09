@@ -13,8 +13,13 @@ from database import (
     get_sms_payment_by_ref,
     is_ref_matched_already,
     cleanup_old_payments,
-    confirm_payment,      
-    get_paid_numbers,     
+    confirm_payment,
+    get_paid_numbers,
+    get_active_settings,
+    get_taken_numbers,
+    get_user_by_number,
+    add_winner_balance,
+    save_winner,
 )
 
 logger = logging.getLogger(__name__)
@@ -26,7 +31,6 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # SMS WEBHOOK
 # ============================================================
 async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
-    """Android SMS Forwarder ከሚልከው SMS ይቀበላል"""
     logger.info(f"[SMS] Received: {raw_sms}")
 
     parsed = await parse_sms(raw_sms)
@@ -43,7 +47,6 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
     if not ref_no:
         return {"success": False, "reason": "no_ref"}
 
-    # Duplicate check
     if get_sms_payment_by_ref(ref_no):
         logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
         return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
@@ -61,7 +64,6 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
 # PAYMENT PHOTO HANDLER
 # ============================================================
 async def handle_payment_photo(bot, msg, nekay_cb=None):
-    """Group ውስጥ screenshot ሲላክ"""
     chat_id = msg.chat.id
     telegram_id = msg.from_user.id
     username = msg.from_user.username or msg.from_user.first_name or "Unknown"
@@ -121,16 +123,141 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
 
 
 # ============================================================
+# WINNER PHOTO ANALYZER
+# ============================================================
+async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
+    prize_1st = settings.get("prize_1st", 0)
+    prize_2nd = settings.get("prize_2nd")
+    prize_3rd = settings.get("prize_3rd")
+
+    prizes_desc = f"1st prize: {prize_1st} ETB"
+    if prize_2nd:
+        prizes_desc += f", 2nd: {prize_2nd} ETB"
+    if prize_3rd:
+        prizes_desc += f", 3rd: {prize_3rd} ETB"
+
+    prompt = f"""You are analyzing a lottery/raffle winner result image.
+Game prizes: {prizes_desc}
+Total numbers in game: {settings.get('total_numbers')}
+
+Extract the winning numbers from the image carefully.
+
+Respond ONLY in this exact JSON format with no extra text:
+{{
+  "1st": <winning number as integer or null>,
+  "2nd": <winning number as integer or null>,
+  "3rd": <winning number as integer or null>
+}}
+
+Only include places that have prizes. Numbers must be integers."""
+
+    try:
+        response = groq_client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "image_url",
+                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
+                    },
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            max_tokens=200,
+            temperature=0.1,
+        )
+        text = response.choices[0].message.content.strip()
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+
+        result = {}
+        if parsed.get("1st") is not None:
+            result[1] = int(parsed["1st"])
+        if parsed.get("2nd") is not None:
+            result[2] = int(parsed["2nd"])
+        if parsed.get("3rd") is not None:
+            result[3] = int(parsed["3rd"])
+
+        return result if result else None
+
+    except Exception as e:
+        logger.error(f"[Winner] Analyze error: {e}", exc_info=True)
+        return None
+
+
+# ============================================================
+# WINNER PHOTO HANDLER
+# ============================================================
+async def handle_winner_photo(bot, msg, settings: dict):
+    """Admin winner ፎቶ ሲልክ ይጠራል"""
+    try:
+        photo = msg.photo[-1]
+        image_base64 = await download_image_as_base64(photo.file_id)
+
+        await msg.reply_text("⏳ Winner እየተለየ ነው...")
+
+        winners = await analyze_winner_photo(image_base64, settings)
+
+        if not winners:
+            await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
+            return
+
+        prize_map = {
+            1: settings.get("prize_1st", 0),
+            2: settings.get("prize_2nd"),
+            3: settings.get("prize_3rd"),
+        }
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        per_person = settings.get("numbers_per_person", 1)
+        lines = ["🏆 Winners!\n"]
+
+        for place in sorted(winners.keys()):
+            number = winners[place]
+            prize = prize_map.get(place)
+            medal = medals.get(place, "🎖️")
+
+            if not prize:
+                lines.append(f"{medal} {place}ኛ: #{number} — prize አልተቀመጠም")
+                continue
+
+            # per_person > 1 ከሆነ group start ያግኝ
+            if per_person > 1:
+                from board import get_group_start
+                lookup_number = get_group_start(number, per_person)
+            else:
+                lookup_number = number
+
+            user = get_user_by_number(settings["id"], lookup_number)
+            if not user:
+                lines.append(f"{medal} {place}ኛ: #{number} — user አልተገኘም")
+                continue
+
+            telegram_id = user["telegram_id"]
+            user_name = user["user_name"]
+
+            add_winner_balance(settings["id"], telegram_id, prize)
+            save_winner(settings["id"], place, telegram_id, user_name, number, prize)
+            lines.append(f"{medal} {place}ኛ: #{number} — {user_name} → ETB {prize} ✅")
+
+        await msg.reply_text("\n".join(lines))
+
+    except Exception as e:
+        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል።")
+
+
+# ============================================================
 # SMS PARSER
 # ============================================================
 async def parse_sms(sms: str) -> Optional[dict]:
 
-    # CBE — Direct credit
     m = re.search(r"Credited with ETB ([\d,]+\.?\d*).+?Ref No\s+([A-Z0-9]+)", sms, re.DOTALL)
     if m:
         return {"type": "CBE", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
 
-    # CBE — Transfer with URL receipt
     m = re.search(
         r"(?:received|transferred) ETB ([\d,]+\.?\d*).+(https://Mbreciept\S+)",
         sms, re.DOTALL | re.IGNORECASE
@@ -140,7 +267,6 @@ async def parse_sms(sms: str) -> Optional[dict]:
         ref_no = await fetch_ref_from_url(m.group(2).strip())
         return {"type": "CBE", "amount": amount, "refNo": ref_no}
 
-    # Telebirr → CBE transfer
     m = re.search(
         r"transferred ETB ([\d,]+\.?\d*).+?bank transaction number is\s+([A-Z0-9]+)",
         sms, re.DOTALL
@@ -148,7 +274,6 @@ async def parse_sms(sms: str) -> Optional[dict]:
     if m:
         return {"type": "Telebirr", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
 
-    # Telebirr — Received
     m = re.search(
         r"received ETB ([\d,]+\.?\d*).+?transaction number is\s+([A-Z0-9]+)",
         sms, re.DOTALL
@@ -270,9 +395,7 @@ async def describe_photo_in_amharic(description: str) -> str:
 # MATCH NOTIFICATION
 # ============================================================
 async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None):
-    from database import confirm_payment, get_paid_numbers, get_active_settings
     from board import build_board
-    from database import get_taken_numbers
 
     telegram_id = match_data["telegram_id"]
     amount = match_data["amount"]
@@ -316,11 +439,9 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
         else:
             await bot.send_message(chat_id=target_chat, text=message)
 
-    # ነቃይ callback — confirmed ቁጥሮች ከነቃይ ይጠፋሉ
     if nekay_cb and confirmed:
         await nekay_cb(confirmed)
 
-    # Board ዘምን
     if confirmed and target_chat:
         settings = get_active_settings()
         if settings:
