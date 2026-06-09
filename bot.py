@@ -13,7 +13,7 @@ from database import (
     init_db, save_settings, get_active_settings,
     register_number, get_taken_numbers, get_paid_numbers,
     update_board_message_id, update_remaining_message_id,
-    admin_remove_player, admin_mark_paid, admin_mark_nekay,
+    admin_remove_player, admin_mark_paid, mark_nekay,
     clear_game, get_unpaid_numbers
 )
 from parser import parse_numbers, format_number
@@ -114,26 +114,9 @@ def _build_nekay_from_snap(snap: dict) -> list:
 
 
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
-    warn_msg = await bot.send_message(chat_id=group_id, text=build_warning(warn_seconds))
-
-    interval = 5
-    elapsed = 0
-    while elapsed < warn_seconds:
-        await asyncio.sleep(interval)
-        elapsed += interval
-        left = warn_seconds - elapsed
-        if left < 0:
-            left = 0
-        try:
-            await bot.edit_message_text(
-                chat_id=group_id,
-                message_id=warn_msg.message_id,
-                text=build_warning(left)
-            )
-        except Exception:
-            pass
-        if left == 0:
-            break
+    # ✅ Warning አንድ ጊዜ ብቻ ይላካ — edit አይሁን
+    warn_msg = await bot.send_message(chat_id=group_id, text=build_warning())
+    await asyncio.sleep(warn_seconds)
 
     unpaid = get_unpaid_numbers(game_id)
     if unpaid:
@@ -147,9 +130,9 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
                 snap[number] = 0
         nekay_numbers[game_id] = snap
 
-        # ✅ admin_remove_player ሳይሆን admin_mark_nekay — DB ላይ አይሰርዝም
+        # ✅ admin_remove_player ሳይሆን mark_nekay — DB ላይ አይሰርዝም
         for number, slots in unpaid:
-            admin_mark_nekay(game_id, number)
+            mark_nekay(game_id, number)
 
         nekay_list = _build_nekay_from_snap(snap)
         nekay_text = build_nekay(nekay_list)
@@ -612,6 +595,31 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     admin_mark_paid(settings["id"], number, slot, is_paid)
+
+    # ✅ ነቃይ እያለ admin /paid ካረገ → snap ላይ ይጥፋ
+    if is_paid and settings["id"] in nekay_active:
+        snap = nekay_numbers.get(settings["id"], {})
+        if number in snap:
+            del snap[number]
+            nekay_numbers[settings["id"]] = snap
+            # ነቃይ list ዘምን
+            rem_msg_id = settings.get("remaining_message_id")
+            if rem_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=GROUP_ID, message_id=rem_msg_id)
+                except Exception:
+                    pass
+            if snap:
+                from board import build_nekay
+                nekay_list = _build_nekay_from_snap(snap)
+                nekay_text = build_nekay(nekay_list)
+                new_nekay = await ctx.bot.send_message(chat_id=GROUP_ID, text=nekay_text)
+                update_remaining_message_id(settings["id"], new_nekay.message_id)
+            else:
+                update_remaining_message_id(settings["id"], None)
+                nekay_active.discard(settings["id"])
+                nekay_numbers.pop(settings["id"], None)
+
     await _refresh_board(ctx, settings)
 
     mark = "✅" if is_paid else "❌"
