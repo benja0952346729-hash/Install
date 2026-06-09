@@ -472,14 +472,28 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             nekay_active.discard(game_id)
             nekay_numbers.pop(game_id, None)
     elif remaining_count <= 7:
-        # 7 ሲቀር — board resend
-        if board_msg_id:
-            try:
-                await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
-            except Exception:
-                pass
-        new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-        update_board_message_id(game_id, new_board.message_id)
+        # 7 ሲቀር — board: 6 messages ሲሞላ resend፣ ካልሆነ edit
+        if should_resend:
+            if board_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_board.message_id)
+            board_msg_id = new_board.message_id
+        else:
+            if board_msg_id:
+                try:
+                    await ctx.bot.edit_message_text(
+                        chat_id=group_id,
+                        message_id=board_msg_id,
+                        text=board_text
+                    )
+                except Exception:
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
+                    board_msg_id = new_board.message_id
 
         # ቀሪ — ሁልጊዜ delete → resend (ታች ይሆናል)
         remaining_text = build_remaining(settings, taken)
@@ -492,9 +506,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if remaining_text:
             rem_msg = await ctx.bot.send_message(chat_id=group_id, text=remaining_text)
             update_remaining_message_id(game_id, rem_msg.message_id)
-            settings["board_message_id"] = new_board.message_id
-            settings["remaining_message_id"] = rem_msg.message_id
-        msg_counter[group_id] = 0  # counter reset
     else:
         # ከ7 በላይ ሲቀር — 6 messages ሲሞላ resend፣ ካልሆነ edit
         if should_resend:
