@@ -14,7 +14,8 @@ from database import (
     register_number, get_taken_numbers, get_paid_numbers,
     update_board_message_id, update_remaining_message_id,
     admin_remove_player, admin_mark_paid, mark_nekay,
-    clear_game, get_unpaid_numbers
+    clear_game, get_unpaid_numbers,
+    get_winner_by_place, deduct_winner_balance
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -22,7 +23,7 @@ from board import (
     count_remaining, get_group_start,
     build_warning, build_nekay
 )
-from handlers import handle_payment_photo, handle_sms_webhook
+from handlers import handle_payment_photo, handle_sms_webhook, handle_winner_photo
 
 logging.basicConfig(
     level=logging.INFO,
@@ -32,14 +33,15 @@ logging.basicConfig(
 (
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
-    ASK_PRIZE_3, ASK_PAYMENT
-) = range(8)
+    ASK_PRIZE_3, ASK_PAYMENT,
+    ASK_SEND_PLACE, ASK_SEND_AMOUNT
+) = range(10)
 
 pending_ambiguous = {}
-active_countdowns = {}  # game_id: task
-nekay_active = set()    # game_id — ነቃይ እያለ
-nekay_numbers = {}      # game_id: {number: slot} — countdown ሲጀምር snapshot
-msg_counter = {}        # group_id: count — 6 messages ሲሞላ board/ቀሪ/ነቃይ resend
+active_countdowns = {}
+nekay_active = set()
+nekay_numbers = {}
+msg_counter = {}
 
 
 async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list):
@@ -114,7 +116,6 @@ def _build_nekay_from_snap(snap: dict) -> list:
 
 
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
-    # ✅ Warning አንድ ጊዜ ብቻ ይላካ — edit አይሁን
     warn_msg = await bot.send_message(chat_id=group_id, text=build_warning())
     await asyncio.sleep(warn_seconds)
 
@@ -130,7 +131,6 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
                 snap[number] = 0
         nekay_numbers[game_id] = snap
 
-        # ✅ admin_remove_player ሳይሆን mark_nekay — DB ላይ አይሰርዝም
         for number, slots in unpaid:
             mark_nekay(game_id, number)
 
@@ -382,7 +382,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     remaining_count = count_remaining(settings, taken)
 
     board_msg_id = settings.get("board_message_id")
-
     should_resend = _increment_counter(group_id)
 
     if game_id in nekay_active:
@@ -596,13 +595,11 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     admin_mark_paid(settings["id"], number, slot, is_paid)
 
-    # ✅ ነቃይ እያለ admin /paid ካረገ → snap ላይ ይጥፋ
     if is_paid and settings["id"] in nekay_active:
         snap = nekay_numbers.get(settings["id"], {})
         if number in snap:
             del snap[number]
             nekay_numbers[settings["id"]] = snap
-            # ነቃይ list ዘምን
             rem_msg_id = settings.get("remaining_message_id")
             if rem_msg_id:
                 try:
@@ -671,6 +668,16 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    # ✅ Admin ከሆነ → winner photo handler
+    if is_admin(user_id):
+        settings = get_active_settings()
+        if settings:
+            await handle_winner_photo(ctx.bot, update.message, settings)
+            return
+
+    # ✅ Admin ካልሆነ → payment photo handler
     _increment_counter(group_id)
     settings = get_active_settings()
     game_id = settings["id"] if settings else None
@@ -733,6 +740,143 @@ async def start_server():
     print("🌐 SMS Server started on port 8080")
 
 
+
+# ============================================================
+# ADMIN — /send (private only)
+# ============================================================
+
+async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return ConversationHandler.END
+    if update.effective_chat.type != "private":
+        await update.message.reply_text("❌ Private chat ብቻ ነው!")
+        return ConversationHandler.END
+
+    settings = get_active_settings()
+    if not settings:
+        await update.message.reply_text("❌ Active game የለም!")
+        return ConversationHandler.END
+
+    prize_1st = settings.get("prize_1st", 0)
+    prize_2nd = settings.get("prize_2nd")
+    prize_3rd = settings.get("prize_3rd")
+
+    lines = ["💸 ለማን ብር ትልካለህ?"]
+    lines.append(f"1 — 1ኛ winner (prize: {prize_1st} ብር)")
+    if prize_2nd:
+        lines.append(f"2 — 2ኛ winner (prize: {prize_2nd} ብር)")
+    if prize_3rd:
+        lines.append(f"3 — 3ኛ winner (prize: {prize_3rd} ብር)")
+    lines.append("\n(1, 2, ወይም 3 ጻፍ)")
+
+    await update.message.reply_text("\n".join(lines))
+    return ASK_SEND_PLACE
+
+
+async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip()
+    if text not in ("1", "2", "3"):
+        await update.message.reply_text("❌ 1, 2, ወይም 3 ብቻ ጻፍ!")
+        return ASK_SEND_PLACE
+
+    place = int(text)
+    settings = get_active_settings()
+    if not settings:
+        return ConversationHandler.END
+
+    winner = get_winner_by_place(settings["id"], place)
+    if not winner:
+        await update.message.reply_text(f"❌ {place}ኛ winner አልተመዘገበም!")
+        return ConversationHandler.END
+
+    ctx.user_data["send_place"] = place
+    ctx.user_data["send_telegram_id"] = winner["telegram_id"]
+    ctx.user_data["send_user_name"] = winner["user_name"]
+    ctx.user_data["send_game_id"] = settings["id"]
+
+    balance = winner.get("balance", 0)
+    await update.message.reply_text(
+        f"👤 {place}ኛ: {winner['user_name']}\n"
+        f"💳 አሁን balance: ETB {balance}\n\n"
+        f"💸 ስንት ብር ላካህ? (ቁጥር ጻፍ)"
+    )
+    return ASK_SEND_AMOUNT
+
+
+async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        amount = float(update.message.text.strip())
+        if amount <= 0:
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ ትክክለኛ ቁጥር ጻፍ!")
+        return ASK_SEND_AMOUNT
+
+    place = ctx.user_data["send_place"]
+    telegram_id = ctx.user_data["send_telegram_id"]
+    user_name = ctx.user_data["send_user_name"]
+    game_id = ctx.user_data["send_game_id"]
+
+    result = deduct_winner_balance(game_id, telegram_id, amount)
+    new_balance = result["new_balance"]
+    nekay_numbers_list = result.get("nekay_numbers", [])
+
+    settings = get_active_settings()
+    place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(place, f"{place}ኛ")
+
+    lines = [
+        f"✅ {place_label} winner: {user_name}",
+        f"💸 የላካህ: ETB {amount}",
+        f"💳 ቀሪ balance: ETB {new_balance}",
+    ]
+
+    if nekay_numbers_list:
+        nekay_str = ", ".join(str(n) for n in nekay_numbers_list)
+        lines.append(f"⚠️ ነቃይ የሆኑ ቁጥሮች: {nekay_str}")
+
+    await update.message.reply_text("\n".join(lines))
+
+    # Board refresh
+    if settings and nekay_numbers_list:
+        taken = get_taken_numbers(game_id)
+        paid = get_paid_numbers(game_id)
+        board_text = build_board(settings, taken, paid)
+        board_msg_id = settings.get("board_message_id")
+        if board_msg_id:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=GROUP_ID,
+                    message_id=board_msg_id,
+                    text=board_text
+                )
+            except Exception:
+                new_msg = await ctx.bot.send_message(chat_id=GROUP_ID, text=board_text)
+                update_board_message_id(game_id, new_msg.message_id)
+
+        # Nekay list group ላይ ይላካ
+        from board import build_nekay
+        snap = {n: 0 for n in nekay_numbers_list}
+        nekay_active.add(game_id)
+        nekay_numbers[game_id] = nekay_numbers.get(game_id, {})
+        nekay_numbers[game_id].update(snap)
+        nekay_list = [(n, False) for n in nekay_numbers_list]
+        nekay_text = build_nekay(nekay_list)
+        rem_msg_id = settings.get("remaining_message_id")
+        if rem_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=GROUP_ID, message_id=rem_msg_id)
+            except Exception:
+                pass
+        new_nekay = await ctx.bot.send_message(chat_id=GROUP_ID, text=nekay_text)
+        update_remaining_message_id(game_id, new_nekay.message_id)
+
+    return ConversationHandler.END
+
+
+async def cancel_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("❌ /send ተሰርዟል።")
+    return ConversationHandler.END
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -757,12 +901,22 @@ def main():
         fallbacks=[CommandHandler("cancel", cancel_setup)],
     )
 
+    send_conv = ConversationHandler(
+        entry_points=[CommandHandler("send", send_start)],
+        states={
+            ASK_SEND_PLACE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, send_ask_place)],
+            ASK_SEND_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, send_ask_amount)],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_send)],
+    )
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(setup_conv)
     app.add_handler(CommandHandler("remove", handle_remove))
     app.add_handler(CommandHandler("paid", handle_paid_cmd))
     app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
     app.add_handler(CommandHandler("newgame", handle_newgame))
+    app.add_handler(send_conv)
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.GROUPS,
         handle_group_photo
