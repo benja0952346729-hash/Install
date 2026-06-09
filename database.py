@@ -320,6 +320,29 @@ def get_paid_numbers(game_id: int) -> dict:
 
 
 # ============================================================
+# UNPAID NUMBERS
+# ============================================================
+
+def get_unpaid_numbers(game_id: int) -> list:
+    """
+    is_paid=FALSE ያላቸው ቁጥሮች ይመልሳል
+    returns [(number, is_half), ...]
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT DISTINCT ON (number) number, is_half
+        FROM registrations
+        WHERE game_id=%s AND is_paid=FALSE
+        ORDER BY number, slot
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+# ============================================================
 # ADMIN — NEW GAME CLEAR
 # ============================================================
 
