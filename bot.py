@@ -37,6 +37,17 @@ logging.basicConfig(
 
 pending_ambiguous = {}
 active_countdowns = {}  # game_id: task
+nekay_active = set()    # game_id — ነቃይ እያለ board delete/resend አይሆንም
+msg_counter = {}        # group_id: count — 6 messages ሲሞላ board/ቀሪ/ነቃይ resend
+
+
+def _increment_counter(group_id: int) -> int:
+    """Message counter ይጨምራል — 6 ሲሞላ True ይመልሳል እና ወደ 0 ይመልሳል"""
+    msg_counter[group_id] = msg_counter.get(group_id, 0) + 1
+    if msg_counter[group_id] >= 6:
+        msg_counter[group_id] = 0
+        return True
+    return False
 
 
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
@@ -76,6 +87,8 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
             )
         except Exception:
             await bot.send_message(chat_id=group_id, text=nekay_text)
+        nekay_active.add(game_id)
+        update_remaining_message_id(game_id, warn_msg.message_id)
     else:
         try:
             await bot.delete_message(chat_id=group_id, message_id=warn_msg.message_id)
@@ -312,7 +325,47 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     board_msg_id = settings.get("board_message_id")
 
-    if remaining_count <= 7:
+    should_resend = _increment_counter(group_id)
+
+    # ነቃይ እያለ
+    if game_id in nekay_active:
+        # board — resend ወይስ edit
+        if should_resend:
+            if board_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_board.message_id)
+        else:
+            if board_msg_id:
+                try:
+                    await ctx.bot.edit_message_text(
+                        chat_id=group_id,
+                        message_id=board_msg_id,
+                        text=board_text
+                    )
+                except Exception:
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
+        # ነቃይ — ሁልጊዜ delete → resend (ታች ይሆናል)
+        unpaid_now = get_unpaid_numbers(game_id)
+        rem_msg_id = settings.get("remaining_message_id")
+        if rem_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+            except Exception:
+                pass
+        if unpaid_now:
+            nekay_text = build_nekay(unpaid_now)
+            new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+            update_remaining_message_id(game_id, new_nekay.message_id)
+        else:
+            update_remaining_message_id(game_id, None)
+            nekay_active.discard(game_id)
+    elif remaining_count <= 7:
+        # 7 ሲቀር — board resend
         if board_msg_id:
             try:
                 await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
@@ -321,29 +374,41 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
         update_board_message_id(game_id, new_board.message_id)
 
+        # ቀሪ — ሁልጊዜ delete → resend (ታች ይሆናል)
         remaining_text = build_remaining(settings, taken)
         rem_msg_id = settings.get("remaining_message_id")
+        if rem_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+            except Exception:
+                pass
         if remaining_text:
-            if rem_msg_id:
-                try:
-                    await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                except Exception:
-                    pass
             rem_msg = await ctx.bot.send_message(chat_id=group_id, text=remaining_text)
             update_remaining_message_id(game_id, rem_msg.message_id)
             settings["board_message_id"] = new_board.message_id
             settings["remaining_message_id"] = rem_msg.message_id
+        msg_counter[group_id] = 0  # counter reset
     else:
-        if board_msg_id:
-            try:
-                await ctx.bot.edit_message_text(
-                    chat_id=group_id,
-                    message_id=board_msg_id,
-                    text=board_text
-                )
-            except Exception:
-                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                update_board_message_id(game_id, new_board.message_id)
+        # ከ7 በላይ ሲቀር — 6 messages ሲሞላ resend፣ ካልሆነ edit
+        if should_resend:
+            if board_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_board.message_id)
+        else:
+            if board_msg_id:
+                try:
+                    await ctx.bot.edit_message_text(
+                        chat_id=group_id,
+                        message_id=board_msg_id,
+                        text=board_text
+                    )
+                except Exception:
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
 
     # Board ሲሞላ countdown ይጀምር
     if remaining_count == 0 and game_id not in active_countdowns:
@@ -353,17 +418,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         active_countdowns[game_id] = task
 
     reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
-    warning = ""
-    for n, is_half in numbers:
-        if is_half:
-            warning = "\n\n⚠️ በሚቀጥለው መጨረሻ ላይ ይህን ምልክት + አይጠቀሙ 🙏 ግራ ያጋባል"
-            break
 
     if failed:
         fail_list = ", ".join(failed)
-        await msg.reply_text(f"✅ {reg_list} ተመዘገበ!\n❌ {fail_list} ቀድሞ ተወስዷል!{warning}")
+        await msg.reply_text(f"✅ {reg_list} ተመዘገበ!\n❌ {fail_list} ቀድሞ ተወስዷል!")
     else:
-        await msg.reply_text(f"✅ {reg_list} ተመዘገበ!{warning}")
+        await msg.reply_text(f"✅ {reg_list} ተመዘገበ!")
 
 
 # ============================================================
@@ -479,6 +539,8 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     clear_game(settings["id"])
+    nekay_active.discard(settings["id"])
+    active_countdowns.pop(settings["id"], None)
 
     # አሮጌ board ይሰርዛል
     board_msg_id = settings.get("board_message_id")
@@ -503,6 +565,16 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     update_remaining_message_id(settings["id"], None)
 
     await update.message.reply_text("✅ አዲስ ጨዋታ ተጀምሯል!")
+
+
+# ============================================================
+# GROUP PHOTO HANDLER — counter ይጨምራል
+# ============================================================
+
+async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    group_id = update.effective_chat.id
+    _increment_counter(group_id)
+    await handle_payment_photo(ctx.bot, update.message)
 
 
 # ============================================================
@@ -577,7 +649,7 @@ def main():
     app.add_handler(CommandHandler("newgame", handle_newgame))
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.GROUPS,
-        lambda u, c: handle_payment_photo(c.bot, u.message)
+        handle_group_photo
     ))
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
