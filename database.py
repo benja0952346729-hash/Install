@@ -168,7 +168,7 @@ def get_registrations(game_id):
     return rows
 
 
-def register_number(game_id, user_id, user_name, number, is_half):
+def register_number(game_id, user_id, user_name, number, is_half, force=False):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -190,6 +190,11 @@ def register_number(game_id, user_id, user_name, number, is_half):
     bal_row = cur.fetchone()
     balance = float(bal_row[0]) if bal_row else 0.0
     can_pay = balance >= cost
+
+    # force=True → ነቃይ ቁጥር — existing ይሰርዛል → አዲስ ይጽፋል
+    if force and existing:
+        cur.execute("DELETE FROM registrations WHERE game_id=%s AND number=%s", (game_id, number))
+        existing = []
 
     if not existing:
         cur.execute("""
@@ -326,12 +331,13 @@ def get_paid_numbers(game_id: int) -> dict:
 def get_unpaid_numbers(game_id: int) -> list:
     """
     is_paid=FALSE ያላቸው ቁጥሮች ይመልሳል
-    returns [(number, is_half), ...]
+    returns [(number, unpaid_slots), ...]
+    unpaid_slots = set of unpaid slot numbers
     """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT DISTINCT ON (number) number, is_half
+        SELECT number, slot
         FROM registrations
         WHERE game_id=%s AND is_paid=FALSE
         ORDER BY number, slot
@@ -339,7 +345,14 @@ def get_unpaid_numbers(game_id: int) -> list:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return rows
+
+    result = {}
+    for number, slot in rows:
+        if number not in result:
+            result[number] = set()
+        result[number].add(slot)
+    # [(number, unpaid_slots), ...]
+    return [(n, slots) for n, slots in sorted(result.items())]
 
 
 # ============================================================
