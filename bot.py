@@ -14,12 +14,13 @@ from database import (
     register_number, get_taken_numbers, get_paid_numbers,
     update_board_message_id, update_remaining_message_id,
     admin_remove_player, admin_mark_paid,
-    clear_game
+    clear_game, get_unpaid_numbers
 )
 from parser import parse_numbers, format_number
 from board import (
     build_board, build_remaining,
-    count_remaining, get_group_start
+    count_remaining, get_group_start,
+    build_warning, build_nekay
 )
 from handlers import handle_payment_photo, handle_sms_webhook
 
@@ -35,6 +36,53 @@ logging.basicConfig(
 ) = range(8)
 
 pending_ambiguous = {}
+active_countdowns = {}  # game_id: task
+
+
+async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
+    """Background countdown — warning message ይዘምናል፣ ጊዜ ካለቀ ነቃይ ይላካል"""
+    warn_msg = await bot.send_message(chat_id=group_id, text=build_warning(warn_seconds))
+
+    interval = 5
+    elapsed = 0
+    while elapsed < warn_seconds:
+        await asyncio.sleep(interval)
+        elapsed += interval
+        left = warn_seconds - elapsed
+        if left < 0:
+            left = 0
+        try:
+            await bot.edit_message_text(
+                chat_id=group_id,
+                message_id=warn_msg.message_id,
+                text=build_warning(left)
+            )
+        except Exception:
+            pass
+        if left == 0:
+            break
+
+    # ጊዜ አለቀ — ያልከፈሉ ያወጣ
+    unpaid = get_unpaid_numbers(game_id)
+    if unpaid:
+        for number, is_half in unpaid:
+            admin_remove_player(game_id, number)
+        nekay_text = build_nekay(unpaid)
+        try:
+            await bot.edit_message_text(
+                chat_id=group_id,
+                message_id=warn_msg.message_id,
+                text=nekay_text
+            )
+        except Exception:
+            await bot.send_message(chat_id=group_id, text=nekay_text)
+    else:
+        try:
+            await bot.delete_message(chat_id=group_id, message_id=warn_msg.message_id)
+        except Exception:
+            pass
+
+    active_countdowns.pop(game_id, None)
 
 
 def is_admin(user_id):
@@ -297,6 +345,13 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 update_board_message_id(game_id, new_board.message_id)
 
+    # Board ሲሞላ countdown ይጀምር
+    if remaining_count == 0 and game_id not in active_countdowns:
+        task = asyncio.create_task(
+            _countdown_task(ctx.bot, game_id, group_id)
+        )
+        active_countdowns[game_id] = task
+
     reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
     warning = ""
     for n, is_half in numbers:
@@ -346,24 +401,39 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /remove 5  ወይም  /remove 5 2")
-        return
-    try:
-        number = int(parts[1])
-        slot = int(parts[2]) if len(parts) > 2 else None
-    except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("❌ ምሳሌ: /remove 5  ወይም  /remove 5:1 10 15:2")
         return
 
     settings = get_active_settings()
     if not settings:
         return
 
-    admin_remove_player(settings["id"], number, slot)
+    removed = []
+    errors = []
+
+    for part in parts[1:]:
+        try:
+            if ":" in part:
+                num_str, slot_str = part.split(":", 1)
+                number = int(num_str)
+                slot = int(slot_str)
+            else:
+                number = int(part)
+                slot = None
+            admin_remove_player(settings["id"], number, slot)
+            label = f"{format_number(number)}:{slot}" if slot else format_number(number)
+            removed.append(label)
+        except ValueError:
+            errors.append(part)
+
     await _refresh_board(ctx, settings)
 
-    label = f"{format_number(number)} slot {slot}" if slot else format_number(number)
-    await update.message.reply_text(f"✅ {label} ተወጣ!")
+    msg = ""
+    if removed:
+        msg += f"✅ {', '.join(removed)} ተወጣ!"
+    if errors:
+        msg += f"\n❌ ያልተቀበለ: {', '.join(errors)}"
+    await update.message.reply_text(msg)
 
 
 # ============================================================
