@@ -25,7 +25,7 @@ groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
 # ============================================================
 # SMS WEBHOOK
 # ============================================================
-async def handle_sms_webhook(raw_sms: str) -> dict:
+async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
     """Android SMS Forwarder ከሚልከው SMS ይቀበላል"""
     logger.info(f"[SMS] Received: {raw_sms}")
 
@@ -49,13 +49,18 @@ async def handle_sms_webhook(raw_sms: str) -> dict:
         return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
 
     result = save_sms_payment(ref_no, amount, sms_type, raw_sms)
+
+    if result.get("matched") and bot:
+        from config import GROUP_CHAT_ID
+        await notify_match(bot, result["matched"], chat_id=GROUP_CHAT_ID, nekay_cb=nekay_cb)
+
     return {"success": True, "matched": result.get("matched"), **parsed}
 
 
 # ============================================================
 # PAYMENT PHOTO HANDLER
 # ============================================================
-async def handle_payment_photo(bot, msg):
+async def handle_payment_photo(bot, msg, nekay_cb=None):
     """Group ውስጥ screenshot ሲላክ"""
     chat_id = msg.chat.id
     telegram_id = msg.from_user.id
@@ -66,14 +71,12 @@ async def handle_payment_photo(bot, msg):
 
     try:
         photo = msg.photo[-1]
-        # ✅ FIX: file_id ቀጥታ ይላካል — download_image_as_base64 ውስጥ fresh link ይሠራል
         image_base64 = await download_image_as_base64(photo.file_id)
 
         await msg.reply_text("⏳ Screenshot እየተረጋገጠ ነው...")
 
         analysis = await analyze_screenshot(image_base64)
 
-        # analysis None ወይም ባዶ ከሆነ
         if not analysis:
             await msg.reply_text("⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።")
             return
@@ -83,7 +86,6 @@ async def handle_payment_photo(bot, msg):
 
         logger.info(f"[Payment] photoType={photo_type} | refNo={ref_no} | user={username}")
 
-        # Payment ያልሆነ ፎቶ
         if photo_type not in ("CBE", "Telebirr"):
             description = analysis.get("description", "ክፍያ ያልሆነ ምስል")
             try:
@@ -98,7 +100,6 @@ async def handle_payment_photo(bot, msg):
             await msg.reply_text("⚠️ Reference number ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
-        # Duplicate check
         if is_ref_matched_already(ref_no):
             await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
             return
@@ -108,7 +109,7 @@ async def handle_payment_photo(bot, msg):
         )
 
         if result.get("matched"):
-            await notify_match(bot, result["matched"], msg.message_id, chat_id)
+            await notify_match(bot, result["matched"], msg.message_id, chat_id, nekay_cb=nekay_cb)
         else:
             await msg.reply_text(
                 f"✅ Screenshot ተቀብሏል። SMS ሲረጋገጥ ይወጣዋል...\n🔖 Ref: {ref_no}"
@@ -226,13 +227,11 @@ Respond ONLY in this exact JSON format with no extra text:
             temperature=0.1,
         )
         text = response.choices[0].message.content.strip()
-        # JSON ብቻ ያስወጣ
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         text = text.strip()
         parsed = json.loads(text)
-        # refNo "null" string ከሆነ None አድርገው
         if parsed.get("refNo") in ("null", "None", "", "N/A"):
             parsed["refNo"] = None
         return parsed
@@ -270,9 +269,9 @@ async def describe_photo_in_amharic(description: str) -> str:
 # ============================================================
 # MATCH NOTIFICATION
 # ============================================================
-async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
+async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None):
     from database import confirm_payment, get_paid_numbers, get_active_settings
-    from board import build_board, build_remaining, count_remaining
+    from board import build_board
     from database import get_taken_numbers
 
     telegram_id = match_data["telegram_id"]
@@ -280,12 +279,10 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
     pay_type = match_data["type"]
     ref_no = match_data["refNo"]
 
-    # ✅ ቁጥሮች አረጋግጥ
     result = confirm_payment(telegram_id, amount)
     confirmed = result["confirmed"]
     remaining_balance = result["remaining_balance"]
 
-    # Message ሰራ
     if confirmed:
         nums = ", ".join(
             str(c["number"]) + ("(ግማሽ)" if c["is_half"] else "")
@@ -319,6 +316,10 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
         else:
             await bot.send_message(chat_id=target_chat, text=message)
 
+    # ነቃይ callback — confirmed ቁጥሮች ከነቃይ ይጠፋሉ
+    if nekay_cb and confirmed:
+        await nekay_cb(confirmed)
+
     # Board ዘምን
     if confirmed and target_chat:
         settings = get_active_settings()
@@ -341,16 +342,12 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None):
                     from database import update_board_message_id
                     update_board_message_id(game_id, new_msg.message_id)
 
+
 # ============================================================
 # HELPERS
 # ============================================================
 async def download_image_as_base64(file_id: str) -> str:
-    """
-    ✅ FIX: file_id ተቀብሎ getFile API ጠርቶ fresh file_path ያወጣል።
-    ቀጥታ URL ማስተላለፍ 404 ያስከትላል ምክንያቱም Telegram links ለ1 ሰዓት ብቻ valid ናቸው።
-    """
     async with httpx.AsyncClient(timeout=30) as client:
-        # Step 1: Fresh file_path ያግኝ
         get_file_res = await client.get(
             f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
             params={"file_id": file_id}
@@ -358,7 +355,6 @@ async def download_image_as_base64(file_id: str) -> str:
         get_file_res.raise_for_status()
         file_path = get_file_res.json()["result"]["file_path"]
 
-        # Step 2: ፋይሉን አውርድ
         file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         res = await client.get(file_url)
         res.raise_for_status()
