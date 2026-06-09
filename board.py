@@ -143,14 +143,16 @@ def count_remaining(settings: dict, taken: dict) -> int:
     return count
 
 
-def build_warning(seconds_left: int) -> str:
+def build_warning() -> str:
     """
-    Board ሲሞላ የሚወጣ warning — ቁጥሮች የለም
+    Board ሲሞላ የሚወጣ warning — አንድ ጊዜ ብቻ
     """
-    mins = seconds_left // 60
-    secs = seconds_left % 60
-    time_str = f"{mins}:{secs:02d}"
-    return f"⚠️ ያልከፈላችሁ ክፈሉ!\n⏱ {time_str} ቀርቷል"
+    return (
+        "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n"
+        "⚠️ ያልከፈላችሁ ክፈሉ! ⚠️\n"
+        "💥 ጊዜ እያለቀ ነው! 💥\n"
+        "✨────────────────✨"
+    )
 
 
 def build_nekay(unpaid: list) -> str:
