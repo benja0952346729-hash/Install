@@ -54,7 +54,7 @@ LATIN_TO_AMHARIC = {
     "sint qere": "ስንት ቀረ", "sint ale": "ስንት አለ",
     "qeri ale": "ቀሪ አለ", "qitr ale": "ቁጥር አለ",
     "yalteyaze": "ያልተያዘ", "yalteyazun": "ያልተያዙ",
-    # nekay — ሙሉ
+    # nekay
     "nekay": "ነቃይ", "tenekay": "ተነቃይ", "nkay": "ነቃይ",
     "nekay ale": "ነቃይ አለ", "nekay zerzir": "ነቃይ ዘርዝር",
     "nekay neger": "ነቃይ ንገር", "nekay lak": "ነቃይ ላክ",
@@ -64,18 +64,48 @@ LATIN_TO_AMHARIC = {
     "nekay qitroch": "ነቃይ ቁጥሮች",
     "tenekay ale": "ተነቃይ አለ",
     "nekay asayen": "ነቃይ አሳየኝ",
+    "nekay asay": "ነቃይ አሳይ",
+    "nekay asaygn": "ነቃይ አሳይ",
     "nekay awqegn": "ነቃይ አውቀኝ",
+    "nekay asayi": "ነቃይ አሳይ",
     "hulunm teyazuwal": "ሁሉም ተይዘዋል",
     "hulunm teyaze": "ሁሉም ተያዘ",
     "hulunm alteyazum": "ሁሉም አልተያዙም",
     "qeri lak": "ቀሪ ላክ", "qitr lak": "ቁጥር ላክ",
+    "kutr lak": "ቁጥር ላክ", "cutr lak": "ቁጥር ላክ",
+    "kutr ale": "ቁጥር አለ", "cutr ale": "ቁጥር አለ",
+    "kutr": "ቁጥር", "cutr": "ቁጥር",
     "qeri asayen": "ቀሪ አሳየኝ",
     "tolo tolo qeri lak": "ቶሎ ቶሎ ቀሪ ላክ",
     "teyaze": "ተያዘ", "teyazo": "ተይዞ", "teyazuwal": "ተይዙዋል",
     "awo": "አዎ", "aydelem": "አይደለም",
     "tnx": "አመሰግናለሁ", "thanks": "አመሰግናለሁ",
     "ale": "አለ",
-    # ሰላምታ — Latin
+    # ሰርዝ/አውጣ
+    "serzew": "ሰርዝ", "srez": "ሰርዝ", "serz": "ሰርዝ",
+    "shitew": "ሽጠው", "shtew": "ሽጠው", "shitkhew": "ሽጠው", "shetek": "ሽጠው",
+    "atfaw": "አጥፋው", "atfa": "አጥፋው", "yitfa": "ይጥፋ",
+    "awta": "አውጣ", "awuta": "አውጣ",
+    "alfeligm": "አልፈልግም", "alfelegim": "አልፈልግም", "alfelegm": "አልፈልግም",
+    # ተነቀልኩ
+    "tenekelku": "ተነቀልኩ", "teneklku": "ተነቀልኩ", "nekelku": "ተነቀልኩ",
+    "qitr tenekelk": "ቁጥር ተነቀለ", "number tenekelk": "ቁጥር ተነቀለ",
+    # ለምን ሸጥከው
+    "lmin shitkhew": "ለምን ሸጥከው", "lmin shitkh": "ለምን ሸጥከው",
+    "lmin shetek": "ለምን ሸጥህ", "lemin shetek": "ለምን ሸጥህ",
+    "lmin tenklaleh": "ለምን ትነቅላለህ", "lmin tinklaleh": "ለምን ትነቅላለህ",
+    "why shetek": "ለምን ሸጥህ", "why teneklaleh": "ለምን ትነቅላለህ",
+    # ከፍዬ ነቀልክ
+    "kefye nekelk": "ከፍዬ ነቀልክ", "kefye neklek": "ከፍዬ ነቀልክ",
+    "tekeflo nekelk": "ተከፍሎ ነቀልክ", "tekefilo neklek": "ተከፍሎ ነቀልክ",
+    "kefye shetk": "ከፍዬ ሸጥክ", "kefye shetkh": "ከፍዬ ሸጥክ",
+    "likeyalew lmin": "ልክያለው ለምን", "likyalew lemin": "ልክያለው ለምን",
+    "telkuwal lmin nekelk": "ተልኩዋል ለምን ነቀልክ",
+    "telkual lmin": "ተልኩዋል ለምን",
+    "like tineklaleh": "ልኬ ትነቅላለህ", "lke tinklaleh": "ልኬ ትነቅላለህ",
+    "lkuwal lmin": "ልክያለው ለምን", "selkuwal lemin": "ልክያለው ለምን",
+    "payment ale lmin": "ከፍዬ ሸጥክ", "lefkuwal lmin": "ልክያለው ለምን",
+    # ሰላምታ
     "selam": "ሰላም", "salam": "ሰላም", "selem": "ሰላም", "selaam": "ሰላም",
     "hi": "ሰላም", "hay": "ሰላም", "hello": "ሰላም", "helo": "ሰላም",
     "endet neh": "እንዴት ነህ", "endet ne": "እንዴት ነህ", "indet neh": "እንዴት ነህ",
@@ -114,18 +144,15 @@ INTENTS = {
 
     "nekay_query": {
         "keywords": [
-            "ነቃይ", "ተነቃይ", "ንቃይ", "ነቃዮች",
-            "ሚሸጥ", "የተሸጠ",
+            "ነቃይ", "ተነቃይ", "ንቃይ", "ነቃዮች", "ሚሸጥ", "የተሸጠ",
         ],
-        "verb_endings": ["አለ", "ዘርዝር", "ላክ", "ንገር", "ንገረኝ", "አሳውቀኝ", "አሳውቅ"],
+        "verb_endings": ["አለ", "ዘርዝር", "ላክ", "ንገር", "ንገረኝ", "አሳውቀኝ", "አሳውቅ", "አሳይ"],
         "weight_keyword": 0.25,
         "weight_verb": 0.10,
     },
 
     "remaining_send": {
-        "keywords": [
-            "ቀሪ", "ቁጥር",
-        ],
+        "keywords": ["ቀሪ", "ቁጥር"],
         "verb_endings": ["ላክ", "እየላክ", "አሳየኝ", "አሳየን"],
         "weight_keyword": 0.25,
         "weight_verb": 0.15,
@@ -165,6 +192,64 @@ INTENTS = {
             "እንደምን ናችሁ", "እንደምን አላችሁ", "እንዴት ናችሁ",
         ],
         "verb_endings": ["ነህ", "ዋልክ", "አደርክ", "አመሸህ", "አረፈድክ", "ናችሁ", "አላችሁ"],
+        "weight_keyword": 0.35,
+        "weight_verb": 0.15,
+    },
+
+    # ================================================================
+    # ቁጥር ሰርዝ — "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው / 07 ይጥፋ"
+    # ================================================================
+    "cancel_number": {
+        "keywords": [
+            "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
+            "አጥፋልኝ", "ሰርዝልኝ", "አውጣልኝ",
+        ],
+        "verb_endings": ["ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አልፈልግም"],
+        "weight_keyword": 0.35,
+        "weight_verb": 0.15,
+    },
+
+    # ================================================================
+    # ተነቀልኩ — "ቁጥሬ ተነቀለ / ቁጥሬ ጠፋ"
+    # ================================================================
+    "complaint_removed": {
+        "keywords": [
+            "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
+            "ለምን ተነቀልኩ", "ተነቀልኩ እኮ",
+        ],
+        "verb_endings": ["ተነቀልኩ", "ተነቀለ", "ጠፋ", "ሄደ"],
+        "weight_keyword": 0.35,
+        "weight_verb": 0.15,
+    },
+
+    # ================================================================
+    # ለምን ሸጥከው — "ለምን ሸጥህ / ለምን ትነቅላለህ / ለምን ሸጥከው"
+    # ================================================================
+    "complaint_why_sold": {
+        "keywords": [
+            "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
+            "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
+            "ቁጥሬን ለምን ነቀልክ",
+        ],
+        "verb_endings": ["ሸጥህ", "ሸጥከው", "ትነቅላለህ", "ትሸጣለህ", "ነቀልክ"],
+        "weight_keyword": 0.35,
+        "weight_verb": 0.15,
+    },
+
+    # ================================================================
+    # ከፍዬ ነቀልክ — "ተከፍሎ ነቀልክ / ልክያለው ለምን / ተልኩዋል ለምን"
+    # ================================================================
+    "complaint_paid_removed": {
+        "keywords": [
+            "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
+            "ልክያለው እኮ ለምን ሸጥክ", "ተልኩዋል ለምን ነቀልክ",
+            "ልክያለው ለምን", "ልኬ ትነቅላለህ",
+            "ብሬ ተልኳል ለምን ነቀልክ", "ገንዘብ ልኬ ነቀልክ",
+            "ከፈልኩ ለምን ሸጥክ", "payment ላኩ ለምን ሸጥክ",
+            "ልኬ ሸጥክ", "ልኩዋል ለምን", "ተልኩዋል ሸጥክ",
+            "ልክ ነው ለምን", "ተልኩዋል እኮ",
+        ],
+        "verb_endings": ["ነቀልክ", "ሸጥክ", "ትነቅላለህ", "ለምን"],
         "weight_keyword": 0.35,
         "weight_verb": 0.15,
     },
@@ -219,7 +304,7 @@ RESPONSES = {
     ],
 
     "nekay_none_remaining": [
-        "ቀሪ ቁጥሮች አሉ",
+        "ቀሪ ቁጥሮች አሉ 🙏",
         "ቤተሰብ አላለቀም ቀሪ ቁጥሮች አሉ 🙏",
     ],
 
@@ -249,6 +334,41 @@ RESPONSES = {
     "greeting_help": [
         "በምን ላግዝህ? 🙏",
         "ምን እናግዝህ ትፈልጋለህ? 🙏",
+    ],
+
+    # ቁጥር ሰርዝ — future (bot ይላካል)
+    "cancel_number_ack": [
+        "እሺ ተሰርዟል 🙏",
+        "እሺ ተነቅሏል 🙏",
+    ],
+
+    # ተነቀልኩ — ቁጥሩ ሌላ ሰው ከያዘ
+    "complaint_removed_taken": [
+        "አዎ ገቢ ማረግ ረሳክ የጫወታው ባህሪ ነው 🙏",
+        "ቤተሰብ ገቢ ሳታርግ ቁጥሩ ይለቀቃል 🙏",
+        "ገቢ ማረግ ረሳህ ቤተሰብ የጫወታው ሕግ ነው 🙏",
+    ],
+
+    # ተነቀልኩ — ቁጥሩ ነቃይ list ውስጥ ካለ
+    "complaint_removed_nekay": [
+        "ተነቃይ list ውስጥ ገብቷል ገቢ አርገው ያረጋግጡ 🙏",
+        "ቁጥርዎ ነቃይ ነው ገቢ አረጋግጡ 🙏",
+        "ነቃይ ነው ቤተሰብ ቶሎ ገቢ አርጉ 🙏",
+    ],
+
+    # ለምን ሸጥከው
+    "complaint_why_sold": [
+        "ገቢ ተረሳ ቤተሰብ ምን ላርግ 🙏",
+        "ቤተሰብ ገቢ ሳይደርስ ቁጥሩ ተለቀቀ ምን ላርግ 🙏",
+        "ገቢ አልደረሰም ቤተሰብ ምን ላርግ 🙏",
+    ],
+
+    # ከፍዬ ነቀልክ
+    "complaint_paid_removed": [
+        "ቼክ አርግ ችግር ካለ ባለቤቱን አውራው 🙏",
+        "ባለቤቱን አናግር ቼክ ያርጋል 🙏",
+        "ችግር ካለ ባለቤቱን አውራው ቼክ ያርጋል 🙏",
+        "ባለቤቱን አናግረው ቼክ ያርጋሉ 🙏",
     ],
 }
 
@@ -318,14 +438,25 @@ def detect_intent(text: str) -> tuple:
         results[intent_name] = total
 
     # ================================================================
-    # SPECIFIC NUMBER QUERY — ቁጥር + አለ pattern (e.g. "06 ale", "21 አለ")
+    # SPECIFIC NUMBER QUERY — ቁጥር + አለ/ተያዘ pattern
     # ================================================================
     numbers_in_text = re.findall(r"\d+", text)
     translated_lower = translated.lower()
-    has_ale = "አለ" in normalize_amharic(translated_lower) or "ale" in text.lower()
+    normalized_lower = normalize_amharic(translated_lower)
 
-    if numbers_in_text and has_ale:
+    has_ale = "አለ" in normalized_lower
+    has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
+
+    if numbers_in_text and (has_ale or has_teyaze):
         return "specific_number_query", 1.0
+
+    # ================================================================
+    # CANCEL NUMBER — ቁጥር + ሰርዝ/ሽጠው/አጥፋው/ይጥፋ/አልፈልግም
+    # ================================================================
+    cancel_words = ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
+    has_cancel = any(normalize_amharic(w) in normalized_lower for w in cancel_words)
+    if numbers_in_text and has_cancel:
+        return "cancel_number", 1.0
 
     # ================================================================
     # CONTEXT GRADING — weighted formula per intent
@@ -333,19 +464,20 @@ def detect_intent(text: str) -> tuple:
     for intent_name, total in results.items():
         bonus = 0.0
 
-        # ቁጥር አለ → booking / specific_number_query ብቻ ይጠቀም
         if numbers_in_text:
-            if intent_name in ("booking", "specific_number_query"):
+            if intent_name in ("booking", "specific_number_query", "cancel_number"):
                 bonus += 0.15
             else:
                 bonus -= 0.20
 
-        # ቁጥር የለም → booking score ይቀንስ
         if not numbers_in_text and intent_name == "booking":
             bonus -= 0.30
 
-        # greeting — ቁጥር ከሌለ score ይጨምር
         if intent_name == "greeting" and not numbers_in_text:
+            bonus += 0.10
+
+        # complaint intents — ቁጥር ከሌለ score ይጨምር
+        if intent_name in ("complaint_removed", "complaint_why_sold", "complaint_paid_removed") and not numbers_in_text:
             bonus += 0.10
 
         results[intent_name] = max(0.0, total + bonus)
@@ -369,19 +501,11 @@ def get_response(
     remaining_count: int,
     countdown_seconds: int,
     user_name: str = "",
-    registration_result: str = None,   # "registered" | "registered_half" | "taken" | "out_of_range" | None
-    registered_numbers: list = None,   # [(num, is_half), ...]
-    failed_numbers: list = None,       # [num, ...]
+    user_id: int = 0,
+    registration_result: str = None,
+    registered_numbers: list = None,
+    failed_numbers: list = None,
 ) -> dict:
-    """
-    Returns:
-        {
-          "reply": str or None,
-          "resend_board": bool,
-          "resend_nekay": bool,
-          "resend_remaining": bool,
-        }
-    """
 
     THRESHOLD_RESPOND  = 0.70
     THRESHOLD_CONFUSED = 0.40
@@ -391,10 +515,11 @@ def get_response(
         "resend_board": False,
         "resend_nekay": False,
         "resend_remaining": False,
+        "cancel_number": None,   # int ቁጥር — bot.py ይሰርዛዋል
     }
 
     # ================================================================
-    # REGISTRATION RESULT — parser.py ካስገባ በኋላ result ሲመጣ
+    # REGISTRATION RESULT
     # ================================================================
     if registration_result is not None:
         if registration_result in ("registered", "registered_half"):
@@ -407,11 +532,10 @@ def get_response(
                 result["reply"] = msg
         elif registration_result == "taken":
             result["reply"] = random.choice(RESPONSES["booking_taken"])
-        # out_of_range ወይም ሌላ — silent
         return result
 
     # ================================================================
-    # INTENT DETECTION — registration result ከሌለ
+    # INTENT DETECTION
     # ================================================================
     intent, score = detect_intent(text)
 
@@ -422,7 +546,7 @@ def get_response(
         return result
 
     # ================================================================
-    # INTENT: booking — parser ይሰራዋል፣ registration_result ይመጣል
+    # INTENT: booking
     # ================================================================
     if intent == "booking":
         if countdown_seconds > 0:
@@ -432,11 +556,10 @@ def get_response(
                 result["reply"] = f"ቲንሽ ይጠብቁ {mins} ደቂቃ ቀርቱዋል ያልከፈለ ሊወጣ 🙏"
             else:
                 result["reply"] = f"{secs} ሴኮንድ ቀርቱዋል ቲንሽ ይጠብቁ ነቃይ ካለ አሳውቃለው 🙏"
-        # reply=None — process_registration registration_result ይልካል
         return result
 
     # ================================================================
-    # INTENT: specific_number_query — "06 አለ?" / "06 ale"
+    # INTENT: specific_number_query
     # ================================================================
     if intent == "specific_number_query":
         numbers_found = re.findall(r"\d+", text)
@@ -446,7 +569,6 @@ def get_response(
             if entry:
                 result["reply"] = random.choice(RESPONSES["number_taken"])
             else:
-                # range check
                 total = settings.get("total_numbers", 0)
                 if num < 1 or num > total:
                     result["reply"] = random.choice(RESPONSES["number_taken"])
@@ -454,6 +576,49 @@ def get_response(
                     result["reply"] = random.choice(RESPONSES["number_available"])
         else:
             result["resend_remaining"] = True
+        return result
+
+    # ================================================================
+    # INTENT: cancel_number — "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው"
+    # ================================================================
+    if intent == "cancel_number":
+        numbers_found = re.findall(r"\d+", text)
+        if numbers_found:
+            num = int(numbers_found[0])
+            result["reply"] = random.choice(RESPONSES["cancel_number_ack"])
+            result["cancel_number"] = num
+        return result
+
+    # ================================================================
+    # INTENT: complaint_removed — "ተነቀልኩ / ቁጥሬ ጠፋ"
+    # ================================================================
+    if intent == "complaint_removed":
+        numbers_found = re.findall(r"\d+", text)
+        num = int(numbers_found[0]) if numbers_found else None
+
+        if num and num in taken:
+            # ሌላ ሰው ይዞታል
+            result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
+        elif num and any(num == n for n, _ in nekay_list):
+            # ነቃይ list ውስጥ ነው
+            result["reply"] = random.choice(RESPONSES["complaint_removed_nekay"])
+        else:
+            # ቁጥር ከሌለ — default
+            result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
+        return result
+
+    # ================================================================
+    # INTENT: complaint_why_sold — "ለምን ሸጥህ / ለምን ትነቅላለህ"
+    # ================================================================
+    if intent == "complaint_why_sold":
+        result["reply"] = random.choice(RESPONSES["complaint_why_sold"])
+        return result
+
+    # ================================================================
+    # INTENT: complaint_paid_removed — "ከፍዬ ነቀልክ / ልክያለው ለምን"
+    # ================================================================
+    if intent == "complaint_paid_removed":
+        result["reply"] = random.choice(RESPONSES["complaint_paid_removed"])
         return result
 
     # ================================================================
