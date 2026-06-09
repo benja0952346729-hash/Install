@@ -60,6 +60,18 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );
 
+        CREATE TABLE IF NOT EXISTS winners (
+            id SERIAL PRIMARY KEY,
+            game_id INT REFERENCES game_settings(id),
+            place INT,
+            telegram_id BIGINT,
+            user_name TEXT,
+            number INT,
+            prize NUMERIC,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(game_id, place)
+        );
+
         CREATE TABLE IF NOT EXISTS screenshot_payments (
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
@@ -73,7 +85,6 @@ def init_db():
     """)
 
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
-    # ✅ is_nekay column — ነቃይ ሆኑ ቁጥሮች
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_nekay BOOLEAN DEFAULT FALSE;")
     cur.execute("""
         DO $$
@@ -193,7 +204,6 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
     balance = float(bal_row[0]) if bal_row else 0.0
     can_pay = balance >= cost
 
-    # ✅ force=True → ነቃይ ቁጥር — DELETE ሳይሆን UPDATE (board ሙሉ ይቀራል)
     if force and existing:
         cur.execute("""
             UPDATE registrations
@@ -201,7 +211,6 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
                 is_paid=%s, registered_at=NOW()
             WHERE game_id=%s AND number=%s AND slot=1
         """, (user_id, user_name, is_half, can_pay, game_id, number))
-        # slot=2 ካለ ይሰርዝ (አዲስ ሰው ሙሉ ቢወስድ)
         if not is_half:
             cur.execute("""
                 DELETE FROM registrations
@@ -297,7 +306,6 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
     total_balance = float(cur.fetchone()[0])
     conn.commit()
 
-    # is_nekay=FALSE ያሉትን ብቻ ይክፈል
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -316,7 +324,6 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
             remaining -= cost
             confirmed.append({"number": number, "is_half": is_half, "slot": slot})
 
-    # ✅ is_nekay=TRUE — አሁনም የሱ ከሆነ ✅ ያድርገው፣ ተቀድሞ ከሆነ balance ብቻ
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -390,17 +397,53 @@ def get_unpaid_numbers(game_id: int) -> list:
 
 
 # ============================================================
-# NEKAY — mark as nekay (is_nekay=TRUE)
+# NEKAY
 # ============================================================
 
 def mark_nekay(game_id: int, number: int):
-    """ነቃይ ቁጥር — DB ላይ አይሰርዝም፣ is_nekay=TRUE ብቻ ያደርጋል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         UPDATE registrations SET is_nekay=TRUE, is_paid=FALSE
         WHERE game_id=%s AND number=%s
     """, (game_id, number))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# WINNER FUNCTIONS
+# ============================================================
+
+def get_user_by_number(game_id: int, number: int) -> dict:
+    """ቁጥሩ ያለው user ያምጣል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, user_name FROM registrations
+        WHERE game_id=%s AND number=%s
+        ORDER BY is_paid DESC, slot ASC
+        LIMIT 1
+    """, (game_id, number))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {"telegram_id": row[0], "user_name": row[1]}
+
+
+def add_winner_balance(game_id: int, telegram_id: int, amount: float):
+    """Winner ላይ prize ብር ይጨምራል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO user_balance (game_id, telegram_id, balance)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (game_id, telegram_id)
+        DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
+    """, (game_id, telegram_id, amount, amount))
     conn.commit()
     cur.close()
     conn.close()
@@ -609,6 +652,121 @@ def is_ref_matched_already(ref_no: str) -> bool:
     conn.close()
     return row is not None
 
+
+
+
+# ============================================================
+# WINNER — GET BY PLACE & DEDUCT
+# ============================================================
+
+def get_winner_by_place(game_id: int, place: int) -> dict:
+    """winners table ላይ ያ place winner ያምጣል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT w.telegram_id, w.user_name, w.prize, ub.balance
+        FROM winners w
+        LEFT JOIN user_balance ub ON ub.game_id = w.game_id AND ub.telegram_id = w.telegram_id
+        WHERE w.game_id = %s AND w.place = %s
+    """, (game_id, place))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "telegram_id": row[0],
+        "user_name": row[1],
+        "prize": float(row[2]) if row[2] else 0,
+        "balance": float(row[3]) if row[3] else 0,
+    }
+
+
+def save_winner(game_id: int, place: int, telegram_id: int, user_name: str, number: int, prize: float):
+    """Winner ያስቀምጣል — handle_winner_photo ሲጠራ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (game_id, place) DO UPDATE
+            SET telegram_id=EXCLUDED.telegram_id,
+                user_name=EXCLUDED.user_name,
+                number=EXCLUDED.number,
+                prize=EXCLUDED.prize
+    """, (game_id, place, telegram_id, user_name, number, prize))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def deduct_winner_balance(game_id: int, telegram_id: int, amount: float) -> dict:
+    """
+    Winner balance ይቀንሳል — negative ሲሆን cheapest unpaid ነቃይ ያደርጋል
+    returns: {new_balance, nekay_numbers: []}
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Balance ቀንስ
+    cur.execute("""
+        UPDATE user_balance SET balance = balance - %s, updated_at = NOW()
+        WHERE game_id = %s AND telegram_id = %s
+        RETURNING balance
+    """, (amount, game_id, telegram_id))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {"new_balance": 0, "nekay_numbers": []}
+
+    new_balance = float(row[0])
+    conn.commit()
+
+    nekay_list = []
+
+    if new_balance < 0:
+        # Price info ያምጣ
+        cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
+        price_row = cur.fetchone()
+        price_full = float(price_row[0] or 0)
+        price_half = float(price_row[1] or 0)
+
+        # Paid ቁጥሮች cheapest 先 ይጠፉ
+        cur.execute("""
+            SELECT id, number, is_half, slot
+            FROM registrations
+            WHERE game_id = %s AND user_id = %s AND is_paid = TRUE AND is_nekay = FALSE
+            ORDER BY
+                CASE WHEN is_half THEN %s ELSE %s END ASC,
+                registered_at DESC
+        """, (game_id, telegram_id, price_half, price_full))
+        paid_regs = cur.fetchall()
+
+        remaining_debt = abs(new_balance)
+
+        for reg_id, number, is_half, slot in paid_regs:
+            if remaining_debt <= 0:
+                break
+            cost = price_half if is_half else price_full
+            # ይህ ቁጥር ነቃይ ያደርግ
+            cur.execute("""
+                UPDATE registrations SET is_paid = FALSE, is_nekay = TRUE WHERE id = %s
+            """, (reg_id,))
+            remaining_debt -= cost
+            new_balance += cost
+            nekay_list.append(number)
+
+        # Balance update
+        cur.execute("""
+            UPDATE user_balance SET balance = %s, updated_at = NOW()
+            WHERE game_id = %s AND telegram_id = %s
+        """, (new_balance, game_id, telegram_id))
+        conn.commit()
+
+    cur.close()
+    conn.close()
+    return {"new_balance": new_balance, "nekay_numbers": nekay_list}
 
 # ============================================================
 # CLEANUP
