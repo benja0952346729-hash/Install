@@ -695,13 +695,6 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str, numb
 
 
 def deduct_winner_balance(game_id: int, telegram_id: int, amount: float) -> dict:
-    """
-    Winner balance ይቀንሳል.
-    Negative ሲመጣ → is_paid=FALSE ብቻ (is_nekay=FALSE ሆኖ ይቀራል)
-    ስም ይቀራል — ልክ አዲስ ሰው እንደሚዘው ሁኔታ።
-    ነቃይ የሚሆነው countdown ካለቀ ካልከፈለ ብቻ።
-    returns: {new_balance, nekay_numbers: []}
-    """
     conn = get_conn()
     cur = conn.cursor()
 
@@ -727,7 +720,6 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float) -> dict
         price_full = float(price_row[0] or 0)
         price_half = float(price_row[1] or 0)
 
-        # Paid ቁጥሮች cheapest አስቀድሞ — is_paid=FALSE ብቻ, is_nekay=FALSE ሆኖ ይቀራል
         cur.execute("""
             SELECT id, number, is_half, slot
             FROM registrations
@@ -744,7 +736,6 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float) -> dict
             if remaining_debt <= 0:
                 break
             cost = price_half if is_half else price_full
-            # ✅ ይጠፋል ብቻ — is_nekay=FALSE ሆኖ ይቀራል (ስም ይቀራል)
             cur.execute("""
                 UPDATE registrations SET is_paid = FALSE, is_nekay = FALSE WHERE id = %s
             """, (reg_id,))
@@ -760,7 +751,6 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float) -> dict
 
     cur.close()
     conn.close()
-    # nekay_numbers ባዶ ይመለሳል — ነቃይ አይሆንም
     return {"new_balance": new_balance, "nekay_numbers": []}
 
 
@@ -777,3 +767,98 @@ def cleanup_old_payments(days: int = 7):
     conn.commit()
     cur.close()
     conn.close()
+
+
+# ============================================================
+# USER NUMBERS — cancel_number intent
+# ============================================================
+
+def get_user_numbers(game_id: int, user_id: int) -> list:
+    """
+    የዚሁ user ሁሉም ቁጥሮች ይመልሳል
+    returns: [(number, is_half, slot, is_paid), ...]
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, is_half, slot, is_paid
+        FROM registrations
+        WHERE game_id=%s AND user_id=%s
+        ORDER BY number, slot
+    """, (game_id, user_id))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def user_owns_number(game_id: int, user_id: int, number: int) -> bool:
+    """
+    User ይሄን ቁጥር ይዞ ወይ?
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 1 FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s
+        LIMIT 1
+    """, (game_id, user_id, number))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def remove_number(game_id: int, user_id: int, number: int) -> bool:
+    """
+    User ቁጥሩን ይሰርዛል — balance refund ያደርጋል (is_paid=TRUE ከሆነ)
+    returns: True ከተሰረዘ, False ከሌለ
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # ቁጥሩ ለዚህ user ያለ ወይ?
+    cur.execute("""
+        SELECT id, is_half, slot, is_paid
+        FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s
+        ORDER BY slot
+    """, (game_id, user_id, number))
+    rows = cur.fetchall()
+
+    if not rows:
+        cur.close()
+        conn.close()
+        return False
+
+    # Price መጀመሪያ ጠይቅ
+    cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
+    price_row = cur.fetchone()
+    price_full = float(price_row[0] or 0)
+    price_half = float(price_row[1] or 0)
+
+    # Paid ከሆነ balance ይመለሳል
+    refund = 0.0
+    for reg_id, is_half, slot, is_paid in rows:
+        if is_paid:
+            refund += price_half if is_half else price_full
+
+    # Delete registrations
+    cur.execute("""
+        DELETE FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s
+    """, (game_id, user_id, number))
+
+    # Refund balance
+    if refund > 0:
+        cur.execute("""
+            INSERT INTO user_balance (game_id, telegram_id, balance)
+            VALUES (%s, %s, %s)
+            ON CONFLICT (game_id, telegram_id)
+            DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
+        """, (game_id, user_id, refund, refund))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
