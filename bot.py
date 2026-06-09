@@ -13,7 +13,7 @@ from database import (
     init_db, save_settings, get_active_settings,
     register_number, get_taken_numbers, get_paid_numbers,
     update_board_message_id, update_remaining_message_id,
-    admin_remove_player, admin_mark_paid,
+    admin_remove_player, admin_mark_paid, admin_mark_nekay,
     clear_game, get_unpaid_numbers
 )
 from parser import parse_numbers, format_number
@@ -37,16 +37,12 @@ logging.basicConfig(
 
 pending_ambiguous = {}
 active_countdowns = {}  # game_id: task
-nekay_active = set()    # game_id — ነቃይ እያለ board delete/resend አይሆንም
+nekay_active = set()    # game_id — ነቃይ እያለ
 nekay_numbers = {}      # game_id: {number: slot} — countdown ሲጀምር snapshot
 msg_counter = {}        # group_id: count — 6 messages ሲሞላ board/ቀሪ/ነቃይ resend
 
 
 async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list):
-    """
-    Payment match ሲመጣ — nekay_numbers ላይ ያሉ confirmed ቁጥሮች ይጠፋሉ
-    board እና ነቃይ ይዘምናሉ
-    """
     if game_id not in nekay_active:
         return
 
@@ -68,7 +64,6 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
     if not settings:
         return
 
-    # Board ያዘምናል
     taken = get_taken_numbers(game_id)
     paid = get_paid_numbers(game_id)
     board_text = build_board(settings, taken, paid)
@@ -84,7 +79,6 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
             new_msg = await bot.send_message(chat_id=GROUP_ID, text=board_text)
             update_board_message_id(game_id, new_msg.message_id)
 
-    # ነቃይ — delete → resend
     rem_msg_id = settings.get("remaining_message_id")
     if rem_msg_id:
         try:
@@ -104,7 +98,6 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
 
 
 def _increment_counter(group_id: int) -> int:
-    """Message counter ይጨምራል — 6 ሲሞላ True ይመልሳል እና ወደ 0 ይመልሳል"""
     msg_counter[group_id] = msg_counter.get(group_id, 0) + 1
     if msg_counter[group_id] >= 6:
         msg_counter[group_id] = 0
@@ -113,12 +106,6 @@ def _increment_counter(group_id: int) -> int:
 
 
 def _build_nekay_from_snap(snap: dict) -> list:
-    """
-    snap = {number: slot}
-    slot=0 → ሙሉ ቁጥር (is_half=False)
-    slot=2 → slot2 ብቻ ያልከፈለ (is_half=True — + ያሳያል)
-    returns [(number, is_half), ...]
-    """
     result = []
     for number, slot in sorted(snap.items()):
         is_half = (slot == 2)
@@ -127,7 +114,6 @@ def _build_nekay_from_snap(snap: dict) -> list:
 
 
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
-    """Background countdown — warning message ይዘምናል፣ ጊዜ ካለቀ ነቃይ ይላካል"""
     warn_msg = await bot.send_message(chat_id=group_id, text=build_warning(warn_seconds))
 
     interval = 5
@@ -149,25 +135,21 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         if left == 0:
             break
 
-    # ጊዜ አለቀ — snapshot ያዝ እና ያወጣ
     unpaid = get_unpaid_numbers(game_id)
     if unpaid:
-        # snapshot — {number: unpaid_slot}
-        # slots={1,2} → ሁለቱም → slot=0
-        # slots={1}   → slot1 ብቻ → slot=1
-        # slots={2}   → slot2 ብቻ → slot=2
         snap = {}
         for number, slots in unpaid:
             if slots == {1} or slots == {1, 2} or len(slots) == 0:
-                snap[number] = 0  # ሙሉ (+ የለም)
+                snap[number] = 0
             elif slots == {2}:
-                snap[number] = 2  # slot2 ብቻ (+ ያሳያል)
+                snap[number] = 2
             else:
                 snap[number] = 0
         nekay_numbers[game_id] = snap
 
+        # ✅ admin_remove_player ሳይሆን admin_mark_nekay — DB ላይ አይሰርዝም
         for number, slots in unpaid:
-            admin_remove_player(game_id, number)
+            admin_mark_nekay(game_id, number)
 
         nekay_list = _build_nekay_from_snap(snap)
         nekay_text = build_nekay(nekay_list)
@@ -399,7 +381,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             failed.append(format_number(num))
             continue
 
-        # ነቃይ ቁጥር ከሆነ force=True
         is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
         result = register_number(game_id, user_id, user_name, actual_num, is_half, force=is_nekay)
         if result in ["registered", "registered_half"]:
@@ -421,9 +402,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     should_resend = _increment_counter(group_id)
 
-    # ነቃይ እያለ
     if game_id in nekay_active:
-        # board — resend ወይስ edit
         if should_resend:
             if board_msg_id:
                 try:
@@ -443,19 +422,16 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 except Exception:
                     new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                     update_board_message_id(game_id, new_board.message_id)
-        # ነቃይ snapshot ያዘምናል — የተወሰደ ቁጥር ይጠፋል
+
         snap = nekay_numbers.get(game_id, {})
         for num, is_half in registered:
             if num in snap:
                 if is_half and snap[num] == 0:
-                    # ሙሉ ቁጥር ግማሽ ተወሰደ → slot2 ብቻ ቀረ
                     snap[num] = 2
                 else:
-                    # ሙሉ ተወሰደ ወይስ slot2 ተወሰደ → ይጠፋ
                     del snap[num]
         nekay_numbers[game_id] = snap
 
-        # ነቃይ — ሁልጊዜ delete → resend (ታች ይሆናል)
         rem_msg_id = settings.get("remaining_message_id")
         if rem_msg_id:
             try:
@@ -471,8 +447,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             update_remaining_message_id(game_id, None)
             nekay_active.discard(game_id)
             nekay_numbers.pop(game_id, None)
+
     elif remaining_count <= 7:
-        # 7 ሲቀር — board: 6 messages ሲሞላ resend፣ ካልሆነ edit
         if should_resend:
             if board_msg_id:
                 try:
@@ -495,7 +471,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                     update_board_message_id(game_id, new_board.message_id)
                     board_msg_id = new_board.message_id
 
-        # ቀሪ — ሁልጊዜ delete → resend (ታች ይሆናል)
         remaining_text = build_remaining(settings, taken)
         rem_msg_id = settings.get("remaining_message_id")
         if rem_msg_id:
@@ -506,8 +481,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if remaining_text:
             rem_msg = await ctx.bot.send_message(chat_id=group_id, text=remaining_text)
             update_remaining_message_id(game_id, rem_msg.message_id)
+
     else:
-        # ከ7 በላይ ሲቀር — 6 messages ሲሞላ resend፣ ካልሆነ edit
         if should_resend:
             if board_msg_id:
                 try:
@@ -528,7 +503,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                     new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                     update_board_message_id(game_id, new_board.message_id)
 
-    # Board ሲሞላ countdown ይጀምር
     if remaining_count == 0 and game_id not in active_countdowns:
         task = asyncio.create_task(
             _countdown_task(ctx.bot, game_id, group_id)
@@ -661,7 +635,6 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     active_countdowns.pop(settings["id"], None)
     nekay_numbers.pop(settings["id"], None)
 
-    # አሮጌ board ይሰርዛል
     board_msg_id = settings.get("board_message_id")
     if board_msg_id:
         try:
@@ -669,7 +642,6 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # አሮጌ remaining ይሰርዛል
     rem_msg_id = settings.get("remaining_message_id")
     if rem_msg_id:
         try:
@@ -677,7 +649,6 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-    # አዲስ ባዶ board ይላካል
     board_text = build_board(settings, {}, {})
     new_msg = await ctx.bot.send_message(chat_id=GROUP_ID, text=board_text)
     update_board_message_id(settings["id"], new_msg.message_id)
@@ -687,7 +658,7 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# GROUP PHOTO HANDLER — counter ይጨምራል
+# GROUP PHOTO HANDLER
 # ============================================================
 
 async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
