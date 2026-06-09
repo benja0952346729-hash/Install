@@ -1,11 +1,6 @@
 from parser import format_number
 
 def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
-    """
-    Board message ይሰራል።
-    taken = {number: [(user_name, is_half, slot), ...]}
-    paid  = {number: set(slot1, slot2, ...)}  ← ✅ ለማሳየት
-    """
     total = settings["total_numbers"]
     per_person = settings["numbers_per_person"]
     price_full = settings["price_full"]
@@ -20,7 +15,6 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
 
     lines = []
 
-    # ── ላይ: Game Rules ──
     lines.append("🎲 ፈጣን ዕድል ጨዋታ")
     lines.append(f"💰 ዋጋ: {price_full} ብር" + (f" | ግማሽ: {price_half} ብር" if price_half else ""))
     lines.append(f"🥇 1ኛ: {prize_1st} ብር")
@@ -30,7 +24,6 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
         lines.append(f"🥉 3ኛ: {prize_3rd} ብር")
     lines.append("")
 
-    # ── ቁጥሮች ──
     if per_person == 1:
         for n in range(1, total + 1):
             label = format_number(n)
@@ -62,7 +55,6 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
             lines.append("")
             n += per_person
 
-    # ── ታች: Payment Info ──
     lines.append("─────────────────")
     lines.append(payment_info)
 
@@ -70,24 +62,6 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
 
 
 def _format_entry(entry: list, paid_slots: set = None) -> str:
-    """
-    entry = [(user_name, is_half, slot), ...]
-    paid_slots = {1, 2, ...}  ← ✅ ያሳያል
-
-    ሙሉ:
-      01# አበበ✅      ← ከፍሏል
-      01# አበበ        ← አልከፈለም
-
-    ግማሽ (1 ሰው):
-      01# አበበ✅+     ← አበበ ከፍሏል፣ ሌላ ሰው አልተቀላቀለም
-      01# አበበ+       ← አልከፈለም፣ ሌላ ሰው አልተቀላቀለም
-
-    ግማሽ (2 ሰው):
-      01# አበበ✅+አየለ✅  ← ሁለቱም ከፈሉ
-      01# አበበ✅+አየለ   ← አበበ ብቻ ከፍሏል
-      01# አበበ+አየለ✅   ← አየለ ብቻ ከፍሏል
-      01# አበበ+አየለ    ← ማንም አልከፈለም
-    """
     if paid_slots is None:
         paid_slots = set()
 
@@ -167,3 +141,25 @@ def count_remaining(settings: dict, taken: dict) -> int:
             n += per_person
 
     return count
+
+
+def build_warning(seconds_left: int) -> str:
+    """
+    Board ሲሞላ የሚወጣ warning — ቁጥሮች የለም
+    """
+    mins = seconds_left // 60
+    secs = seconds_left % 60
+    time_str = f"{mins}:{secs:02d}"
+    return f"⚠️ ያልከፈላችሁ ክፈሉ!\n⏱ {time_str} ቀርቷል"
+
+
+def build_nekay(unpaid: list) -> str:
+    """
+    ጊዜ ካለቀ በኋላ ነቃይ message
+    unpaid = [(number, is_half), ...]
+    """
+    lines = ["⚠️ ነቃይ!"]
+    for number, is_half in unpaid:
+        label = format_number(number)
+        lines.append(f"{label}+" if is_half else label)
+    return "\n".join(lines)
