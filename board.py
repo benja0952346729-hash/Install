@@ -143,15 +143,35 @@ def count_remaining(settings: dict, taken: dict) -> int:
     return count
 
 
-def build_warning() -> str:
+def build_warning(countdown_text: str = None) -> str:
     """
-    Board ሲሞላ የሚወጣ warning — አንድ ጊዜ ብቻ
+    Board ሲሞላ የሚወጣ warning — 3x ትልቅ ሳጥን
+    countdown_text: ለምሳሌ "⏳ 1:40 ይቀራል" — None ከሆነ መጀመሪያ message
     """
+    if countdown_text is None:
+        middle_line = "║      💥 ጊዜ እያለቀ ነው! 💥      ║"
+        bar_line    = "║  🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥  ║"
+    else:
+        # countdown text ማዕከል
+        padded = countdown_text.center(28)
+        middle_line = f"║{padded}║"
+        bar_line    = "║  🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥  ║"
+
     return (
-        "🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥\n"
-        "⚠️ ያልከፈላችሁ ክፈሉ! ⚠️\n"
-        "💥 ጊዜ እያለቀ ነው! 💥\n"
-        "✨────────────────✨"
+        "╔══════════════════════════════╗\n"
+        "║                              ║\n"
+        "║  🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨🚨  ║\n"
+        "║                              ║\n"
+        "║   ⚠️⚠️  ያልከፈላችሁ  ⚠️⚠️    ║\n"
+        "║      💰  አሁን  ክፈሉ!  💰     ║\n"
+        "║                              ║\n"
+        f"{middle_line}\n"
+        "║                              ║\n"
+        f"{bar_line}\n"
+        "║                              ║\n"
+        "║  🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥🔥  ║\n"
+        "║                              ║\n"
+        "╚══════════════════════════════╝"
     )
 
 
