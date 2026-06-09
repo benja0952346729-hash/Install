@@ -29,7 +29,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-
+from responder import get_response
 (
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
@@ -337,11 +337,39 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not settings:
         return
 
+    game_id = settings["id"]
+    taken = get_taken_numbers(game_id)
+    snap = nekay_numbers.get(game_id, {})
+    nekay_list = _build_nekay_from_snap(snap)
+    remaining = count_remaining(settings, taken)
+
+    resp = get_response(
+        text=text,
+        settings=settings,
+        taken=taken,
+        paid=get_paid_numbers(game_id),
+        nekay_list=nekay_list,
+        remaining_count=remaining,
+        countdown_seconds=0,
+        user_name=user_name,
+    )
+    if resp["reply"]:
+        await msg.reply_text(resp["reply"])
+    if resp["resend_remaining"]:
+        remaining_text = build_remaining(settings, taken)
+        if remaining_text:
+            await ctx.bot.send_message(chat_id=group_id, text=remaining_text)
+    if resp["resend_nekay"]:
+        if snap:
+            nekay_text = build_nekay(nekay_list)
+            await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+    if resp["reply"] and not parse_numbers(text):
+        return
+
     result = parse_numbers(text)
     if not result:
         return
 
-    # Photo እየተሰራ ሳለ — queue ያስቀምጥ
     if photo_processing.get(group_id):
         q = pending_registrations.setdefault(group_id, [])
         q.append((user_id, user_name, text, msg))
@@ -368,7 +396,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
-
 
 async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
     pending = pending_ambiguous.get(user_id)
