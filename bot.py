@@ -15,7 +15,8 @@ from database import (
     update_board_message_id, update_remaining_message_id,
     admin_remove_player, admin_mark_paid, mark_nekay,
     clear_game, get_unpaid_numbers,
-    get_winner_by_place, deduct_winner_balance
+    get_winner_by_place, deduct_winner_balance,
+    user_owns_number
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -351,6 +352,7 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             remaining_count=remaining,
             countdown_seconds=0,
             user_name=user_name,
+            user_id=user_id,
         )
         if resp["reply"]:
             await msg.reply_text(resp["reply"])
@@ -360,6 +362,16 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if snap:
                 nekay_text = build_nekay(nekay_list)
                 await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+        # ================================================================
+        # CANCEL NUMBER — "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው"
+        # ================================================================
+        if resp.get("cancel_number"):
+            num = resp["cancel_number"]
+            if user_owns_number(game_id, user_id, num):
+                admin_remove_player(game_id, num)
+                await _refresh_board(ctx, settings)
+            else:
+                await msg.reply_text("ቁጥሩ የእርስዎ አይደለም 🙏")
         return
 
     # ቁጥር አለ — registration
