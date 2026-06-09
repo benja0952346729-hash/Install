@@ -297,7 +297,7 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
     total_balance = float(cur.fetchone()[0])
     conn.commit()
 
-    # ✅ is_nekay=FALSE ያሉትን ብቻ ይክፈል — ነቃይ ቁጥሮች ይዝለል
+    # is_nekay=FALSE ያሉትን ብቻ ይክፈል
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -311,9 +311,26 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
 
     for reg_id, number, is_half, slot in unpaid:
         cost = price_half if is_half else price_full
-
         if remaining >= cost:
             cur.execute("UPDATE registrations SET is_paid = TRUE WHERE id = %s", (reg_id,))
+            remaining -= cost
+            confirmed.append({"number": number, "is_half": is_half, "slot": slot})
+
+    # ✅ is_nekay=TRUE — አሁনም የሱ ከሆነ ✅ ያድርገው፣ ተቀድሞ ከሆነ balance ብቻ
+    cur.execute("""
+        SELECT id, number, is_half, slot
+        FROM registrations
+        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE AND is_nekay = TRUE
+        ORDER BY registered_at, slot
+    """, (game_id, telegram_id))
+    nekay_unpaid = cur.fetchall()
+
+    for reg_id, number, is_half, slot in nekay_unpaid:
+        cost = price_half if is_half else price_full
+        if remaining >= cost:
+            cur.execute("""
+                UPDATE registrations SET is_paid = TRUE, is_nekay = FALSE WHERE id = %s
+            """, (reg_id,))
             remaining -= cost
             confirmed.append({"number": number, "is_half": is_half, "slot": slot})
 
@@ -376,7 +393,7 @@ def get_unpaid_numbers(game_id: int) -> list:
 # NEKAY — mark as nekay (is_nekay=TRUE)
 # ============================================================
 
-def admin_mark_nekay(game_id: int, number: int):
+def mark_nekay(game_id: int, number: int):
     """ነቃይ ቁጥር — DB ላይ አይሰርዝም፣ is_nekay=TRUE ብቻ ያደርጋል"""
     conn = get_conn()
     cur = conn.cursor()
