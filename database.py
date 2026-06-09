@@ -73,6 +73,8 @@ def init_db():
     """)
 
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
+    # ✅ is_nekay column — ነቃይ ሆኑ ቁጥሮች
+    cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_nekay BOOLEAN DEFAULT FALSE;")
     cur.execute("""
         DO $$
         BEGIN
@@ -191,15 +193,35 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
     balance = float(bal_row[0]) if bal_row else 0.0
     can_pay = balance >= cost
 
-    # force=True → ነቃይ ቁጥር — existing ይሰርዛል → አዲስ ይጽፋል
+    # ✅ force=True → ነቃይ ቁጥር — DELETE ሳይሆን UPDATE (board ሙሉ ይቀራል)
     if force and existing:
-        cur.execute("DELETE FROM registrations WHERE game_id=%s AND number=%s", (game_id, number))
-        existing = []
+        cur.execute("""
+            UPDATE registrations
+            SET user_id=%s, user_name=%s, is_half=%s, is_nekay=FALSE,
+                is_paid=%s, registered_at=NOW()
+            WHERE game_id=%s AND number=%s AND slot=1
+        """, (user_id, user_name, is_half, can_pay, game_id, number))
+        # slot=2 ካለ ይሰርዝ (አዲስ ሰው ሙሉ ቢወስድ)
+        if not is_half:
+            cur.execute("""
+                DELETE FROM registrations
+                WHERE game_id=%s AND number=%s AND slot=2
+            """, (game_id, number))
+        if can_pay:
+            new_balance = balance - cost
+            cur.execute("""
+                UPDATE user_balance SET balance=%s, updated_at=NOW()
+                WHERE game_id=%s AND telegram_id=%s
+            """, (new_balance, game_id, user_id))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return "registered"
 
     if not existing:
         cur.execute("""
-            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid)
-            VALUES (%s, %s, %s, %s, %s, 1, %s)
+            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay)
+            VALUES (%s, %s, %s, %s, %s, 1, %s, FALSE)
         """, (game_id, user_id, user_name, number, is_half, can_pay))
         if can_pay:
             new_balance = balance - cost
@@ -214,8 +236,8 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
 
     if len(existing) == 1 and existing[0][1] == True and is_half:
         cur.execute("""
-            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid)
-            VALUES (%s, %s, %s, %s, %s, 2, %s)
+            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay)
+            VALUES (%s, %s, %s, %s, %s, 2, %s, FALSE)
         """, (game_id, user_id, user_name, number, is_half, can_pay))
         if can_pay:
             new_balance = balance - cost
@@ -275,10 +297,11 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
     total_balance = float(cur.fetchone()[0])
     conn.commit()
 
+    # ✅ is_nekay=FALSE ያሉትን ብቻ ይክፈል — ነቃይ ቁጥሮች ይዝለል
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
-        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE
+        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE AND is_nekay = FALSE
         ORDER BY registered_at, slot
     """, (game_id, telegram_id))
     unpaid = cur.fetchall()
@@ -329,11 +352,6 @@ def get_paid_numbers(game_id: int) -> dict:
 # ============================================================
 
 def get_unpaid_numbers(game_id: int) -> list:
-    """
-    is_paid=FALSE ያላቸው ቁጥሮች ይመልሳል
-    returns [(number, unpaid_slots), ...]
-    unpaid_slots = set of unpaid slot numbers
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -351,8 +369,24 @@ def get_unpaid_numbers(game_id: int) -> list:
         if number not in result:
             result[number] = set()
         result[number].add(slot)
-    # [(number, unpaid_slots), ...]
     return [(n, slots) for n, slots in sorted(result.items())]
+
+
+# ============================================================
+# NEKAY — mark as nekay (is_nekay=TRUE)
+# ============================================================
+
+def admin_mark_nekay(game_id: int, number: int):
+    """ነቃይ ቁጥር — DB ላይ አይሰርዝም፣ is_nekay=TRUE ብቻ ያደርጋል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE registrations SET is_nekay=TRUE, is_paid=FALSE
+        WHERE game_id=%s AND number=%s
+    """, (game_id, number))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 # ============================================================
@@ -373,10 +407,6 @@ def clear_game(game_id: int):
 # ============================================================
 
 def admin_remove_player(game_id: int, number: int, slot: int = None):
-    """
-    slot=None  → ያ number ላይ ያሉ ሁሉም ይወጣሉ
-    slot=1/2   → ያ slot ብቻ ይወጣል
-    """
     conn = get_conn()
     cur = conn.cursor()
     if slot is None:
@@ -395,10 +425,6 @@ def admin_remove_player(game_id: int, number: int, slot: int = None):
 
 
 def admin_mark_paid(game_id: int, number: int, slot: int, paid: bool = True):
-    """
-    paid=True  → ✅ ያደርጋል
-    paid=False → ✅ ያነሳል
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
