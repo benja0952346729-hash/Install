@@ -974,6 +974,36 @@ async def cancel_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 # ============================================================
+# ADMIN — /status
+# ============================================================
+
+async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        return
+    text = (
+        "🤖 Commands:\n\n"
+        "🎮 *Game*\n"
+        "/setgame — አዲስ game settings ያቀናብራል\n"
+        "/newgame — ቁጥሮችን ጠርጎ አዲስ ጨዋታ ይጀምራል\n"
+        "/status — ሁሉንም commands ያሳያል\n\n"
+        "👤 *ምዝገባ*\n"
+        "/register 5 10+ አበበ — ቁጥር manually ይመዘግባል\n"
+        "  • + = ግማሽ (ለምሳሌ 5+)\n\n"
+        "💰 *ክፍያ*\n"
+        "/paid 5 10 15 — ብዙ ቁጥሮች paid ያደርጋል\n"
+        "/paid 5:2 — slot 2 paid ያደርጋል\n"
+        "/unpaid 5 10 — ብዙ ቁጥሮች unpaid ያደርጋል\n\n"
+        "🗑️ *አስተዳደር*\n"
+        "/remove 5 — ቁጥር ከ board ያስወጣል\n"
+        "/remove 5:1 — slot 1 ብቻ ያስወጣል\n\n"
+        "💸 *Winner*\n"
+        "/send — winner ብር ይላካል (private chat ብቻ)\n"
+        "  • winner photo group ላይ ሲላክ auto announce + አዲስ game"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+
+# ============================================================
 # ADMIN — /register (manual registration)
 # ============================================================
 
@@ -1072,6 +1102,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(setup_conv)
+    app.add_handler(CommandHandler("status", handle_status))
     app.add_handler(CommandHandler("register", handle_register))
     app.add_handler(CommandHandler("remove", handle_remove))
     app.add_handler(CommandHandler("paid", handle_paid_cmd))
