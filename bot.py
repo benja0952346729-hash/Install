@@ -457,10 +457,10 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
 
     if ambiguous == "all_half":
         if yes:
-            numbers = [(n, True) for n, _ in numbers]
+            numbers = [(n, True, nm) for n, _, nm in numbers]
     elif ambiguous == "last_half":
         if not yes:
-            numbers = [(n, False) for n, _ in numbers]
+            numbers = [(n, False, nm) for n, _, nm in numbers]
 
     del pending_ambiguous[user_id]
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, update.message)
@@ -476,15 +476,17 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     registered = []
     all_taken = []
 
-    for num, is_half in numbers:
+    for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
+        # parsed name ካለ ተጠቀም፣ ከሌለ telegram first_name
+        actual_name = parsed_name if parsed_name else user_name
 
         if actual_num < 1 or actual_num > settings["total_numbers"]:
             all_taken.append(actual_num)
             continue
 
         is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
-        result = register_number(game_id, user_id, user_name, actual_num, is_half, force=is_nekay)
+        result = register_number(game_id, user_id, actual_name, actual_num, is_half, force=is_nekay)
         if result in ["registered", "registered_half"]:
             registered.append((actual_num, is_half))
         else:
