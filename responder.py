@@ -117,6 +117,73 @@ LATIN_TO_AMHARIC = {
     "endet arefedek": "እንዴት አረፈድክ", "indet arefedek": "እንዴት አረፈድክ",
     "tena yistilign": "ጤና ይስጥልኝ", "tena yistligni": "ጤና ይስጥልኝ",
     "endemen nachuh": "እንደምን ናችሁ", "endemen nacuh": "እንደምን ናችሁ",
+    # ================================================================
+    # CHANGE NUMBER — Latin keywords
+    # ================================================================
+    "wede": "ወደ",
+    "qeyir": "ቀይር", "qeyirew": "ቀይረው", "qeyirligni": "ቀይርልኝ",
+    "lewet": "ለወጥ", "lewetew": "ለወጠው", "lewetligni": "ለወጥልኝ",
+    "azawir": "አዛውር", "azawrew": "አዛውረው",
+    "yihun": "ይሁን",
+    "tew": "ተው",
+    "arig": "አርግ", "arigew": "አርገው",
+    "adrg": "አድርግ", "adrgew": "አድርገው",
+    "change arig": "ቀይር አርግ",
+    "change adrig": "ቀይር አድርግ",
+    "change arigew": "ቀይር አርገው",
+    # ================================================================
+    # ACCOUNT — Latin keywords (ከረጅሙ ወደ አጭሩ ቅደም ተከተል)
+    # ================================================================
+    "account lak": "አካውንት ላክ",
+    "acount lak": "አካውንት ላክ",
+    "account lai": "አካውንት ላኪ",
+    "acount lai": "አካውንት ላኪ",
+    "account info": "አካውንት ላክ",
+    "acount info": "አካውንት ላክ",
+    "account negeregn": "አካውንት ንገረኝ",
+    "acount negeregn": "አካውንት ንገረኝ",
+    "account asayen": "አካውንት አሳየኝ",
+    "acount asayen": "አካውንት አሳየኝ",
+    "account yetale": "አካውንት የታለ",
+    "acount yetale": "አካውንት የታለ",
+    "account ale": "አካውንት ካለ",
+    "acount ale": "አካውንት ካለ",
+    "nigid bank account": "ንግድ ባንክ አካውንት",
+    "nigid bank lak": "ንግድ ባንክ ላክ",
+    "nigid bank number": "ንግድ ባንክ ቁጥር",
+    "nigid bank": "ንግድ ባንክ",
+    "commercial bank": "ንግድ ባንክ",
+    "bank account": "ባንክ አካውንት",
+    "cbe account": "ሲቢኢ አካውንት",
+    "cbe lak": "ሲቢኢ ላክ",
+    "cbe number": "ሲቢኢ ቁጥር",
+    "cbe": "ሲቢኢ",
+    "telebirr account": "ቴሌብር አካውንት",
+    "telebirr acount": "ቴሌብር አካውንት",
+    "telebirr lak": "ቴሌብር ላክ",
+    "telebirr number": "ቴሌብር ቁጥር",
+    "telebirr": "ቴሌብር",
+    "telebr account": "ቴሌብር አካውንት",
+    "telebr lak": "ቴሌብር ላክ",
+    "telebr number": "ቴሌብር ቁጥር",
+    "telebr": "ቴሌብር",
+    "awash account": "አዋሽ አካውንት",
+    "awash acount": "አዋሽ አካውንት",
+    "awash lak": "አዋሽ ላክ",
+    "awash number": "አዋሽ ቁጥር",
+    "awash numer": "አዋሽ ቁጥር",
+    "awash": "አዋሽ",
+    "payment number": "የሚከፈልበት ቁጥር",
+    "payment info": "አካውንት ላክ",
+    "yemikefelbew number": "የሚከፈልበት ቁጥር",
+    "account": "አካውንት",
+    "acount": "አካውንት",
+    "acawnt": "አካውንት",
+    "akownt": "አካውንት",
+    "akawnt": "አካውንት",
+    "akaunt": "አካውንት",
+    "akount": "አካውንት",
+    "acwnt": "አካውንት",
 }
 
 def translate_latin(text: str) -> str:
@@ -124,6 +191,55 @@ def translate_latin(text: str) -> str:
     for lat, amh in sorted(LATIN_TO_AMHARIC.items(), key=lambda x: -len(x[0])):
         result = result.replace(lat, amh)
     return result
+
+
+# ================================================================
+# CHANGE NUMBER PATTERN DETECTOR
+# ================================================================
+
+CHANGE_CANCEL_WORDS = [
+    "አልፈልግም", "ተው", "አጥፋ", "አጥፋው", "ሰርዝ", "ሰርዝልኝ",
+]
+CHANGE_CONFIRM_WORDS = [
+    "ቀይር", "ቀይረው", "ቀይርልኝ",
+    "ይሁን",
+    "አርግ", "አርገው",
+    "አድርግ", "አድርገው",
+    "change",
+    "ለወጥ", "ለወጠው", "ለወጥልኝ",
+    "አዛውር", "አዛውረው",
+]
+CHANGE_WEDE_WORDS = ["ወደ", "to"]
+
+
+def detect_change_number(text: str):
+    translated = translate_latin(text)
+    normalized = normalize_amharic(translated)
+    lower = normalized.lower()
+
+    nums = re.findall(r"\d+", text)
+    if len(nums) < 2:
+        return None
+
+    from_num = int(nums[0])
+    to_num = int(nums[1])
+
+    for wede in CHANGE_WEDE_WORDS:
+        norm_wede = normalize_amharic(wede)
+        if norm_wede in lower:
+            return (from_num, to_num)
+
+    has_cancel = any(normalize_amharic(w) in lower for w in CHANGE_CANCEL_WORDS)
+    has_confirm = any(normalize_amharic(w) in lower for w in CHANGE_CONFIRM_WORDS)
+
+    if has_cancel and has_confirm:
+        return (from_num, to_num)
+
+    if has_cancel:
+        if "ነው" in lower or "new" in text.lower():
+            return (from_num, to_num)
+
+    return None
 
 
 # ================================================================
@@ -196,9 +312,6 @@ INTENTS = {
         "weight_verb": 0.15,
     },
 
-    # ================================================================
-    # ቁጥር ሰርዝ — "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው / 07 ይጥፋ"
-    # ================================================================
     "cancel_number": {
         "keywords": [
             "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
@@ -209,9 +322,6 @@ INTENTS = {
         "weight_verb": 0.15,
     },
 
-    # ================================================================
-    # ተነቀልኩ — "ቁጥሬ ተነቀለ / ቁጥሬ ጠፋ"
-    # ================================================================
     "complaint_removed": {
         "keywords": [
             "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
@@ -222,9 +332,6 @@ INTENTS = {
         "weight_verb": 0.15,
     },
 
-    # ================================================================
-    # ለምን ሸጥከው — "ለምን ሸጥህ / ለምን ትነቅላለህ / ለምን ሸጥከው"
-    # ================================================================
     "complaint_why_sold": {
         "keywords": [
             "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
@@ -236,9 +343,6 @@ INTENTS = {
         "weight_verb": 0.15,
     },
 
-    # ================================================================
-    # ከፍዬ ነቀልክ — "ተከፍሎ ነቀልክ / ልክያለው ለምን / ተልኩዋል ለምን"
-    # ================================================================
     "complaint_paid_removed": {
         "keywords": [
             "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
@@ -252,6 +356,51 @@ INTENTS = {
         "verb_endings": ["ነቀልክ", "ሸጥክ", "ትነቅላለህ", "ለምን"],
         "weight_keyword": 0.35,
         "weight_verb": 0.15,
+    },
+
+    "change_number": {
+        "keywords": [
+            "ወደ", "ቀይር", "ቀይረው", "ቀይርልኝ",
+            "ለወጥ", "ለወጠው", "ለወጥልኝ",
+            "አዛውር", "አዛውረው",
+            "ይሁን", "ተው",
+            "አልፈልግም", "አጥፋ", "ሰርዝ",
+        ],
+        "verb_endings": [
+            "ቀይር", "ቀይረው", "ቀይርልኝ",
+            "ይሁን", "አርግ", "አርገው", "አድርግ", "አድርገው",
+            "ለወጥ", "ለወጠው", "አዛውር",
+        ],
+        "weight_keyword": 0.30,
+        "weight_verb": 0.20,
+    },
+
+    # ================================================================
+    # NEW — ACCOUNT QUERY
+    # ================================================================
+    "account_query": {
+        "keywords": [
+            # አካውንት variants
+            "አካውንት", "አካንት", "አኮውንት", "አካወንት", "አካውት",
+            "አካውንቱ", "አካውንቱን",
+            # action phrases
+            "አካውንት ላክ", "አካውንት ላኪ", "አካውንት የታለ", "አካውንት ካለ",
+            "አካውንት ንገረኝ", "አካውንት አሳየኝ", "አካውንት ምንድን ነው",
+            # bank names ብቻቸውን
+            "ቴሌብር", "አዋሽ", "ሲቢኢ",
+            # bank + action
+            "ቴሌብር አካውንት", "ቴሌብር ቁጥር", "ቴሌብር ላክ",
+            "አዋሽ አካውንት", "አዋሽ ቁጥር", "አዋሽ ላክ",
+            "ሲቢኢ አካውንት", "ሲቢኢ ቁጥር", "ሲቢኢ ላክ",
+            "ንግድ ባንክ", "ንግድ ባንክ አካውንት", "ንግድ ባንክ ቁጥር", "ንግድ ባንክ ላክ",
+            "ባንክ አካውንት",
+            "የሚከፈልበት ቁጥር", "የባንክ ቁጥር", "የባንክ አካውንት",
+        ],
+        "verb_endings": [
+            "ላክ", "ላኪ", "አሳየኝ", "ንገረኝ", "የታለ", "ካለ", "ምንድን",
+        ],
+        "weight_keyword": 0.40,
+        "weight_verb": 0.10,
     },
 }
 
@@ -336,39 +485,57 @@ RESPONSES = {
         "ምን እናግዝህ ትፈልጋለህ? 🙏",
     ],
 
-    # ቁጥር ሰርዝ — future (bot ይላካል)
     "cancel_number_ack": [
         "እሺ ተሰርዟል 🙏",
         "እሺ ተነቅሏል 🙏",
     ],
 
-    # ተነቀልኩ — ቁጥሩ ሌላ ሰው ከያዘ
     "complaint_removed_taken": [
         "አዎ ገቢ ማረግ ረሳክ የጫወታው ባህሪ ነው 🙏",
         "ቤተሰብ ገቢ ሳታርግ ቁጥሩ ይለቀቃል 🙏",
         "ገቢ ማረግ ረሳህ ቤተሰብ የጫወታው ሕግ ነው 🙏",
     ],
 
-    # ተነቀልኩ — ቁጥሩ ነቃይ list ውስጥ ካለ
     "complaint_removed_nekay": [
         "ተነቃይ list ውስጥ ገብቷል ገቢ አርገው ያረጋግጡ 🙏",
         "ቁጥርዎ ነቃይ ነው ገቢ አረጋግጡ 🙏",
         "ነቃይ ነው ቤተሰብ ቶሎ ገቢ አርጉ 🙏",
     ],
 
-    # ለምን ሸጥከው
     "complaint_why_sold": [
         "ገቢ ተረሳ ቤተሰብ ምን ላርግ 🙏",
         "ቤተሰብ ገቢ ሳይደርስ ቁጥሩ ተለቀቀ ምን ላርግ 🙏",
         "ገቢ አልደረሰም ቤተሰብ ምን ላርግ 🙏",
     ],
 
-    # ከፍዬ ነቀልክ
     "complaint_paid_removed": [
         "ቼክ አርግ ችግር ካለ ባለቤቱን አውራው 🙏",
         "ባለቤቱን አናግር ቼክ ያርጋል 🙏",
         "ችግር ካለ ባለቤቱን አውራው ቼክ ያርጋል 🙏",
         "ባለቤቱን አናግረው ቼክ ያርጋሉ 🙏",
+    ],
+
+    "change_number_ack": [
+        "እሺ🙏 {from_num} ወደ {to_num} ቀይርያለው",
+        "እሺ ቤተሰብ🙏 {from_num} ወደ {to_num} ተቀይሯል",
+        "ተቀይሯል🙏 {from_num} → {to_num}",
+    ],
+    "change_number_not_yours": [
+        "ቁጥሩ የእርስዎ አይደለም 🙏",
+        "{from_num} የእርስዎ ቁጥር አይደለም 🙏",
+    ],
+    "change_number_target_taken": [
+        "{to_num} ተይዟል ቤተሰብ ሌላ ምረጥ 🙏",
+        "ቤተሰብ {to_num} ክፍት አይደለም ሌላ ምረጥ 🙏",
+        "{to_num} ቀድሞ ተወስዷል 🙏",
+    ],
+    "change_number_target_paid": [
+        "{to_num} ✅ ተከፍሏል መቀየር አይቻልም 🙏",
+        "ቤተሰብ {to_num} paid ነው አይቀየርም 🙏",
+    ],
+    "change_number_invalid": [
+        "ቁጥሩ ትክክል አይደለም 🙏",
+        "ያ ቁጥር የለም 🙏",
     ],
 }
 
@@ -437,13 +604,33 @@ def detect_intent(text: str) -> tuple:
 
         results[intent_name] = total
 
-    # ================================================================
-    # SPECIFIC NUMBER QUERY — ቁጥር + አለ/ተያዘ pattern
-    # ================================================================
     numbers_in_text = re.findall(r"\d+", text)
     translated_lower = translated.lower()
     normalized_lower = normalize_amharic(translated_lower)
 
+    # ================================================================
+    # ACCOUNT QUERY — direct detection (ቅድሚያ — ቁጥር ሳያስፈልግ)
+    # ================================================================
+    account_keywords_direct = [
+        "አካውንት", "አካንት", "አኮውንት", "አካወንት", "አካውት",
+        "ቴሌብር", "አዋሽ", "ሲቢኢ",
+        "ንግድ ባንክ", "ባንክ አካውንት",
+        "የሚከፈልበት ቁጥር", "የባንክ ቁጥር",
+    ]
+    if any(normalize_amharic(kw) in normalized_lower for kw in account_keywords_direct):
+        return "account_query", 1.0
+
+    # ================================================================
+    # CHANGE NUMBER — direct detection (ቅድሚያ)
+    # ================================================================
+    if len(numbers_in_text) >= 2:
+        change_result = detect_change_number(text)
+        if change_result:
+            return "change_number", 1.0
+
+    # ================================================================
+    # SPECIFIC NUMBER QUERY
+    # ================================================================
     has_ale = "አለ" in normalized_lower
     has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
 
@@ -451,22 +638,24 @@ def detect_intent(text: str) -> tuple:
         return "specific_number_query", 1.0
 
     # ================================================================
-    # CANCEL NUMBER — ቁጥር + ሰርዝ/ሽጠው/አጥፋው/ይጥፋ/አልፈልግም
+    # CANCEL NUMBER
     # ================================================================
     cancel_words = ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
     has_cancel = any(normalize_amharic(w) in normalized_lower for w in cancel_words)
-    if numbers_in_text and has_cancel:
+    if len(numbers_in_text) == 1 and has_cancel:
         return "cancel_number", 1.0
 
     # ================================================================
-    # CONTEXT GRADING — weighted formula per intent
+    # CONTEXT GRADING
     # ================================================================
     for intent_name, total in results.items():
         bonus = 0.0
 
         if numbers_in_text:
-            if intent_name in ("booking", "specific_number_query", "cancel_number"):
+            if intent_name in ("booking", "specific_number_query", "cancel_number", "change_number"):
                 bonus += 0.15
+            elif intent_name == "account_query":
+                pass  # ቁጥር ቢኖርም account_query ይሠራል
             else:
                 bonus -= 0.20
 
@@ -476,7 +665,6 @@ def detect_intent(text: str) -> tuple:
         if intent_name == "greeting" and not numbers_in_text:
             bonus += 0.10
 
-        # complaint intents — ቁጥር ከሌለ score ይጨምር
         if intent_name in ("complaint_removed", "complaint_why_sold", "complaint_paid_removed") and not numbers_in_text:
             bonus += 0.10
 
@@ -515,7 +703,8 @@ def get_response(
         "resend_board": False,
         "resend_nekay": False,
         "resend_remaining": False,
-        "cancel_number": None,   # int ቁጥር — bot.py ይሰርዛዋል
+        "cancel_number": None,
+        "change_number": None,
     }
 
     # ================================================================
@@ -543,6 +732,36 @@ def get_response(
         return result
     if score < THRESHOLD_RESPOND:
         result["reply"] = "ምን ማለትህ ነው? 🙏"
+        return result
+
+    # ================================================================
+    # INTENT: account_query
+    # ================================================================
+    if intent == "account_query":
+        payment_info = settings.get("payment_info", "")
+        if payment_info:
+            result["reply"] = payment_info
+        return result
+
+    # ================================================================
+    # INTENT: change_number
+    # ================================================================
+    if intent == "change_number":
+        change_result = detect_change_number(text)
+        if change_result:
+            from_num, to_num = change_result
+            total = settings.get("total_numbers", 0)
+
+            def fmt(n): return f"{n:02d}"
+
+            if to_num < 1 or to_num > total or from_num < 1 or from_num > total:
+                result["reply"] = random.choice(RESPONSES["change_number_invalid"])
+                return result
+
+            result["change_number"] = {"from": from_num, "to": to_num}
+            result["reply"] = random.choice(RESPONSES["change_number_ack"]).format(
+                from_num=fmt(from_num), to_num=fmt(to_num)
+            )
         return result
 
     # ================================================================
@@ -579,7 +798,7 @@ def get_response(
         return result
 
     # ================================================================
-    # INTENT: cancel_number — "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው"
+    # INTENT: cancel_number
     # ================================================================
     if intent == "cancel_number":
         numbers_found = re.findall(r"\d+", text)
@@ -590,32 +809,29 @@ def get_response(
         return result
 
     # ================================================================
-    # INTENT: complaint_removed — "ተነቀልኩ / ቁጥሬ ጠፋ"
+    # INTENT: complaint_removed
     # ================================================================
     if intent == "complaint_removed":
         numbers_found = re.findall(r"\d+", text)
         num = int(numbers_found[0]) if numbers_found else None
 
         if num and num in taken:
-            # ሌላ ሰው ይዞታል
             result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
         elif num and any(num == n for n, _ in nekay_list):
-            # ነቃይ list ውስጥ ነው
             result["reply"] = random.choice(RESPONSES["complaint_removed_nekay"])
         else:
-            # ቁጥር ከሌለ — default
             result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
         return result
 
     # ================================================================
-    # INTENT: complaint_why_sold — "ለምን ሸጥህ / ለምን ትነቅላለህ"
+    # INTENT: complaint_why_sold
     # ================================================================
     if intent == "complaint_why_sold":
         result["reply"] = random.choice(RESPONSES["complaint_why_sold"])
         return result
 
     # ================================================================
-    # INTENT: complaint_paid_removed — "ከፍዬ ነቀልክ / ልክያለው ለምን"
+    # INTENT: complaint_paid_removed
     # ================================================================
     if intent == "complaint_paid_removed":
         result["reply"] = random.choice(RESPONSES["complaint_paid_removed"])
