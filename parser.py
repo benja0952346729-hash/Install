@@ -1,10 +1,12 @@
 import re
+import regex  # pip install regex — emoji support ለማስቻል
 
 HALF_WORDS = ["begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ"]
 FULL_WORDS = ["bemulu", "mulu", "በሙሉ", "ሙሉ"]
 GLOBAL_HALF_WORDS = ["ሁሉንም በግማሽ", "ሁሉንም ግማሽ", "ሁሉም በግማሽ", "hulunm begmash", "hulunm gmash"]
 GLOBAL_FULL_WORDS = ["ሁሉንም በሙሉ", "ሁሉንም ሙሉ", "ሁሉም ሙሉ", "hulunm bemulu", "hulunm mulu"]
 
+# ለውጥ 5 — NON_NAME_WORDS Fix
 NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
     "yaz", "yazligni", "ያዝ", "ፃፍ", "መዝግብ", "bel", "belaw", "በላቸው",
     "yaze", "yazat", "ble", "yibelachew", "yibelat",
@@ -14,6 +16,14 @@ NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
     "ተያዘ", "teyaze", "ክፍት", "kift", "yeteYaze", "alteYaze",
     "ወይ", "wey", "እንደ", "neger", "ንገር",
     "ቁጥር", "qitr", "kutr", "cutr", "qutr", "qtr", "ktr", "number", "nbr", "num",
+    # ← ለውጥ 5: እነዚህ ተጨምረዋል
+    "ያዝልኝ", "yazligni", "yazlgni", "yazlg",
+    "ያዛት", "yazat",
+    "ያዛቸው", "yazachew",
+    "ፃፍልኝ", "tsafligni",
+    "መዝግብልኝ", "mezgibligni",
+    # separators — ስም እንዳይሆኑ
+    "እና", "ena", "and", "ና", "na",
 ]])
 
 def _is_half_word(w):
@@ -24,10 +34,31 @@ def _is_full_word(w):
 
 
 # ================================================================
+# ለውጥ 6 — _is_valid_name() helper
+# ================================================================
+def _is_valid_name(s: str) -> bool:
+    """
+    ስም valid ነው ወይ?
+    - Emoji: 1+ ✅
+    - ሌሎች: 2+ chars ✅
+    """
+    if not s:
+        return False
+    emoji_pattern = regex.compile(
+        r'[\U0001F300-\U0001F9FF'
+        r'\U00002600-\U000027BF'
+        r'\U0001FA00-\U0001FA9F'
+        r'\U00002700-\U000027BF'
+        r'\U0001F000-\U0001F02F]+',
+        regex.UNICODE
+    )
+    if emoji_pattern.search(s):
+        return True  # emoji ካለ — length ሳይታይ ✅
+    return len(s) >= 2  # Regular chars — 2+ ብቻ
+
+
+# ================================================================
 # PRE-TOKENIZER
-# "21አበበ31ayele41+selemon" → ["21አበበ","31ayele","41+selemon"]
-# "1121" → ["11","21"]
-# "151"  → ["01","51"]
 # ================================================================
 
 def _pre_tokenize(text: str) -> list:
@@ -37,7 +68,10 @@ def _pre_tokenize(text: str) -> list:
     """
     tokens = []
 
-    # Step 1: space/separator split
+    # ለውጥ 7 — Separator Fix
+    # Step 1: word separators (እና, and, ና) ወደ space
+    text = re.sub(r'\bእና\b|\bና\b|\band\b', ' ', text, flags=re.IGNORECASE)
+    # Step 2: symbol separators
     parts = re.sub(r'[,=/%&#?]', ' ', text).split()
 
     for part in parts:
@@ -47,7 +81,6 @@ def _pre_tokenize(text: str) -> list:
             tokens.extend(sub)
         else:
             # Mixed (digits + letters) — split at digit→letter boundaries
-            # e.g. "21አበበ31ayele41+selemon"
             sub = _split_mixed(part)
             tokens.extend(sub)
 
@@ -63,8 +96,6 @@ def _split_pure_numbers(s: str) -> list:
     "11+51" → ["11+","51"]
     "11+51+"→ ["11+","51+"]
     """
-    # First separate by + keeping track
-    # e.g. "11+51+" → segments: [("11",True),("51",True)]
     segments = []
     cur = ""
     for ch in s:
@@ -80,7 +111,6 @@ def _split_pure_numbers(s: str) -> list:
     for digits, has_plus in segments:
         if not digits:
             continue
-        # Split digits into 2-digit chunks from right
         chunks = _chunk_digits(digits)
         for j, chunk in enumerate(chunks):
             is_last = (j == len(chunks) - 1)
@@ -92,20 +122,13 @@ def _split_pure_numbers(s: str) -> list:
 def _chunk_digits(digits: str) -> list:
     """
     Digits string → 2-digit chunks (single leading digit gets 0-padded)
-    "11"   → ["11"]
-    "1121" → ["11","21"]
-    "151"  → ["01","51"]   (1 digit + 2 digits → pad first)
-    "0121" → ["01","21"]
     """
     if len(digits) <= 2:
-        # single digit → pad
         if len(digits) == 1:
             return [f"0{digits}"]
         return [digits]
 
     chunks = []
-    # Split from left into 2-digit groups
-    # If odd length → first chunk is 1 digit (pad it)
     i = 0
     if len(digits) % 2 == 1:
         chunks.append(f"0{digits[0]}")
@@ -121,16 +144,12 @@ def _split_mixed(s: str) -> list:
     Mixed string → split where digits end and non-digits begin or vice versa
     "21አበበ31ayele41+selemon" → ["21አበበ","31ayele","41+selemon"]
     """
-    # Pattern: optional digits, optional +, then name chars, repeating
-    # Split at point where a new number starts (digit after non-digit)
     result = []
     current = ""
 
     i = 0
     while i < len(s):
         ch = s[i]
-
-        # New number starting?
         if ch.isdigit() and current and not current[-1].isdigit() and current[-1] != '+':
             result.append(current)
             current = ch
@@ -164,7 +183,8 @@ def _parse_token(tok: str):
             is_half = True
             rest = m.group(2).strip()
             tok = m.group(1)
-            if rest and rest.lower() not in NON_NAME_WORDS:
+            # ለውጥ 6: _is_valid_name() check ተጨምሯል
+            if rest and rest.lower() not in NON_NAME_WORDS and _is_valid_name(rest):
                 name = rest
             break
         m2 = re.match(r'^' + re.escape(hw) + r'(\d+)(.*)$', tok, re.IGNORECASE)
@@ -172,7 +192,7 @@ def _parse_token(tok: str):
             is_half = True
             tok = m2.group(1)
             rest = m2.group(2).strip()
-            if rest and rest.lower() not in NON_NAME_WORDS:
+            if rest and rest.lower() not in NON_NAME_WORDS and _is_valid_name(rest):
                 name = rest
             break
 
@@ -184,7 +204,7 @@ def _parse_token(tok: str):
                 is_full = True
                 rest = m.group(2).strip()
                 tok = m.group(1)
-                if rest and rest.lower() not in NON_NAME_WORDS:
+                if rest and rest.lower() not in NON_NAME_WORDS and _is_valid_name(rest):
                     name = rest
                 break
 
@@ -199,7 +219,7 @@ def _parse_token(tok: str):
         if m:
             is_half = True
             name_part = m.group(2).strip()
-            if name_part.lower() not in NON_NAME_WORDS:
+            if name_part.lower() not in NON_NAME_WORDS and _is_valid_name(name_part):
                 name = name_part
             tok = m.group(1)
 
@@ -208,7 +228,7 @@ def _parse_token(tok: str):
         m = re.match(r'^(\d+)([^\d\+].+)$', tok)
         if m:
             name_part = m.group(2).strip()
-            if name_part.lower() not in NON_NAME_WORDS:
+            if name_part.lower() not in NON_NAME_WORDS and _is_valid_name(name_part):
                 name = name_part
             tok = m.group(1)
 
@@ -265,7 +285,7 @@ def parse_numbers(text: str):
                     skip_indices.add(i + 1)
                     if i + 2 < len(tokens):
                         nxt2 = tokens[i + 2].strip()
-                        if not re.search(r'\d', nxt2) and nxt2.lower() not in NON_NAME_WORDS:
+                        if not re.search(r'\d', nxt2) and nxt2.lower() not in NON_NAME_WORDS and _is_valid_name(nxt2):
                             name = nxt2
                             skip_indices.add(i + 2)
                 elif _is_full_word(nxt):
@@ -273,10 +293,10 @@ def parse_numbers(text: str):
                     skip_indices.add(i + 1)
                     if i + 2 < len(tokens):
                         nxt2 = tokens[i + 2].strip()
-                        if not re.search(r'\d', nxt2) and nxt2.lower() not in NON_NAME_WORDS:
+                        if not re.search(r'\d', nxt2) and nxt2.lower() not in NON_NAME_WORDS and _is_valid_name(nxt2):
                             name = nxt2
                             skip_indices.add(i + 2)
-                elif nxt_lower not in NON_NAME_WORDS and name is None:
+                elif nxt_lower not in NON_NAME_WORDS and name is None and _is_valid_name(nxt):
                     name = nxt
                     skip_indices.add(i + 1)
 
@@ -287,8 +307,7 @@ def parse_numbers(text: str):
         return None
 
     # ================================================================
-    # QUERY GUARD — ቁጥር አንድ ብቻ + name=None + query word አለ → None
-    # "16 አለ", "16 ተያዘ", "16 ወይ" → responder ይያዘዋል
+    # QUERY GUARD
     # ================================================================
     QUERY_WORDS = [
         "አለ", "ale", "ቢል", "bill", "ነው", "yaze", "ተያዘ",
