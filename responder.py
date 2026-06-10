@@ -1,5 +1,7 @@
 import re
+import math
 import random
+from collections import defaultdict
 from rapidfuzz import fuzz
 
 # ================================================================
@@ -54,7 +56,6 @@ LATIN_TO_AMHARIC = {
     "sint qere": "ስንት ቀረ", "sint ale": "ስንት አለ",
     "qeri ale": "ቀሪ አለ", "qitr ale": "ቁጥር አለ",
     "yalteyaze": "ያልተያዘ", "yalteyazun": "ያልተያዙ",
-    # nekay
     "nekay": "ነቃይ", "tenekay": "ተነቃይ", "nkay": "ነቃይ",
     "nekay ale": "ነቃይ አለ", "nekay zerzir": "ነቃይ ዘርዝር",
     "nekay neger": "ነቃይ ንገር", "nekay lak": "ነቃይ ላክ",
@@ -81,21 +82,17 @@ LATIN_TO_AMHARIC = {
     "awo": "አዎ", "aydelem": "አይደለም",
     "tnx": "አመሰግናለሁ", "thanks": "አመሰግናለሁ",
     "ale": "አለ",
-    # ሰርዝ/አውጣ
     "serzew": "ሰርዝ", "srez": "ሰርዝ", "serz": "ሰርዝ",
     "shitew": "ሽጠው", "shtew": "ሽጠው", "shitkhew": "ሽጠው", "shetek": "ሽጠው",
     "atfaw": "አጥፋው", "atfa": "አጥፋው", "yitfa": "ይጥፋ",
     "awta": "አውጣ", "awuta": "አውጣ",
     "alfeligm": "አልፈልግም", "alfelegim": "አልፈልግም", "alfelegm": "አልፈልግም",
-    # ተነቀልኩ
     "tenekelku": "ተነቀልኩ", "teneklku": "ተነቀልኩ", "nekelku": "ተነቀልኩ",
     "qitr tenekelk": "ቁጥር ተነቀለ", "number tenekelk": "ቁጥር ተነቀለ",
-    # ለምን ሸጥከው
     "lmin shitkhew": "ለምን ሸጥከው", "lmin shitkh": "ለምን ሸጥከው",
     "lmin shetek": "ለምን ሸጥህ", "lemin shetek": "ለምን ሸጥህ",
     "lmin tenklaleh": "ለምን ትነቅላለህ", "lmin tinklaleh": "ለምን ትነቅላለህ",
     "why shetek": "ለምን ሸጥህ", "why teneklaleh": "ለምን ትነቅላለህ",
-    # ከፍዬ ነቀልክ
     "kefye nekelk": "ከፍዬ ነቀልክ", "kefye neklek": "ከፍዬ ነቀልክ",
     "tekeflo nekelk": "ተከፍሎ ነቀልክ", "tekefilo neklek": "ተከፍሎ ነቀልክ",
     "kefye shetk": "ከፍዬ ሸጥክ", "kefye shetkh": "ከፍዬ ሸጥክ",
@@ -105,7 +102,6 @@ LATIN_TO_AMHARIC = {
     "like tineklaleh": "ልኬ ትነቅላለህ", "lke tinklaleh": "ልኬ ትነቅላለህ",
     "lkuwal lmin": "ልክያለው ለምን", "selkuwal lemin": "ልክያለው ለምን",
     "payment ale lmin": "ከፍዬ ሸጥክ", "lefkuwal lmin": "ልክያለው ለምን",
-    # ሰላምታ
     "selam": "ሰላም", "salam": "ሰላም", "selem": "ሰላም", "selaam": "ሰላም",
     "hi": "ሰላም", "hay": "ሰላም", "hello": "ሰላም", "helo": "ሰላም",
     "endet neh": "እንዴት ነህ", "endet ne": "እንዴት ነህ", "indet neh": "እንዴት ነህ",
@@ -117,9 +113,6 @@ LATIN_TO_AMHARIC = {
     "endet arefedek": "እንዴት አረፈድክ", "indet arefedek": "እንዴት አረፈድክ",
     "tena yistilign": "ጤና ይስጥልኝ", "tena yistligni": "ጤና ይስጥልኝ",
     "endemen nachuh": "እንደምን ናችሁ", "endemen nacuh": "እንደምን ናችሁ",
-    # ================================================================
-    # CHANGE NUMBER — Latin keywords
-    # ================================================================
     "wede": "ወደ",
     "qeyir": "ቀይር", "qeyirew": "ቀይረው", "qeyirligni": "ቀይርልኝ",
     "lewet": "ለወጥ", "lewetew": "ለወጠው", "lewetligni": "ለወጥልኝ",
@@ -131,9 +124,6 @@ LATIN_TO_AMHARIC = {
     "change arig": "ቀይር አርግ",
     "change adrig": "ቀይር አድርግ",
     "change arigew": "ቀይር አርገው",
-    # ================================================================
-    # ACCOUNT — Latin keywords (ከረጅሙ ወደ አጭሩ ቅደም ተከተል)
-    # ================================================================
     "account lak": "አካውንት ላክ",
     "acount lak": "አካውንት ላክ",
     "account lai": "አካውንት ላኪ",
@@ -197,212 +187,335 @@ def translate_latin(text: str) -> str:
 # CHANGE NUMBER PATTERN DETECTOR
 # ================================================================
 
-CHANGE_CANCEL_WORDS = [
-    "አልፈልግም", "ተው", "አጥፋ", "አጥፋው", "ሰርዝ", "ሰርዝልኝ",
-]
+CHANGE_CANCEL_WORDS = ["አልፈልግም", "ተው", "አጥፋ", "አጥፋው", "ሰርዝ", "ሰርዝልኝ"]
 CHANGE_CONFIRM_WORDS = [
-    "ቀይር", "ቀይረው", "ቀይርልኝ",
-    "ይሁን",
-    "አርግ", "አርገው",
-    "አድርግ", "አድርገው",
-    "change",
-    "ለወጥ", "ለወጠው", "ለወጥልኝ",
-    "አዛውር", "አዛውረው",
+    "ቀይር", "ቀይረው", "ቀይርልኝ", "ይሁን",
+    "አርግ", "አርገው", "አድርግ", "አድርገው", "change",
+    "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
 ]
 CHANGE_WEDE_WORDS = ["ወደ", "to"]
-
 
 def detect_change_number(text: str):
     translated = translate_latin(text)
     normalized = normalize_amharic(translated)
     lower = normalized.lower()
-
     nums = re.findall(r"\d+", text)
     if len(nums) < 2:
         return None
-
     from_num = int(nums[0])
     to_num = int(nums[1])
-
     for wede in CHANGE_WEDE_WORDS:
         norm_wede = normalize_amharic(wede)
         if norm_wede in lower:
             return (from_num, to_num)
-
     has_cancel = any(normalize_amharic(w) in lower for w in CHANGE_CANCEL_WORDS)
     has_confirm = any(normalize_amharic(w) in lower for w in CHANGE_CONFIRM_WORDS)
-
     if has_cancel and has_confirm:
         return (from_num, to_num)
-
     if has_cancel:
         if "ነው" in lower or "new" in text.lower():
             return (from_num, to_num)
-
     return None
 
 
 # ================================================================
-# INTENT DEFINITIONS
+# INTENT EXAMPLES — ከ keywords + Latin map ተሰብስቦ
 # ================================================================
 
-INTENTS = {
+INTENT_EXAMPLES = {
+    "booking": [
+        "ያዝ", "ያዛት", "ያዛቸው", "ፃፍልኝ", "ፃፍ", "ያዝልኝ",
+        "መዝግብ", "መዝግባት", "መዝግብልኝ",
+        "ቁጥር ያዝልኝ", "ፃፍልኝ ቁጥሩን", "ይህን ቁጥር ያዝ",
+        "ለኔ ያዝልኝ", "register አርግልኝ", "book አርግ",
+        "ቁጥሩን አስቀምጥልኝ", "ፃፍ ፃፍ", "ያዝልኝ እባክህ",
+        "ቁጥሩን ጻፍልኝ", "ምዝገባ አርግልኝ", "ምዝገባ",
+    ],
 
-    "booking": {
-        "keywords": [
-            "ያዝ", "ያዛት", "ያዛቸው", "ፃፍልኝ", "ፃፍ", "ያዝልኝ",
-            "መዝግብ", "መዝግባት", "መዝግብልኝ"
-        ],
-        "verb_endings": ["ያዝ", "ፃፍ", "መዝግብ", "ያዛ", "ፃፍልኝ"],
-        "weight_keyword": 0.25,
-        "weight_verb": 0.15,
-    },
+    "nekay_query": [
+        "ነቃይ", "ተነቃይ", "ነቃዮች", "ሚሸጥ አለ",
+        "ነቃይ አለ", "ነቃይ ዘርዝር", "ነቃይ ንገር",
+        "ነቃይ ቁጥሮች", "ተነቃይ አለ", "ነቃይ አሳይ",
+        "ነቃይ ላክ", "ነቃይ ምን አለ", "ነቃይ ዝርዝር ስጠኝ",
+        "ምን ያህል ነቃይ አለ", "ነቃይ ቁጥር ስንት ነው",
+    ],
 
-    "nekay_query": {
-        "keywords": [
-            "ነቃይ", "ተነቃይ", "ንቃይ", "ነቃዮች", "ሚሸጥ", "የተሸጠ",
-        ],
-        "verb_endings": ["አለ", "ዘርዝር", "ላክ", "ንገር", "ንገረኝ", "አሳውቀኝ", "አሳውቅ", "አሳይ"],
-        "weight_keyword": 0.25,
-        "weight_verb": 0.10,
-    },
+    "remaining_send": [
+        "ቀሪ ላክ", "ቁጥር ላክ", "ቀሪ ቁጥሮች ላክ",
+        "ቀሪ አሳየኝ", "ቶሎ ቶሎ ቀሪ ላክ",
+        "ቀሪ ቁጥሮቹን ላክ", "remaining ላክ",
+        "ያልተያዙ ቁጥሮች ላክ", "ያልተያዙ ቁጥሮቹን ስጠኝ",
+    ],
 
-    "remaining_send": {
-        "keywords": ["ቀሪ", "ቁጥር"],
-        "verb_endings": ["ላክ", "እየላክ", "አሳየኝ", "አሳየን"],
-        "weight_keyword": 0.25,
-        "weight_verb": 0.15,
-    },
+    "remaining_query": [
+        "ቀሪ", "ያልተያዘ", "ያልተያዙ", "ምን አለ", "ስንት ቀረ",
+        "ስንት ቁጥሮች", "ስንት አለ", "ቁጥር አለ", "ቀሪ አለ",
+        "ምን ምን አለ", "ቀሪ ቁጥሮች ምን አለ", "ስንት ቁጥር ቀረ",
+        "ያልተያዙ ቁጥሮች ምን አለ", "ቀሪ ቁጥሮች ስንት ናቸው",
+        "ምን ያህል ቀረ", "ቀሪ ቁጥሮቹ ምንድን ናቸው",
+    ],
 
-    "remaining_query": {
-        "keywords": [
-            "ቀሪ", "ያልተያዘ", "ያልተያዙ", "ያልተመዘገበ",
-            "ምን አለ", "ምን ምን አለ", "ስንት ቀረ",
-            "ስንት ቁጥሮች", "ስንት አለ", "ስንት ቁጥር",
-            "ቁጥር አለ", "ቀሪ አለ",
-        ],
-        "verb_endings": ["አለ", "አሉ", "ቀረ", "ይኖር"],
-        "weight_keyword": 0.25,
-        "weight_verb": 0.10,
-    },
+    "specific_number_query": [
+        "ተያዘ", "ተይዞ", "ተይዙዋል", "አለ ወይ", "አለ",
+        "ቁጥሩ ተያዘ ወይ", "ቁጥሩ አለ", "ቁጥሩ ክፍት ነው ወይ",
+        "ይህ ቁጥር ተወሰደ ወይ", "ቁጥሩ ነፃ ነው ወይ",
+        "ይህ ቁጥር ተያዘ", "ቁጥሩ available ነው ወይ",
+    ],
 
-    "specific_number_query": {
-        "keywords": ["ተያዘ", "ተይዞ", "ተይዙዋል", "አለ ወይ", "አለ"],
-        "verb_endings": ["ተያዘ", "ተይዞ", "አለ", "አለ ወይ"],
-        "weight_keyword": 0.25,
-        "weight_verb": 0.15,
-    },
+    "all_taken_query": [
+        "ሁሉም ተይዘዋል", "ሁሉም ተያዘ", "ሁሉም አልተያዙም",
+        "ሁሉም ቁጥሮች ተያዙ", "ሁሉም አለቀ", "ሁሉም ተወሰደ",
+    ],
 
-    "all_taken_query": {
-        "keywords": ["ሁሉም ተይዘዋል", "ሁሉም ተያዘ", "ሁሉም አልተያዙም"],
-        "verb_endings": ["ተይዘዋል", "ተያዘ", "አልተያዙም"],
-        "weight_keyword": 0.25,
-        "weight_verb": 0.10,
-    },
+    "greeting": [
+        "ሰላም", "እንዴት ነህ", "ደና አደርክ", "ደና ዋልክ",
+        "እንዴት አመሸህ", "ሰላም ዋልክ", "ሰላም አመሸህ",
+        "በሰላም አደርክ", "እንዴት አረፈድክ", "ጤና ይስጥልኝ",
+        "እንደምን ናችሁ", "እንደምን አላችሁ", "እንዴት ናችሁ",
+        "ሰላም እንዴት ነህ", "ሰላም ወዳጄ", "ሰላምታ",
+        "hi", "hello", "hey", "ሰላም ነህ",
+    ],
 
-    "greeting": {
-        "keywords": [
-            "ሰላም", "እንዴት ነህ", "ደና አደርክ", "ደና ዋልክ",
-            "እንዴት አመሸህ", "ሰላም ዋልክ", "ሰላም አመሸህ",
-            "በሰላም አደርክ", "እንዴት አረፈድክ", "ጤና ይስጥልኝ",
-            "እንደምን ናችሁ", "እንደምን አላችሁ", "እንዴት ናችሁ",
-        ],
-        "verb_endings": ["ነህ", "ዋልክ", "አደርክ", "አመሸህ", "አረፈድክ", "ናችሁ", "አላችሁ"],
-        "weight_keyword": 0.35,
-        "weight_verb": 0.15,
-    },
+    "cancel_number": [
+        "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
+        "አጥፋልኝ", "ሰርዝልኝ", "አውጣልኝ",
+        "ቁጥሩን ሰርዝ", "ቁጥሩን አጥፋ", "ቁጥሩን አውጣ",
+        "አልፈልገውም", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
+        "ቁጥሩን አልፈልግም", "ቁጥሩን ሰርዝልኝ",
+    ],
 
-    "cancel_number": {
-        "keywords": [
-            "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
-            "አጥፋልኝ", "ሰርዝልኝ", "አውጣልኝ",
-        ],
-        "verb_endings": ["ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አልፈልግም"],
-        "weight_keyword": 0.35,
-        "weight_verb": 0.15,
-    },
+    "complaint_removed": [
+        "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
+        "ለምን ተነቀልኩ", "ተነቀልኩ እኮ",
+        "ቁጥሬ የለም", "ቁጥሬ ጠፋ ለምን", "ቁጥሬ ሄደ ለምን",
+        "ቁጥሬ ተቀነሰ", "ቁጥሬ ተወሰደ ለምን",
+    ],
 
-    "complaint_removed": {
-        "keywords": [
-            "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
-            "ለምን ተነቀልኩ", "ተነቀልኩ እኮ",
-        ],
-        "verb_endings": ["ተነቀልኩ", "ተነቀለ", "ጠፋ", "ሄደ"],
-        "weight_keyword": 0.35,
-        "weight_verb": 0.15,
-    },
+    "complaint_why_sold": [
+        "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
+        "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
+        "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥከው",
+        "ለምን ቁጥሬን ነቀልክ", "ቁጥሬ ለምን ሄደ",
+    ],
 
-    "complaint_why_sold": {
-        "keywords": [
-            "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
-            "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
-            "ቁጥሬን ለምን ነቀልክ",
-        ],
-        "verb_endings": ["ሸጥህ", "ሸጥከው", "ትነቅላለህ", "ትሸጣለህ", "ነቀልክ"],
-        "weight_keyword": 0.35,
-        "weight_verb": 0.15,
-    },
+    "complaint_paid_removed": [
+        "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
+        "ልክያለው እኮ ለምን ሸጥክ", "ተልኩዋል ለምን ነቀልክ",
+        "ልክያለው ለምን", "ልኬ ትነቅላለህ",
+        "ብሬ ተልኳል ለምን ነቀልክ", "ገንዘብ ልኬ ነቀልክ",
+        "ከፈልኩ ለምን ሸጥክ", "ልኩዋል ለምን", "ተልኩዋል ሸጥክ",
+        "ልኬ ሸጥክ", "ተልኩዋል እኮ",
+        "payment ላኩ ለምን ሸጥክ", "ከፍዬ ቁጥሬ ሄደ",
+        "ብር ልኬ ቁጥሬ ጠፋ",
+    ],
 
-    "complaint_paid_removed": {
-        "keywords": [
-            "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
-            "ልክያለው እኮ ለምን ሸጥክ", "ተልኩዋል ለምን ነቀልክ",
-            "ልክያለው ለምን", "ልኬ ትነቅላለህ",
-            "ብሬ ተልኳል ለምን ነቀልክ", "ገንዘብ ልኬ ነቀልክ",
-            "ከፈልኩ ለምን ሸጥክ", "payment ላኩ ለምን ሸጥክ",
-            "ልኬ ሸጥክ", "ልኩዋል ለምን", "ተልኩዋል ሸጥክ",
-            "ልክ ነው ለምን", "ተልኩዋል እኮ",
-        ],
-        "verb_endings": ["ነቀልክ", "ሸጥክ", "ትነቅላለህ", "ለምን"],
-        "weight_keyword": 0.35,
-        "weight_verb": 0.15,
-    },
+    "change_number": [
+        "ወደ ቀይር", "ቀይር", "ቀይረው", "ቀይርልኝ",
+        "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
+        "ቁጥሩን ቀይር", "ቁጥሩን ለወጥ", "ቁጥሬን ቀይርልኝ",
+        "change አርግ", "ቁጥሩን change አርግ",
+    ],
 
-    "change_number": {
-        "keywords": [
-            "ወደ", "ቀይር", "ቀይረው", "ቀይርልኝ",
-            "ለወጥ", "ለወጠው", "ለወጥልኝ",
-            "አዛውር", "አዛውረው",
-            "ይሁን", "ተው",
-            "አልፈልግም", "አጥፋ", "ሰርዝ",
-        ],
-        "verb_endings": [
-            "ቀይር", "ቀይረው", "ቀይርልኝ",
-            "ይሁን", "አርግ", "አርገው", "አድርግ", "አድርገው",
-            "ለወጥ", "ለወጠው", "አዛውር",
-        ],
-        "weight_keyword": 0.30,
-        "weight_verb": 0.20,
-    },
-
-    # ================================================================
-    # NEW — ACCOUNT QUERY
-    # ================================================================
-    "account_query": {
-        "keywords": [
-            # አካውንት variants
-            "አካውንት", "አካንት", "አኮውንት", "አካወንት", "አካውት",
-            "አካውንቱ", "አካውንቱን",
-            # action phrases
-            "አካውንት ላክ", "አካውንት ላኪ", "አካውንት የታለ", "አካውንት ካለ",
-            "አካውንት ንገረኝ", "አካውንት አሳየኝ", "አካውንት ምንድን ነው",
-            # bank names ብቻቸውን
-            "ቴሌብር", "አዋሽ", "ሲቢኢ",
-            # bank + action
-            "ቴሌብር አካውንት", "ቴሌብር ቁጥር", "ቴሌብር ላክ",
-            "አዋሽ አካውንት", "አዋሽ ቁጥር", "አዋሽ ላክ",
-            "ሲቢኢ አካውንት", "ሲቢኢ ቁጥር", "ሲቢኢ ላክ",
-            "ንግድ ባንክ", "ንግድ ባንክ አካውንት", "ንግድ ባንክ ቁጥር", "ንግድ ባንክ ላክ",
-            "ባንክ አካውንት",
-            "የሚከፈልበት ቁጥር", "የባንክ ቁጥር", "የባንክ አካውንት",
-        ],
-        "verb_endings": [
-            "ላክ", "ላኪ", "አሳየኝ", "ንገረኝ", "የታለ", "ካለ", "ምንድን",
-        ],
-        "weight_keyword": 0.40,
-        "weight_verb": 0.10,
-    },
+    "account_query": [
+        "አካውንት", "አካውንት ላክ", "አካውንት ምንድን ነው",
+        "ቴሌብር", "አዋሽ", "ሲቢኢ", "ንግድ ባንክ",
+        "ቴሌብር ቁጥር", "አዋሽ ቁጥር", "ሲቢኢ ቁጥር",
+        "የሚከፈልበት ቁጥር", "የባንክ ቁጥር", "ባንክ አካውንት",
+        "ላኩ ወዴት", "ገንዘብ ወዴት ልላክ", "payment info",
+        "ቴሌብር አካውንት ስጠኝ", "ቴሌብር ቁጥርህን ላክ",
+        "አዋሽ አካውንት ስጠኝ", "ወዴት ልከፍል",
+    ],
 }
+
+
+# ================================================================
+# N-GRAM ENGINE
+# ================================================================
+
+def get_ngrams(text: str, n: int = 2) -> list:
+    """ቃሉን ወደ n-gram ይሰብራል — ለምሳሌ 'ያዝልኝ' → ['ያዝ','ዝል','ልኝ']"""
+    text = normalize_amharic(text)
+    tokens = text.split()
+    ngrams = []
+    # Character n-grams (ለፊደል ቅርበት)
+    for token in tokens:
+        for i in range(len(token) - n + 1):
+            ngrams.append(token[i:i+n])
+    # Word unigrams (ለቃላት ቀጥታ match)
+    ngrams.extend(tokens)
+    return ngrams
+
+
+def build_tfidf(intent_examples: dict):
+    """
+    ከ intent examples TF-IDF vectors ይሰራል።
+    ሁሉም intent ውስጥ ያሉ examples አንድ document ናቸው።
+    """
+    # Step 1: ሁሉም ngrams ሰብስብ
+    intent_ngrams = {}
+    for intent, examples in intent_examples.items():
+        all_ngrams = []
+        for ex in examples:
+            translated = translate_latin(ex)
+            normalized = normalize_amharic(translated)
+            all_ngrams.extend(get_ngrams(normalized))
+        intent_ngrams[intent] = all_ngrams
+
+    # Step 2: vocabulary ሰራ
+    vocab = set()
+    for ngrams in intent_ngrams.values():
+        vocab.update(ngrams)
+    vocab = sorted(vocab)
+    vocab_index = {ng: i for i, ng in enumerate(vocab)}
+
+    # Step 3: TF vectors ሰራ
+    vectors = {}
+    for intent, ngrams in intent_ngrams.items():
+        vec = defaultdict(float)
+        total = len(ngrams)
+        if total == 0:
+            vectors[intent] = vec
+            continue
+        for ng in ngrams:
+            vec[ng] += 1.0 / total  # TF = count / total
+        vectors[intent] = vec
+
+    # Step 4: IDF ሰራ (ብዙ intent ውስጥ ያለ ngram ያነሰ ክብደት ያለው)
+    idf = {}
+    num_intents = len(intent_ngrams)
+    for ng in vocab:
+        doc_count = sum(1 for ngrams in intent_ngrams.values() if ng in ngrams)
+        idf[ng] = math.log((num_intents + 1) / (doc_count + 1)) + 1.0
+
+    # Step 5: TF-IDF vectors ሰራ
+    tfidf_vectors = {}
+    for intent, tf_vec in vectors.items():
+        tfidf_vec = {}
+        for ng, tf_val in tf_vec.items():
+            tfidf_vec[ng] = tf_val * idf.get(ng, 1.0)
+        tfidf_vectors[intent] = tfidf_vec
+
+    return tfidf_vectors, idf
+
+
+def text_to_vector(text: str, idf: dict) -> dict:
+    """ሰው የጻፈውን text ወደ TF-IDF vector ይቀይራል"""
+    translated = translate_latin(text)
+    normalized = normalize_amharic(translated)
+    ngrams = get_ngrams(normalized)
+
+    vec = defaultdict(float)
+    total = len(ngrams)
+    if total == 0:
+        return vec
+    for ng in ngrams:
+        vec[ng] += 1.0 / total
+    tfidf_vec = {}
+    for ng, tf_val in vec.items():
+        tfidf_vec[ng] = tf_val * idf.get(ng, 1.0)
+    return tfidf_vec
+
+
+def cosine_similarity(vec_a: dict, vec_b: dict) -> float:
+    """ሁለት vectors ምን ያህል ቅርብ ናቸው — 0.0 እስከ 1.0"""
+    if not vec_a or not vec_b:
+        return 0.0
+    common_keys = set(vec_a.keys()) & set(vec_b.keys())
+    dot = sum(vec_a[k] * vec_b[k] for k in common_keys)
+    norm_a = math.sqrt(sum(v * v for v in vec_a.values()))
+    norm_b = math.sqrt(sum(v * v for v in vec_b.values()))
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+    return dot / (norm_a * norm_b)
+
+
+# ================================================================
+# MODEL BUILD — አንድ ጊዜ ብቻ ይሰራል (startup)
+# ================================================================
+
+print("🔧 Building intent vectors...")
+TFIDF_VECTORS, GLOBAL_IDF = build_tfidf(INTENT_EXAMPLES)
+print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
+
+
+# ================================================================
+# DETECT INTENT — ዋናው function (replace ያደረገው)
+# ================================================================
+
+def detect_intent(text: str) -> tuple:
+    """
+    ሰው የጻፈውን text ወስዶ intent እና confidence score ይመልሳል።
+    Embedding (TF-IDF + cosine similarity) ይጠቀማል።
+    """
+    translated = translate_latin(text)
+    normalized = normalize_amharic(translated)
+    normalized_lower = normalized.lower()
+    numbers_in_text = re.findall(r"\d+", text)
+
+    # ================================================================
+    # PRIORITY RULES — ቁጥር ወይም ቀጥታ keyword ሲኖር
+    # ================================================================
+
+    # 1. Account query
+    account_keywords_direct = [
+        "አካውንት", "አካንት", "ቴሌብር", "አዋሽ", "ሲቢኢ",
+        "ንግድ ባንክ", "ባንክ አካውንት", "የሚከፈልበት ቁጥር", "የባንክ ቁጥር",
+    ]
+    if any(normalize_amharic(kw) in normalized_lower for kw in account_keywords_direct):
+        return "account_query", 1.0
+
+    # 2. Change number
+    if len(numbers_in_text) >= 2:
+        change_result = detect_change_number(text)
+        if change_result:
+            return "change_number", 1.0
+
+    # 3. Specific number query
+    has_ale = "አለ" in normalized_lower
+    has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
+    if numbers_in_text and (has_ale or has_teyaze):
+        return "specific_number_query", 1.0
+
+    # 4. Cancel number
+    cancel_words = ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
+    has_cancel = any(normalize_amharic(w) in normalized_lower for w in cancel_words)
+    if len(numbers_in_text) == 1 and has_cancel:
+        return "cancel_number", 1.0
+
+    # ================================================================
+    # EMBEDDING SIMILARITY — ዋናው scoring
+    # ================================================================
+    query_vec = text_to_vector(text, GLOBAL_IDF)
+
+    scores = {}
+    for intent, intent_vec in TFIDF_VECTORS.items():
+        sim = cosine_similarity(query_vec, intent_vec)
+        scores[intent] = sim
+
+    # ================================================================
+    # CONTEXT BONUS — ቁጥር ሲኖር/ሲጠፋ ማስተካከያ
+    # ================================================================
+    for intent in list(scores.keys()):
+        bonus = 0.0
+        if numbers_in_text:
+            if intent in ("booking", "specific_number_query", "cancel_number", "change_number"):
+                bonus += 0.08
+            elif intent == "account_query":
+                pass
+            else:
+                bonus -= 0.10
+        if not numbers_in_text and intent == "booking":
+            bonus -= 0.15
+        if intent == "greeting" and not numbers_in_text:
+            bonus += 0.05
+        if intent in ("complaint_removed", "complaint_why_sold", "complaint_paid_removed") and not numbers_in_text:
+            bonus += 0.05
+        scores[intent] = max(0.0, scores[intent] + bonus)
+
+    best_intent = max(scores, key=scores.get)
+    best_score = scores[best_intent]
+
+    return best_intent, best_score
 
 
 # ================================================================
@@ -410,111 +523,65 @@ INTENTS = {
 # ================================================================
 
 RESPONSES = {
-
     "booking_success_normal": [
-        "እሺ ገቢ 🙏",
-        "እሺ ቤተሰብ 🙏",
-        "እሺ ገቢ እንዳይረሳ 🙏",
-        "እሺ ወዳጄ 🥰",
+        "እሺ ገቢ 🙏", "እሺ ቤተሰብ 🙏", "እሺ ገቢ እንዳይረሳ 🙏", "እሺ ወዳጄ 🥰",
     ],
-
     "booking_success_urgent": [
-        "እሺ ቤተሰብ ይፍጠን 🙏",
-        "ይዝሄልሃለው ቤተሰብ ይፍጠን 🙏",
-        "እሺ ለጫወታው ድምቀት ይፍጠን 🙏",
-        "እሺ ገቢ 🙏",
+        "እሺ ቤተሰብ ይፍጠን 🙏", "ይዝሄልሃለው ቤተሰብ ይፍጠን 🙏",
+        "እሺ ለጫወታው ድምቀት ይፍጠን 🙏", "እሺ ገቢ 🙏",
     ],
-
     "booking_taken": [
-        "ቤተሰብ ተቀደምክ 🙏",
-        "የለም ቤተሰብ ሌላ ምረጥ 🙏",
-        "ቀይር የለም 🙏",
-        "ተቀደምክ 🙏 ወዳጄ",
-        "ተይዙዋል ቀይር 🙏",
+        "ቤተሰብ ተቀደምክ 🙏", "የለም ቤተሰብ ሌላ ምረጥ 🙏",
+        "ቀይር የለም 🙏", "ተቀደምክ 🙏 ወዳጄ", "ተይዙዋል ቀይር 🙏",
     ],
-
     "number_available": [
-        "አዎ አለ ክፍት ነው 🙏",
-        "አለ ቤተሰብ ክፍት ነው 🙏",
-        "ክፍት ነው ያዝ 🙏",
+        "አዎ አለ ክፍት ነው 🙏", "አለ ቤተሰብ ክፍት ነው 🙏", "ክፍት ነው ያዝ 🙏",
     ],
-
     "number_taken": [
-        "ተይዟል ቤተሰብ 🙏",
-        "የለም ተወስዷል 🙏",
-        "ተቀደምክ ቤተሰብ 🙏",
+        "ተይዟል ቤተሰብ 🙏", "የለም ተወስዷል 🙏", "ተቀደምክ ቤተሰብ 🙏",
     ],
-
     "nekay_exists": [
-        "እሺ ቤተሰብ እነዚውት",
-        "አለ ቤተሰብ 🥰",
-        "እሺ ልፈልግልህ 🙏",
-        "አሉ የተወሰኑ ቁጥሮች",
+        "እሺ ቤተሰብ እነዚውት", "አለ ቤተሰብ 🥰",
+        "እሺ ልፈልግልህ 🙏", "አሉ የተወሰኑ ቁጥሮች",
     ],
-
     "nekay_none_remaining": [
-        "ቀሪ ቁጥሮች አሉ 🙏",
-        "ቤተሰብ አላለቀም ቀሪ ቁጥሮች አሉ 🙏",
+        "ቀሪ ቁጥሮች አሉ 🙏", "ቤተሰብ አላለቀም ቀሪ ቁጥሮች አሉ 🙏",
     ],
-
     "nekay_all_done": [
-        "ቤተሰብ የለም አልቁዋል ቀጣይ ይሞክሩ 🙏",
-        "አለቀ 🙏",
-        "ቤተሰብ አውን ገና አለቀ 🙏",
+        "ቤተሰብ የለም አልቁዋል ቀጣይ ይሞክሩ 🙏", "አለቀ 🙏", "ቤተሰብ አውን ገና አለቀ 🙏",
     ],
-
-    "remaining_send_ack": [
-        "እሺ 🙏",
-    ],
-
-    "all_taken_nekay": [
-        "አዎ ተይዘዋል ነቃይ ጠብቅ ቤተሰብ 🙏",
-    ],
-
+    "remaining_send_ack": ["እሺ 🙏"],
+    "all_taken_nekay": ["አዎ ተይዘዋል ነቃይ ጠብቅ ቤተሰብ 🙏"],
     "greeting": [
-        "ፈጣሪ የተመሰገነ ይሁን 🙏",
-        "ፈጣሪ የተመሰገነ ይሁን ወዳጄ 🙏",
-        "ይመስገን እንዴት ነህ ወዳጄ 🙏",
-        "ፈጣሪ ይመስገን እንኳን በደና መጣህ 🙏",
-        "በጉጉት ስንጠብቅህ ነበር እንኳን በደና መጣህ 🙏",
-        "ሰላም እንኳን በሰላም መጣህ 🙏",
+        "ፈጣሪ የተመሰገነ ይሁን 🙏", "ፈጣሪ የተመሰገነ ይሁን ወዳጄ 🙏",
+        "ይመስገን እንዴት ነህ ወዳጄ 🙏", "ፈጣሪ ይመስገን እንኳን በደና መጣህ 🙏",
+        "በጉጉት ስንጠብቅህ ነበር እንኳን በደና መጣህ 🙏", "ሰላም እንኳን በሰላም መጣህ 🙏",
     ],
-
     "greeting_help": [
-        "በምን ላግዝህ? 🙏",
-        "ምን እናግዝህ ትፈልጋለህ? 🙏",
+        "በምን ላግዝህ? 🙏", "ምን እናግዝህ ትፈልጋለህ? 🙏",
     ],
-
-    "cancel_number_ack": [
-        "እሺ ተሰርዟል 🙏",
-        "እሺ ተነቅሏል 🙏",
-    ],
-
+    "cancel_number_ack": ["እሺ ተሰርዟል 🙏", "እሺ ተነቅሏል 🙏"],
     "complaint_removed_taken": [
         "አዎ ገቢ ማረግ ረሳክ የጫወታው ባህሪ ነው 🙏",
         "ቤተሰብ ገቢ ሳታርግ ቁጥሩ ይለቀቃል 🙏",
         "ገቢ ማረግ ረሳህ ቤተሰብ የጫወታው ሕግ ነው 🙏",
     ],
-
     "complaint_removed_nekay": [
-        "ተነቃይ list ውስጥ ገብቷል ገቢ አርገው ያረጋግጡ 🙏",
+        "ተነቃይ list ውስጥ ገብቷል ገቢ አርደው ያረጋግጡ 🙏",
         "ቁጥርዎ ነቃይ ነው ገቢ አረጋግጡ 🙏",
         "ነቃይ ነው ቤተሰብ ቶሎ ገቢ አርጉ 🙏",
     ],
-
     "complaint_why_sold": [
         "ገቢ ተረሳ ቤተሰብ ምን ላርግ 🙏",
         "ቤተሰብ ገቢ ሳይደርስ ቁጥሩ ተለቀቀ ምን ላርግ 🙏",
         "ገቢ አልደረሰም ቤተሰብ ምን ላርግ 🙏",
     ],
-
     "complaint_paid_removed": [
         "ቼክ አርግ ችግር ካለ ባለቤቱን አውራው 🙏",
         "ባለቤቱን አናግር ቼክ ያርጋል 🙏",
         "ችግር ካለ ባለቤቱን አውራው ቼክ ያርጋል 🙏",
         "ባለቤቱን አናግረው ቼክ ያርጋሉ 🙏",
     ],
-
     "change_number_ack": [
         "እሺ🙏 {from_num} ወደ {to_num} ቀይርያለው",
         "እሺ ቤተሰብ🙏 {from_num} ወደ {to_num} ተቀይሯል",
@@ -534,146 +601,9 @@ RESPONSES = {
         "ቤተሰብ {to_num} paid ነው አይቀየርም 🙏",
     ],
     "change_number_invalid": [
-        "ቁጥሩ ትክክል አይደለም 🙏",
-        "ያ ቁጥር የለም 🙏",
+        "ቁጥሩ ትክክል አይደለም 🙏", "ያ ቁጥር የለም 🙏",
     ],
 }
-
-
-# ================================================================
-# SCORING ENGINE
-# ================================================================
-
-FUZZING_THRESHOLD = 70
-
-def _fuzzy_score(text: str, keyword: str) -> float:
-    score = fuzz.partial_ratio(text.lower(), keyword.lower())
-    return score / 100.0
-
-def _keyword_score(normalized: str, keywords: list) -> float:
-    best = 0.0
-    for kw in keywords:
-        norm_kw = normalize_amharic(kw)
-        if norm_kw in normalized:
-            return 1.0
-        fs = _fuzzy_score(normalized, norm_kw)
-        if fs > best:
-            best = fs
-    return best if best >= (FUZZING_THRESHOLD / 100.0) else 0.0
-
-def _verb_score(normalized: str, verb_endings: list) -> float:
-    for v in verb_endings:
-        norm_v = normalize_amharic(v)
-        if norm_v in normalized:
-            return 1.0
-        if _fuzzy_score(normalized, norm_v) >= (FUZZING_THRESHOLD / 100.0):
-            return 0.7
-    return 0.0
-
-def detect_intent(text: str) -> tuple:
-    translated = translate_latin(text)
-    normalized = normalize_amharic(translated)
-
-    results = {}
-    for intent_name, config in INTENTS.items():
-        w_norm = 0.30
-        w_fuzz = 0.35
-        w_kw   = config["weight_keyword"]
-        w_verb = config["weight_verb"]
-
-        norm_score = 1.0 if any(
-            normalize_amharic(kw) in normalized
-            for kw in config["keywords"]
-        ) else 0.5
-
-        fuzz_score = _keyword_score(normalized, config["keywords"])
-
-        kw_score = 1.0 if any(
-            normalize_amharic(kw) in normalized
-            for kw in config["keywords"]
-        ) else fuzz_score
-
-        verb_score = _verb_score(normalized, config["verb_endings"])
-
-        total = (
-            w_norm * norm_score +
-            w_fuzz * fuzz_score +
-            w_kw   * kw_score +
-            w_verb * verb_score
-        )
-
-        results[intent_name] = total
-
-    numbers_in_text = re.findall(r"\d+", text)
-    translated_lower = translated.lower()
-    normalized_lower = normalize_amharic(translated_lower)
-
-    # ================================================================
-    # ACCOUNT QUERY — direct detection (ቅድሚያ — ቁጥር ሳያስፈልግ)
-    # ================================================================
-    account_keywords_direct = [
-        "አካውንት", "አካንት", "አኮውንት", "አካወንት", "አካውት",
-        "ቴሌብር", "አዋሽ", "ሲቢኢ",
-        "ንግድ ባንክ", "ባንክ አካውንት",
-        "የሚከፈልበት ቁጥር", "የባንክ ቁጥር",
-    ]
-    if any(normalize_amharic(kw) in normalized_lower for kw in account_keywords_direct):
-        return "account_query", 1.0
-
-    # ================================================================
-    # CHANGE NUMBER — direct detection (ቅድሚያ)
-    # ================================================================
-    if len(numbers_in_text) >= 2:
-        change_result = detect_change_number(text)
-        if change_result:
-            return "change_number", 1.0
-
-    # ================================================================
-    # SPECIFIC NUMBER QUERY
-    # ================================================================
-    has_ale = "አለ" in normalized_lower
-    has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
-
-    if numbers_in_text and (has_ale or has_teyaze):
-        return "specific_number_query", 1.0
-
-    # ================================================================
-    # CANCEL NUMBER
-    # ================================================================
-    cancel_words = ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
-    has_cancel = any(normalize_amharic(w) in normalized_lower for w in cancel_words)
-    if len(numbers_in_text) == 1 and has_cancel:
-        return "cancel_number", 1.0
-
-    # ================================================================
-    # CONTEXT GRADING
-    # ================================================================
-    for intent_name, total in results.items():
-        bonus = 0.0
-
-        if numbers_in_text:
-            if intent_name in ("booking", "specific_number_query", "cancel_number", "change_number"):
-                bonus += 0.15
-            elif intent_name == "account_query":
-                pass  # ቁጥር ቢኖርም account_query ይሠራል
-            else:
-                bonus -= 0.20
-
-        if not numbers_in_text and intent_name == "booking":
-            bonus -= 0.30
-
-        if intent_name == "greeting" and not numbers_in_text:
-            bonus += 0.10
-
-        if intent_name in ("complaint_removed", "complaint_why_sold", "complaint_paid_removed") and not numbers_in_text:
-            bonus += 0.10
-
-        results[intent_name] = max(0.0, total + bonus)
-
-    best_intent = max(results, key=results.get)
-    best_score  = results[best_intent]
-
-    return best_intent, best_score
 
 
 # ================================================================
@@ -695,8 +625,8 @@ def get_response(
     failed_numbers: list = None,
 ) -> dict:
 
-    THRESHOLD_RESPOND  = 0.70
-    THRESHOLD_CONFUSED = 0.40
+    THRESHOLD_RESPOND  = 0.18   # Embedding score ዝቅ ስለሚሆን threshold ቀነሰ
+    THRESHOLD_CONFUSED = 0.08
 
     result = {
         "reply": None,
@@ -707,9 +637,7 @@ def get_response(
         "change_number": None,
     }
 
-    # ================================================================
-    # REGISTRATION RESULT
-    # ================================================================
+    # Registration result
     if registration_result is not None:
         if registration_result in ("registered", "registered_half"):
             if remaining_count <= 7:
@@ -723,9 +651,6 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["booking_taken"])
         return result
 
-    # ================================================================
-    # INTENT DETECTION
-    # ================================================================
     intent, score = detect_intent(text)
 
     if score < THRESHOLD_CONFUSED:
@@ -734,39 +659,27 @@ def get_response(
         result["reply"] = "ምን ማለትህ ነው? 🙏"
         return result
 
-    # ================================================================
-    # INTENT: account_query
-    # ================================================================
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
         if payment_info:
             result["reply"] = payment_info
         return result
 
-    # ================================================================
-    # INTENT: change_number
-    # ================================================================
     if intent == "change_number":
         change_result = detect_change_number(text)
         if change_result:
             from_num, to_num = change_result
             total = settings.get("total_numbers", 0)
-
             def fmt(n): return f"{n:02d}"
-
             if to_num < 1 or to_num > total or from_num < 1 or from_num > total:
                 result["reply"] = random.choice(RESPONSES["change_number_invalid"])
                 return result
-
             result["change_number"] = {"from": from_num, "to": to_num}
             result["reply"] = random.choice(RESPONSES["change_number_ack"]).format(
                 from_num=fmt(from_num), to_num=fmt(to_num)
             )
         return result
 
-    # ================================================================
-    # INTENT: booking
-    # ================================================================
     if intent == "booking":
         if countdown_seconds > 0:
             mins = countdown_seconds // 60
@@ -777,9 +690,6 @@ def get_response(
                 result["reply"] = f"{secs} ሴኮንድ ቀርቱዋል ቲንሽ ይጠብቁ ነቃይ ካለ አሳውቃለው 🙏"
         return result
 
-    # ================================================================
-    # INTENT: specific_number_query
-    # ================================================================
     if intent == "specific_number_query":
         numbers_found = re.findall(r"\d+", text)
         if numbers_found:
@@ -797,9 +707,6 @@ def get_response(
             result["resend_remaining"] = True
         return result
 
-    # ================================================================
-    # INTENT: cancel_number
-    # ================================================================
     if intent == "cancel_number":
         numbers_found = re.findall(r"\d+", text)
         if numbers_found:
@@ -808,13 +715,9 @@ def get_response(
             result["cancel_number"] = num
         return result
 
-    # ================================================================
-    # INTENT: complaint_removed
-    # ================================================================
     if intent == "complaint_removed":
         numbers_found = re.findall(r"\d+", text)
         num = int(numbers_found[0]) if numbers_found else None
-
         if num and num in taken:
             result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
         elif num and any(num == n for n, _ in nekay_list):
@@ -823,23 +726,14 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
         return result
 
-    # ================================================================
-    # INTENT: complaint_why_sold
-    # ================================================================
     if intent == "complaint_why_sold":
         result["reply"] = random.choice(RESPONSES["complaint_why_sold"])
         return result
 
-    # ================================================================
-    # INTENT: complaint_paid_removed
-    # ================================================================
     if intent == "complaint_paid_removed":
         result["reply"] = random.choice(RESPONSES["complaint_paid_removed"])
         return result
 
-    # ================================================================
-    # INTENT: nekay_query
-    # ================================================================
     if intent == "nekay_query":
         if nekay_list:
             result["reply"] = random.choice(RESPONSES["nekay_exists"])
@@ -851,24 +745,15 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["nekay_all_done"])
         return result
 
-    # ================================================================
-    # INTENT: remaining_send
-    # ================================================================
     if intent == "remaining_send":
         result["reply"] = random.choice(RESPONSES["remaining_send_ack"])
         result["resend_remaining"] = True
         return result
 
-    # ================================================================
-    # INTENT: remaining_query
-    # ================================================================
     if intent == "remaining_query":
         result["resend_remaining"] = True
         return result
 
-    # ================================================================
-    # INTENT: all_taken_query
-    # ================================================================
     if intent == "all_taken_query":
         if remaining_count == 0 and not nekay_list:
             return result
@@ -878,9 +763,6 @@ def get_response(
             result["resend_remaining"] = True
         return result
 
-    # ================================================================
-    # INTENT: greeting
-    # ================================================================
     if intent == "greeting":
         msg = random.choice(RESPONSES["greeting"])
         if random.random() < 0.20:
@@ -889,3 +771,36 @@ def get_response(
         return result
 
     return result
+
+
+# ================================================================
+# QUICK TEST
+# ================================================================
+
+if __name__ == "__main__":
+    test_cases = [
+        ("ሰላም ወዳጄ እንዴት ነህ", "greeting"),
+        ("05 ቁጥሩን አስቀምጥልኝ እባክህ", "booking"),
+        ("ነቃይ ቁጥሮች ምን አለ", "nekay_query"),
+        ("ቁጥር 07 ተያዘ ወይ", "specific_number_query"),
+        ("ቁጥር 03 አልፈልግም ሰርዝ", "cancel_number"),
+        ("ቁጥር 03 ወደ 07 ቀይርልኝ", "change_number"),
+        ("telebirr ቁጥርህን ላክ", "account_query"),
+        ("ከፍዬ ቁጥሬ ተነቀለ ለምን", "complaint_paid_removed"),
+        ("ለምን ሸጥህ ቁጥሬን", "complaint_why_sold"),
+        ("ቀሪ ቁጥሮች ምን አለ ስንት ቀረ", "remaining_query"),
+    ]
+
+    print("\n" + "="*60)
+    print("🧪 TEST RESULTS")
+    print("="*60)
+    correct = 0
+    for text, expected in test_cases:
+        intent, score = detect_intent(text)
+        status = "✅" if intent == expected else "❌"
+        if intent == expected:
+            correct += 1
+        print(f"{status} [{score:.3f}] '{text}'")
+        print(f"   Expected: {expected} | Got: {intent}")
+    print("="*60)
+    print(f"Accuracy: {correct}/{len(test_cases)} = {correct/len(test_cases)*100:.0f}%")
