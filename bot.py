@@ -396,39 +396,38 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if resp_cancel.get("type_change"):
-        tc = resp_cancel["type_change"]
-        target = tc["target"]
-        numbers = tc["numbers"]
+    tc = resp_cancel["type_change"]
+    target = tc["target"]
+    numbers = tc["numbers"]
 
-        for num in numbers:
-            actual_num = get_group_start(num, settings["numbers_per_person"]) \
-                if settings["numbers_per_person"] > 1 else num
+    for num in numbers:
+        actual_num = get_group_start(num, settings["numbers_per_person"]) \
+            if settings["numbers_per_person"] > 1 else num
 
-            if not user_owns_number(game_id, user_id, actual_num):
-                await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
-                continue
-
+        if actual_num not in taken:
+            # free → booking (half or full)
+            is_half = (target == "half")
+            await process_registration(
+                ctx, settings,
+                [(actual_num, is_half, None)],
+                user_id, user_name, group_id, msg
+            )
+        elif not user_owns_number(game_id, user_id, actual_num):
+            await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
+        else:
+            # taken + owns it → type_change
             result_tc = change_number_type(game_id, user_id, actual_num, target)
-
             if result_tc["status"] == "conflict":
                 await msg.reply_text(
                     random.choice(RESPONSES["type_change_conflict"]).format(num=f"{actual_num:02d}")
                 )
-                continue
+            elif resp_cancel["reply"]:
+                await msg.reply_text(resp_cancel["reply"])
 
-            if result_tc["status"] == "not_yours":
-                await msg.reply_text(
-                    random.choice(RESPONSES["type_change_not_yours"]).format(num=f"{actual_num:02d}")
-                )
-                continue
-
-        if resp_cancel["reply"]:
-            await msg.reply_text(resp_cancel["reply"])
-
-        fresh = get_active_settings()
-        if fresh:
-            await _refresh_board(ctx, fresh)
-        return
+    fresh = get_active_settings()
+    if fresh:
+        await _refresh_board(ctx, fresh)
+    return
 
     if resp_cancel.get("change_number"):
         ch = resp_cancel["change_number"]
