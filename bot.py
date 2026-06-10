@@ -335,6 +335,56 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nekay_list = _build_nekay_from_snap(snap)
     remaining = count_remaining(settings, taken)
 
+    # ================================================================
+    # CANCEL NUMBER — parse ከመግባቱ በፊት ቼክ
+    # "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው / 07 ሰርዝ / 07 አውጣ"
+    # ================================================================
+    resp_cancel = get_response(
+        text=text,
+        settings=settings,
+        taken=taken,
+        paid=get_paid_numbers(game_id),
+        nekay_list=nekay_list,
+        remaining_count=remaining,
+        countdown_seconds=0,
+        user_name=user_name,
+        user_id=user_id,
+    )
+    if resp_cancel.get("cancel_number"):
+        num = resp_cancel["cancel_number"]
+        # Bug 1 fix — ownership ከቀደመ reply ይላካል
+        if not user_owns_number(game_id, user_id, num):
+            await msg.reply_text("ቁጥሩ የእርስዎ አይደለም 🙏")
+            return
+        removed = remove_number(game_id, user_id, num)
+        if removed:
+            if resp_cancel["reply"]:
+                await msg.reply_text(resp_cancel["reply"])
+            if game_id in nekay_numbers and num in nekay_numbers.get(game_id, {}):
+                del nekay_numbers[game_id][num]
+            # Bug 2 fix — fresh settings ከ DB
+            fresh = get_active_settings()
+            if fresh:
+                await _refresh_board(ctx, fresh)
+                if game_id in nekay_active:
+                    snap2 = nekay_numbers.get(game_id, {})
+                    rem_msg_id = fresh.get("remaining_message_id")
+                    if rem_msg_id:
+                        try:
+                            await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                        except Exception:
+                            pass
+                    if snap2:
+                        nekay_list2 = _build_nekay_from_snap(snap2)
+                        nekay_text2 = build_nekay(nekay_list2)
+                        new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text2)
+                        update_remaining_message_id(game_id, new_nekay.message_id)
+                    else:
+                        update_remaining_message_id(game_id, None)
+                        nekay_active.discard(game_id)
+                        nekay_numbers.pop(game_id, None)
+        return
+
     parse_result = parse_numbers(text)
 
     if not parse_result:
@@ -357,40 +407,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if snap:
                 nekay_text = build_nekay(nekay_list)
                 await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
-
-        # ================================================================
-        # CANCEL NUMBER — "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው"
-        # ================================================================
-        if resp.get("cancel_number"):
-            num = resp["cancel_number"]
-            if user_owns_number(game_id, user_id, num):
-                removed = remove_number(game_id, user_id, num)
-                if removed:
-                    # nekay snap ውስጥ ካለ አስወጣ
-                    if game_id in nekay_numbers and num in nekay_numbers.get(game_id, {}):
-                        del nekay_numbers[game_id][num]
-                    # Board ዘምን
-                    await _refresh_board(ctx, settings)
-                    # nekay active ከሆነ nekay message ዘምን
-                    if game_id in nekay_active:
-                        snap2 = nekay_numbers.get(game_id, {})
-                        rem_msg_id = settings.get("remaining_message_id")
-                        if rem_msg_id:
-                            try:
-                                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                            except Exception:
-                                pass
-                        if snap2:
-                            nekay_list2 = _build_nekay_from_snap(snap2)
-                            nekay_text2 = build_nekay(nekay_list2)
-                            new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text2)
-                            update_remaining_message_id(game_id, new_nekay.message_id)
-                        else:
-                            update_remaining_message_id(game_id, None)
-                            nekay_active.discard(game_id)
-                            nekay_numbers.pop(game_id, None)
-            else:
-                await msg.reply_text("ቁጥሩ የእርስዎ አይደለም 🙏")
         return
 
     # ቁጥር አለ — registration
