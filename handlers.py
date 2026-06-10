@@ -4,7 +4,7 @@ import json
 import base64
 import logging
 from typing import Optional
-from config import BOT_TOKEN, GROUP_CHAT_ID
+from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS
 import httpx
 from groq import Groq
 from database import (
@@ -20,16 +20,55 @@ from database import (
     get_user_by_number,
     add_winner_balance,
     save_winner,
+    log_activity,
 )
 
 logger = logging.getLogger(__name__)
 
-groq_client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+# ============================================================
+# GROQ KEY ROTATION — circular 1→N→1
+# ============================================================
+
+_groq_index = 0
+_groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS else []
+
+
+def _get_groq_client() -> Groq:
+    """Circular rotation — 1→2→...→N→1"""
+    global _groq_index
+    if not _groq_clients:
+        raise RuntimeError("GROQ_API_KEY ያልተቀመጠ!")
+    client = _groq_clients[_groq_index]
+    _groq_index = (_groq_index + 1) % len(_groq_clients)
+    return client
+
+
+def _call_groq_with_rotation(call_fn, max_retries: int = None):
+    """
+    Groq call ያደርጋል — rate limit ሲሆን ቀጣዩ key ይሞክራል
+    call_fn: lambda client: client.chat.completions.create(...)
+    """
+    if max_retries is None:
+        max_retries = len(_groq_clients) if _groq_clients else 1
+
+    last_err = None
+    for _ in range(max_retries):
+        try:
+            client = _get_groq_client()
+            return call_fn(client)
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "limit" in err_str or "429" in err_str:
+                last_err = e
+                continue
+            raise
+    raise last_err or RuntimeError("All Groq keys exhausted")
 
 
 # ============================================================
 # SMS WEBHOOK
 # ============================================================
+
 async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
     logger.info(f"[SMS] Received: {raw_sms}")
 
@@ -63,13 +102,17 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
 # ============================================================
 # PAYMENT PHOTO HANDLER
 # ============================================================
+
 async def handle_payment_photo(bot, msg, nekay_cb=None):
     chat_id = msg.chat.id
     telegram_id = msg.from_user.id
     username = msg.from_user.username or msg.from_user.first_name or "Unknown"
 
     if str(chat_id) != str(GROUP_CHAT_ID):
-        return
+        # multi-group: enabled group ላይ ይሰራ
+        from database import is_group_enabled
+        if not is_group_enabled(chat_id):
+            return
 
     try:
         photo = msg.photo[-1]
@@ -117,6 +160,12 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
                 f"✅ Screenshot ተቀብሏል። SMS ሲረጋገጥ ይወጣዋል...\n🔖 Ref: {ref_no}"
             )
 
+        # Activity log
+        try:
+            log_activity(chat_id, payments=1)
+        except Exception:
+            pass
+
     except Exception as e:
         logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
         await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
@@ -125,6 +174,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
 # ============================================================
 # WINNER PHOTO ANALYZER
 # ============================================================
+
 async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
     prize_1st = settings.get("prize_1st", 0)
     prize_2nd = settings.get("prize_2nd")
@@ -152,21 +202,18 @@ Respond ONLY in this exact JSON format with no extra text:
 Only include places that have prizes. Numbers must be integers."""
 
     try:
-        response = groq_client.chat.completions.create(
+        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                     {"type": "text", "text": prompt},
                 ],
             }],
             max_tokens=200,
             temperature=0.1,
-        )
+        ))
         text = response.choices[0].message.content.strip()
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
@@ -191,7 +238,8 @@ Only include places that have prizes. Numbers must be integers."""
 # ============================================================
 # WINNER PHOTO HANDLER
 # ============================================================
-async def handle_winner_photo(bot, msg, settings: dict):
+
+async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
     """Admin winner ፎቶ ሲልክ ይጠራል"""
     try:
         photo = msg.photo[-1]
@@ -214,6 +262,8 @@ async def handle_winner_photo(bot, msg, settings: dict):
         per_person = settings.get("numbers_per_person", 1)
         lines = ["🏆 Winners!\n"]
 
+        _group_id = group_id or settings.get("group_id")
+
         for place in sorted(winners.keys()):
             number = winners[place]
             prize = prize_map.get(place)
@@ -223,7 +273,6 @@ async def handle_winner_photo(bot, msg, settings: dict):
                 lines.append(f"{medal} {place}ኛ: #{number} — prize አልተቀመጠም")
                 continue
 
-            # per_person > 1 ከሆነ group start ያግኝ
             if per_person > 1:
                 from board import get_group_start
                 lookup_number = get_group_start(number, per_person)
@@ -239,10 +288,18 @@ async def handle_winner_photo(bot, msg, settings: dict):
             user_name = user["user_name"]
 
             add_winner_balance(settings["id"], telegram_id, prize)
-            save_winner(settings["id"], place, telegram_id, user_name, number, prize)
+            save_winner(settings["id"], place, telegram_id, user_name, number, prize, group_id=_group_id)
             lines.append(f"{medal} {place}ኛ: #{number} — {user_name} → ETB {prize} ✅")
 
-        await msg.reply_text("\n".join(lines))
+        announcement = "\n".join(lines)
+        await msg.reply_text(announcement)
+
+        # Group ላይ winner announcement
+        if _group_id:
+            try:
+                await bot.send_message(chat_id=_group_id, text=announcement)
+            except Exception:
+                pass
 
     except Exception as e:
         logger.error(f"[Winner] Handler error: {e}", exc_info=True)
@@ -252,8 +309,8 @@ async def handle_winner_photo(bot, msg, settings: dict):
 # ============================================================
 # SMS PARSER
 # ============================================================
-async def parse_sms(sms: str) -> Optional[dict]:
 
+async def parse_sms(sms: str) -> Optional[dict]:
     m = re.search(r"Credited with ETB ([\d,]+\.?\d*).+?Ref No\s+([A-Z0-9]+)", sms, re.DOTALL)
     if m:
         return {"type": "CBE", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
@@ -287,6 +344,7 @@ async def parse_sms(sms: str) -> Optional[dict]:
 # ============================================================
 # CBE RECEIPT URL → REF
 # ============================================================
+
 async def fetch_ref_from_url(url: str) -> Optional[str]:
     try:
         jina_url = f"https://r.jina.ai/{url}"
@@ -318,6 +376,7 @@ async def fetch_ref_from_url(url: str) -> Optional[str]:
 # ============================================================
 # GROQ — SCREENSHOT ANALYZER
 # ============================================================
+
 async def analyze_screenshot(image_base64: str) -> dict:
     prompt = """You are a payment receipt analyzer. Look at this image and extract information.
 
@@ -336,21 +395,18 @@ Respond ONLY in this exact JSON format with no extra text:
 - If not a payment receipt, set photoType to "other" and refNo to null"""
 
     try:
-        response = groq_client.chat.completions.create(
+        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
             model="meta-llama/llama-4-scout-17b-16e-instruct",
             messages=[{
                 "role": "user",
                 "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}
-                    },
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
                     {"type": "text", "text": prompt},
                 ],
             }],
             max_tokens=300,
             temperature=0.1,
-        )
+        ))
         text = response.choices[0].message.content.strip()
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
@@ -361,7 +417,7 @@ Respond ONLY in this exact JSON format with no extra text:
             parsed["refNo"] = None
         return parsed
     except json.JSONDecodeError as e:
-        logger.error(f"[Screenshot] JSON parse error: {e} | Raw: {text}")
+        logger.error(f"[Screenshot] JSON parse error: {e}")
         return {"photoType": "other", "refNo": None, "description": "Could not parse response"}
     except Exception as e:
         logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
@@ -371,9 +427,10 @@ Respond ONLY in this exact JSON format with no extra text:
 # ============================================================
 # GROQ — አማርኛ ማብራሪያ
 # ============================================================
+
 async def describe_photo_in_amharic(description: str) -> str:
     try:
-        response = groq_client.chat.completions.create(
+        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{
                 "role": "user",
@@ -384,7 +441,7 @@ async def describe_photo_in_amharic(description: str) -> str:
             }],
             max_tokens=100,
             temperature=0.3,
-        )
+        ))
         return response.choices[0].message.content.strip()
     except Exception as e:
         logger.error(f"[Describe] Error: {e}")
@@ -394,6 +451,7 @@ async def describe_photo_in_amharic(description: str) -> str:
 # ============================================================
 # MATCH NOTIFICATION
 # ============================================================
+
 async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None):
     from board import build_board
 
@@ -433,9 +491,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     target_chat = chat_id or GROUP_CHAT_ID
     if target_chat:
         if reply_msg_id:
-            await bot.send_message(
-                chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id
-            )
+            await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
         else:
             await bot.send_message(chat_id=target_chat, text=message)
 
@@ -467,6 +523,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 # ============================================================
 # HELPERS
 # ============================================================
+
 async def download_image_as_base64(file_id: str) -> str:
     async with httpx.AsyncClient(timeout=30) as client:
         get_file_res = await client.get(
@@ -475,7 +532,6 @@ async def download_image_as_base64(file_id: str) -> str:
         )
         get_file_res.raise_for_status()
         file_path = get_file_res.json()["result"]["file_path"]
-
         file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
         res = await client.get(file_url)
         res.raise_for_status()
