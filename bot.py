@@ -331,28 +331,28 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     game_id = settings["id"]
     taken = get_taken_numbers(game_id)
+    paid = get_paid_numbers(game_id)
     snap = nekay_numbers.get(game_id, {})
     nekay_list = _build_nekay_from_snap(snap)
     remaining = count_remaining(settings, taken)
 
     # ================================================================
-    # CANCEL NUMBER — parse ከመግባቱ በፊት ቼክ
-    # "07 አልፈልግም / 07 ሽጠው / 07 አጥፋው / 07 ሰርዝ / 07 አውጣ"
+    # CANCEL NUMBER
     # ================================================================
     resp_cancel = get_response(
         text=text,
         settings=settings,
         taken=taken,
-        paid=get_paid_numbers(game_id),
+        paid=paid,
         nekay_list=nekay_list,
         remaining_count=remaining,
         countdown_seconds=0,
         user_name=user_name,
         user_id=user_id,
     )
+
     if resp_cancel.get("cancel_number"):
         num = resp_cancel["cancel_number"]
-        # Bug 1 fix — ownership ከቀደመ reply ይላካል
         if not user_owns_number(game_id, user_id, num):
             await msg.reply_text("ቁጥሩ የእርስዎ አይደለም 🙏")
             return
@@ -362,7 +362,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await msg.reply_text(resp_cancel["reply"])
             if game_id in nekay_numbers and num in nekay_numbers.get(game_id, {}):
                 del nekay_numbers[game_id][num]
-            # Bug 2 fix — fresh settings ከ DB
             fresh = get_active_settings()
             if fresh:
                 await _refresh_board(ctx, fresh)
@@ -385,6 +384,54 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         nekay_numbers.pop(game_id, None)
         return
 
+    # ================================================================
+    # CHANGE NUMBER
+    # ================================================================
+    if resp_cancel.get("change_number"):
+        ch = resp_cancel["change_number"]
+        from_num = ch["from"]
+        to_num   = ch["to"]
+
+        # 1. Ownership check
+        if not user_owns_number(game_id, user_id, from_num):
+            await msg.reply_text(f"{from_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
+            return
+
+        # 2. Target ተከፍሏል?
+        if to_num in paid:
+            await msg.reply_text(f"{to_num:02d} ✅ ተከፍሏል መቀየር አይቻልም 🙏")
+            return
+
+        # 3. Target ተይዟል?
+        if to_num in taken:
+            await msg.reply_text(f"{to_num:02d} ተይዟል ቤተሰብ ሌላ ምረጥ 🙏")
+            return
+
+        # 4. ቀይር — from_num አስወጣ፣ to_num ምዝገብ
+        removed = remove_number(game_id, user_id, from_num)
+        if removed:
+            result = register_number(game_id, user_id, user_name, to_num, False)
+            if result in ("registered", "registered_half"):
+                if resp_cancel["reply"]:
+                    await msg.reply_text(resp_cancel["reply"])
+                # nekay snap update
+                if game_id in nekay_numbers:
+                    snap3 = nekay_numbers.get(game_id, {})
+                    if from_num in snap3:
+                        del snap3[from_num]
+                    nekay_numbers[game_id] = snap3
+                fresh = get_active_settings()
+                if fresh:
+                    await _refresh_board(ctx, fresh)
+            else:
+                # to_num register ካልተቻለ from_num ተመልስ
+                register_number(game_id, user_id, user_name, from_num, False)
+                await msg.reply_text(f"{to_num:02d} አልተቻለም 🙏")
+        return
+
+    # ================================================================
+    # PARSE NUMBERS — registration
+    # ================================================================
     parse_result = parse_numbers(text)
 
     if not parse_result:
@@ -392,7 +439,7 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             text=text,
             settings=settings,
             taken=taken,
-            paid=get_paid_numbers(game_id),
+            paid=paid,
             nekay_list=nekay_list,
             remaining_count=remaining,
             countdown_seconds=0,
@@ -478,7 +525,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
-        # parsed name ካለ ተጠቀም፣ ከሌለ telegram first_name
         actual_name = parsed_name if parsed_name else user_name
 
         if actual_num < 1 or actual_num > settings["total_numbers"]:
