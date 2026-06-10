@@ -82,10 +82,24 @@ def init_db():
             matched_data JSONB,
             created_at TIMESTAMP DEFAULT NOW()
         );
+
+        CREATE TABLE IF NOT EXISTS failed_attempts (
+            id SERIAL PRIMARY KEY,
+            game_id INT REFERENCES game_settings(id),
+            user_id BIGINT,
+            number INT,
+            reason TEXT,
+            taken_by_slot1 TEXT,
+            taken_by_slot2 TEXT,
+            taken_type_slot1 TEXT,
+            taken_type_slot2 TEXT,
+            attempted_at TIMESTAMP DEFAULT NOW()
+        );
     """)
 
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
     cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_nekay BOOLEAN DEFAULT FALSE;")
+    cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS greeted BOOLEAN DEFAULT FALSE;")
     cur.execute("""
         DO $$
         BEGIN
@@ -184,8 +198,10 @@ def get_registrations(game_id):
 def register_number(game_id, user_id, user_name, number, is_half, force=False):
     conn = get_conn()
     cur = conn.cursor()
+
+    # ← Changed: user_name ጭምር ይመልሳል (save_failed_attempt ይፈልገዋል)
     cur.execute("""
-        SELECT id, is_half, slot FROM registrations
+        SELECT user_name, is_half, slot FROM registrations
         WHERE game_id=%s AND number=%s ORDER BY slot
     """, (game_id, number))
     existing = cur.fetchall()
@@ -243,7 +259,24 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
         conn.close()
         return "registered"
 
-    if len(existing) == 1 and existing[0][1] == True and is_half:
+    # ← 9B: ባለቤቱ ራሱ እንደገና ቢጽፍ → type change
+    cur.execute("""
+        SELECT user_id FROM registrations
+        WHERE game_id=%s AND number=%s AND slot=1
+    """, (game_id, number))
+    owner_row = cur.fetchone()
+    if owner_row and owner_row[0] == user_id:
+        cur.close()
+        conn.close()
+        return change_number_type(game_id, user_id, number,
+                                  "half" if is_half else "full")
+
+    # ← 9A: slot 1 half ካለ → slot 2 auto-register (is_half force)
+    if len(existing) == 1 and existing[0][1] == True:
+        is_half = True  # force half for slot 2
+        cost = price_half
+        can_pay = balance >= cost
+
         cur.execute("""
             INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay)
             VALUES (%s, %s, %s, %s, %s, 2, %s, FALSE)
@@ -259,8 +292,12 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
         conn.close()
         return "registered_half"
 
+    # ← 3D: taken → save_failed_attempt
+    conn.commit()
     cur.close()
     conn.close()
+    save_failed_attempt(game_id, user_id, number, "taken",
+                        taken={number: existing})
     return "taken"
 
 
@@ -492,6 +529,224 @@ def admin_mark_paid(game_id: int, number: int, slot: int, paid: bool = True):
     conn.commit()
     cur.close()
     conn.close()
+
+
+# ============================================================
+# TYPE CHANGE — Half ↔ Full (ለውጥ 2G + 9C)
+# ============================================================
+
+def change_number_type(game_id: int, user_id: int, number: int, target: str) -> dict:
+    """
+    ተጫዋች ቁጥሩን Half ↔ Full ይቀይራል።
+    target = "full" ወይም "half"
+    Returns dict:
+        status: "ok" | "not_yours" | "conflict" | "no_registration"
+        refund: float
+        charge: float
+        is_paid: bool
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, is_half, slot, is_paid
+        FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s
+        ORDER BY slot
+    """, (game_id, user_id, number))
+    rows = cur.fetchall()
+
+    if not rows:
+        cur.close()
+        conn.close()
+        return {"status": "not_yours"}
+
+    cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
+    price_row = cur.fetchone()
+    price_full = float(price_row[0] or 0)
+    price_half = float(price_row[1] or 0)
+
+    cur.execute("""
+        SELECT balance FROM user_balance
+        WHERE game_id=%s AND telegram_id=%s
+    """, (game_id, user_id))
+    bal_row = cur.fetchone()
+    balance = float(bal_row[0]) if bal_row else 0.0
+
+    reg_id, is_half, slot, is_paid = rows[0]
+
+    # ================================================================
+    # FULL → HALF (9C logic)
+    # ================================================================
+    if target == "half" and not is_half:
+
+        if len(rows) > 1:
+            cur.close()
+            conn.close()
+            return {"status": "conflict"}
+
+        refund = price_full - price_half
+
+        cur.execute("""
+            UPDATE registrations SET is_half=TRUE, is_paid=%s
+            WHERE id=%s
+        """, (is_paid, reg_id))
+
+        # ✅ paid ነበር → refund ይመለሳል
+        if is_paid and refund > 0:
+            cur.execute("""
+                INSERT INTO user_balance (game_id, telegram_id, balance)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (game_id, telegram_id)
+                DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
+            """, (game_id, user_id, refund, refund))
+
+        # ✅? pending ነበር → balance check (half ብር አለ?)
+        if not is_paid:
+            cur.execute("""
+                SELECT balance FROM user_balance
+                WHERE game_id=%s AND telegram_id=%s
+            """, (game_id, user_id))
+            bal_row2 = cur.fetchone()
+            balance2 = float(bal_row2[0]) if bal_row2 else 0.0
+
+            if balance2 >= price_half:
+                cur.execute("""
+                    UPDATE registrations SET is_paid=TRUE WHERE id=%s
+                """, (reg_id,))
+                new_balance = balance2 - price_half
+                cur.execute("""
+                    UPDATE user_balance SET balance=%s, updated_at=NOW()
+                    WHERE game_id=%s AND telegram_id=%s
+                """, (new_balance, game_id, user_id))
+                is_paid = True
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "ok", "refund": refund if is_paid else 0,
+                "charge": 0, "is_paid": is_paid}
+
+    # ================================================================
+    # HALF → FULL
+    # ================================================================
+    if target == "full" and is_half:
+
+        charge = price_full - price_half
+
+        if balance >= charge:
+            cur.execute("""
+                UPDATE registrations SET is_half=FALSE, is_paid=TRUE, is_nekay=FALSE
+                WHERE id=%s
+            """, (reg_id,))
+            new_balance = balance - charge
+            cur.execute("""
+                UPDATE user_balance SET balance=%s, updated_at=NOW()
+                WHERE game_id=%s AND telegram_id=%s
+            """, (new_balance, game_id, user_id))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True}
+
+        else:
+            cur.execute("""
+                UPDATE registrations SET is_half=FALSE, is_paid=FALSE, is_nekay=FALSE
+                WHERE id=%s
+            """, (reg_id,))
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "ok", "refund": 0, "charge": charge, "is_paid": False}
+
+    # Already same type
+    cur.close()
+    conn.close()
+    return {"status": "ok", "refund": 0, "charge": 0, "is_paid": is_paid}
+
+
+# ============================================================
+# FAILED ATTEMPTS (ለውጥ 3A-3D)
+# ============================================================
+
+def save_failed_attempt(game_id: int, user_id: int, number: int, reason: str,
+                         taken: dict = None):
+    """
+    registration ያልተሳካ ሙከራ ይቀምጣል።
+    reason: "taken" | "range" | "nekay"
+    taken: {number: [(user_name, is_half, slot), ...]}
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    slot1_name = slot2_name = slot1_type = slot2_type = None
+
+    if reason == "taken" and taken:
+        entry = taken.get(number, [])
+        for name, is_half, slot in entry:
+            if slot == 1:
+                slot1_name = name
+                slot1_type = "half" if is_half else "full"
+            elif slot == 2:
+                slot2_name = name
+                slot2_type = "half"
+
+    cur.execute("""
+        INSERT INTO failed_attempts
+        (game_id, user_id, number, reason,
+         taken_by_slot1, taken_by_slot2, taken_type_slot1, taken_type_slot2)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (game_id, user_id, number, reason,
+          slot1_name, slot2_name, slot1_type, slot2_type))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
+    """
+    user ሞክሮ ያልተሳካ ቁጥሮች ይመልሳል።
+    number ካለ → ያ ቁጥር ብቻ
+    number ከሌለ → ሁሉም
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if number:
+        cur.execute("""
+            SELECT number, reason, taken_by_slot1, taken_by_slot2,
+                   taken_type_slot1, taken_type_slot2, attempted_at
+            FROM failed_attempts
+            WHERE game_id=%s AND user_id=%s AND number=%s
+            ORDER BY attempted_at DESC
+            LIMIT 1
+        """, (game_id, user_id, number))
+    else:
+        cur.execute("""
+            SELECT DISTINCT ON (number) number, reason, taken_by_slot1, taken_by_slot2,
+                   taken_type_slot1, taken_type_slot2, attempted_at
+            FROM failed_attempts
+            WHERE game_id=%s AND user_id=%s
+            ORDER BY number, attempted_at DESC
+        """, (game_id, user_id))
+
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    result = []
+    for row in rows:
+        result.append({
+            "number": row[0],
+            "reason": row[1],
+            "slot1_name": row[2],
+            "slot2_name": row[3],
+            "slot1_type": row[4],
+            "slot2_type": row[5],
+            "attempted_at": row[6],
+        })
+    return result
 
 
 # ============================================================
@@ -755,6 +1010,46 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float) -> dict
 
 
 # ============================================================
+# WINNER GREETING (ለውጥ 4A-4B)
+# ============================================================
+
+def get_ungreeted_winner(game_id: int, telegram_id: int) -> bool:
+    """
+    ያለፈው game 1ኛ winner ሆኖ greeted=FALSE ነው ወይ?
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id FROM winners
+        WHERE telegram_id=%s
+          AND place=1
+          AND greeted=FALSE
+          AND game_id != %s
+        ORDER BY game_id DESC
+        LIMIT 1
+    """, (telegram_id, game_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def mark_winner_greeted(telegram_id: int):
+    """
+    Winner greeted=TRUE ያደርጋል — አንድ ጊዜ ብቻ ይሆናል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE winners SET greeted=TRUE
+        WHERE telegram_id=%s AND place=1 AND greeted=FALSE
+    """, (telegram_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
 # CLEANUP
 # ============================================================
 
@@ -817,7 +1112,6 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
     conn = get_conn()
     cur = conn.cursor()
 
-    # ቁጥሩ ለዚህ user ያለ ወይ?
     cur.execute("""
         SELECT id, is_half, slot, is_paid
         FROM registrations
@@ -831,25 +1125,21 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
         conn.close()
         return False
 
-    # Price መጀመሪያ ጠይቅ
     cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
     price_row = cur.fetchone()
     price_full = float(price_row[0] or 0)
     price_half = float(price_row[1] or 0)
 
-    # Paid ከሆነ balance ይመለሳል
     refund = 0.0
     for reg_id, is_half, slot, is_paid in rows:
         if is_paid:
             refund += price_half if is_half else price_full
 
-    # Delete registrations
     cur.execute("""
         DELETE FROM registrations
         WHERE game_id=%s AND user_id=%s AND number=%s
     """, (game_id, user_id, number))
 
-    # Refund balance
     if refund > 0:
         cur.execute("""
             INSERT INTO user_balance (game_id, telegram_id, balance)
