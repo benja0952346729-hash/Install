@@ -16,7 +16,10 @@ from database import (
     admin_remove_player, admin_mark_paid, mark_nekay,
     clear_game, get_unpaid_numbers,
     get_winner_by_place, deduct_winner_balance,
-    user_owns_number, get_user_numbers, remove_number
+    user_owns_number, get_user_numbers, remove_number,
+    change_number_type,
+    save_failed_attempt, get_failed_attempts,
+    get_ungreeted_winner, mark_winner_greeted,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -30,7 +33,8 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-from responder import get_response
+from responder import get_response, RESPONSES
+import random
 (
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
@@ -321,6 +325,14 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     group_id = update.effective_chat.id
 
+    # ================================================================
+    # TYPING ACTION
+    # ================================================================
+    await ctx.bot.send_chat_action(
+        chat_id=update.effective_chat.id,
+        action="typing"
+    )
+
     if user_id in pending_ambiguous:
         await handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id)
         return
@@ -330,6 +342,15 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     game_id = settings["id"]
+
+    # ================================================================
+    # WINNER GREETING — ያለፈው round 1ኛ winner check
+    # ================================================================
+    if get_ungreeted_winner(game_id, user_id):
+        mark_winner_greeted(user_id)
+        await msg.reply_text(random.choice(RESPONSES["winner_greeting"]))
+        # greeting ብቻ — ቀጥሎ normal flow ይቀጥላል
+
     taken = get_taken_numbers(game_id)
     paid = get_paid_numbers(game_id)
     snap = nekay_numbers.get(game_id, {})
@@ -385,6 +406,47 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ================================================================
+    # TYPE CHANGE (Half ↔ Full)
+    # ================================================================
+    if resp_cancel.get("type_change"):
+        tc = resp_cancel["type_change"]
+        target = tc["target"]
+        numbers = tc["numbers"]
+
+        for num in numbers:
+            actual_num = get_group_start(num, settings["numbers_per_person"]) \
+                if settings["numbers_per_person"] > 1 else num
+
+            # Ownership check
+            if not user_owns_number(game_id, user_id, actual_num):
+                await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
+                continue
+
+            result_tc = change_number_type(game_id, user_id, actual_num, target)
+
+            if result_tc["status"] == "conflict":
+                await msg.reply_text(
+                    random.choice(RESPONSES["type_change_conflict"]).format(num=f"{actual_num:02d}")
+                )
+                continue
+
+            if result_tc["status"] == "not_yours":
+                await msg.reply_text(
+                    random.choice(RESPONSES["type_change_not_yours"]).format(num=f"{actual_num:02d}")
+                )
+                continue
+
+        # reply (አንድ ጊዜ ብቻ)
+        if resp_cancel["reply"]:
+            await msg.reply_text(resp_cancel["reply"])
+
+        # Board refresh
+        fresh = get_active_settings()
+        if fresh:
+            await _refresh_board(ctx, fresh)
+        return
+
+    # ================================================================
     # CHANGE NUMBER
     # ================================================================
     if resp_cancel.get("change_number"):
@@ -427,6 +489,44 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 # to_num register ካልተቻለ from_num ተመልስ
                 register_number(game_id, user_id, user_name, from_num, False)
                 await msg.reply_text(f"{to_num:02d} አልተቻለም 🙏")
+        return
+
+    # ================================================================
+    # WHY NOT REGISTERED
+    # ================================================================
+    if resp_cancel.get("why_not_registered") is not None:
+        target_num = resp_cancel["why_not_registered"]["number"]
+        attempts = get_failed_attempts(game_id, user_id, target_num)
+
+        if not attempts:
+            await msg.reply_text(random.choice(RESPONSES["why_not_registered_none"]))
+            return
+
+        lines = []
+        for a in attempts:
+            num = f"{a['number']:02d}"
+            t = a["attempted_at"].strftime("%I:%M %p")
+
+            if a["reason"] == "taken":
+                if a["slot2_name"]:
+                    line = random.choice(RESPONSES["why_not_registered_taken_both"]).format(
+                        num=num,
+                        name1=a["slot1_name"], type1=a["slot1_type"],
+                        name2=a["slot2_name"], time=t
+                    )
+                else:
+                    line = random.choice(RESPONSES["why_not_registered_taken"]).format(
+                        num=num,
+                        name=a["slot1_name"], type=a["slot1_type"], time=t
+                    )
+            elif a["reason"] == "range":
+                line = random.choice(RESPONSES["why_not_registered_range"]).format(num=num)
+            else:
+                line = f"{num} — ምክንያት ታወቀ 🙏"
+
+            lines.append(line)
+
+        await msg.reply_text("\n".join(lines))
         return
 
     # ================================================================
