@@ -174,6 +174,28 @@ LATIN_TO_AMHARIC = {
     "akaunt": "አካውንት",
     "akount": "አካውንት",
     "acwnt": "አካውንት",
+    # ← ለውጥ 2C: type_change Latin entries
+    "bemulu areg": "በሙሉ አርግ",
+    "bemulu adrig": "በሙሉ አድርግ",
+    "bemulu yihun": "በሙሉ ይሁን",
+    "begmash areg": "በግማሽ አርግ",
+    "begmash adrig": "በግማሽ አድርግ",
+    "begmash yihun": "በግማሽ ይሁን",
+    "gmash areg": "ግማሽ አርግ",
+    "gmash yihun": "ግማሽ ይሁን",
+    "mulu areg": "ሙሉ አርግ",
+    "mulu yihun": "ሙሉ ይሁን",
+    # ← ለውጥ 3F (Latin why_not_registered)
+    "lmin alyazkilgnim": "ለምን አልያዝክልኝም",
+    "lmin altsafkilgnim": "ለምን አልፃፍክልኝም",
+    "lmin almezegbkegnim": "ለምን አልመዘገብከኝም",
+    "lmin qitire alteyazem": "ለምን ቁጥሬ አልተያዘም",
+    "lmin algeba": "ለምን አልገባም",
+    "lmin sayiyaz qere": "ለምን ሳይያዝ ቀረ",
+    "lmin alteyazelign": "ለምን አልተያዘልኝም",
+    "lmin altemezegebem": "ለምን አልተመዘገበም",
+    "qitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
+    "lmin alasgegabhegnim": "ለምን አላስገባኸኝም",
 }
 
 def translate_latin(text: str) -> str:
@@ -216,6 +238,38 @@ def detect_change_number(text: str):
         if "ነው" in lower or "new" in text.lower():
             return (from_num, to_num)
     return None
+
+
+# ================================================================
+# TYPE CHANGE DETECTOR (ለውጥ 2D)
+# ================================================================
+
+def detect_type_change(text: str):
+    """
+    "06 በሙሉ አርግ"   → ([6], "full")
+    "06 በግማሽ አርግ"  → ([6], "half")
+    "09 11 begmash"  → ([9, 11], "half")
+    Returns: (numbers_list, target_type) or None
+    """
+    translated = translate_latin(text)
+    normalized = normalize_amharic(translated)
+    lower = normalized.lower()
+
+    TYPE_FULL_WORDS = ["በሙሉ", "ሙሉ"]
+    TYPE_HALF_WORDS = ["በግማሽ", "ግማሽ"]
+
+    is_full = any(normalize_amharic(w) in lower for w in TYPE_FULL_WORDS)
+    is_half = any(normalize_amharic(w) in lower for w in TYPE_HALF_WORDS)
+
+    if not is_full and not is_half:
+        return None
+
+    nums = [int(n) for n in re.findall(r"\d+", text)]
+    if not nums:
+        return None
+
+    target = "full" if is_full else "half"
+    return (nums, target)
 
 
 # ================================================================
@@ -276,10 +330,14 @@ INTENT_EXAMPLES = {
         "hi", "hello", "hey", "ሰላም ነህ",
     ],
 
+    # ← ለውጥ 1: cancel examples ተጨምረዋል
     "cancel_number": [
         "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
         "አጥፋልኝ", "ሰርዝልኝ", "አውጣልኝ",
         "ቁጥሩን ሰርዝ", "ቁጥሩን አጥፋ", "ቁጥሩን አውጣ",
+        "አልፈለኩም", "አልፈልገውም", "አልፈልጋቸውም",
+        "አያስፈልገኝም", "cancel ነው", "drop አርግ",
+        "ትቼዋለሁ", "አልፈልገውም ቁጥሩን",
         "አልፈልገውም", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
         "ቁጥሩን አልፈልግም", "ቁጥሩን ሰርዝልኝ",
     ],
@@ -325,6 +383,38 @@ INTENT_EXAMPLES = {
         "ቴሌብር አካውንት ስጠኝ", "ቴሌብር ቁጥርህን ላክ",
         "አዋሽ አካውንት ስጠኝ", "ወዴት ልከፍል",
     ],
+
+    # ← ለውጥ 2A: type_change intent examples
+    "type_change": [
+        "በሙሉ አርግ", "በሙሉ አድርግ", "በሙሉ ይሁን", "በሙሉ ቀይረው",
+        "በሙሉ አርጋት", "ሙሉ አርግ", "ሙሉ ይሁን",
+        "በግማሽ አርግ", "በግማሽ አድርግ", "በግማሽ ይሁን", "በግማሽ ቀይረው",
+        "በግማሽ አርጋት", "ግማሽ አርግ", "ግማሽ ይሁን",
+        "gmash areg", "bemulu areg", "begmash areg",
+        "06 bemulu", "11 begmash", "09 11 begmash",
+        "11 21 bemulu qeyirew",
+        "gmash +argewo", "06+ argewo",
+    ],
+
+    # ← ለውጥ 3E: why_not_registered intent examples
+    "why_not_registered": [
+        "ለምን አልያዝክልኝም", "ለምን አልፃፍክልኝም", "ለምን አልመዘገብከኝም",
+        "ለምን ቁጥሬ አልተያዘም", "ለምን ቁጥሩ አልተያዘም",
+        "ቁጥሩ ለምን አልተያዘም", "ለምን አልገባም", "ለምን ሳይያዝ ቀረ",
+        "ለምን አልያዘልኝም", "ለምን አልተመዘገበም",
+        "ቁጥሬ ለምን አልተያዘም", "ለምን አልተያዘልኝም",
+        "ቁጥሩ ሳይያዝ ቀረ ለምን", "ለምን አላስገባኸኝም",
+        "ለምን ቁጥሬን አልያዝህልኝም",
+        "lmin alyazkilgnim", "lmin altsafkilgnim",
+        "lmin almezegbkegnim", "lmin qitire alteyazem",
+        "lmin algeba", "lmin sayiyaz qere",
+        "lmin alteyazelign", "lmin altemezegebem",
+        "qitire lmin alteyazem", "lmin alasgegabhegnim",
+        "why aliyazkilign", "why alteyaze",
+        "why did you not register", "not registered lmin",
+        "lmin register aladergehlign",
+        "qitre lmin sayiyaz qere",
+    ],
 }
 
 
@@ -333,25 +423,17 @@ INTENT_EXAMPLES = {
 # ================================================================
 
 def get_ngrams(text: str, n: int = 2) -> list:
-    """ቃሉን ወደ n-gram ይሰብራል — ለምሳሌ 'ያዝልኝ' → ['ያዝ','ዝል','ልኝ']"""
     text = normalize_amharic(text)
     tokens = text.split()
     ngrams = []
-    # Character n-grams (ለፊደል ቅርበት)
     for token in tokens:
         for i in range(len(token) - n + 1):
             ngrams.append(token[i:i+n])
-    # Word unigrams (ለቃላት ቀጥታ match)
     ngrams.extend(tokens)
     return ngrams
 
 
 def build_tfidf(intent_examples: dict):
-    """
-    ከ intent examples TF-IDF vectors ይሰራል።
-    ሁሉም intent ውስጥ ያሉ examples አንድ document ናቸው።
-    """
-    # Step 1: ሁሉም ngrams ሰብስብ
     intent_ngrams = {}
     for intent, examples in intent_examples.items():
         all_ngrams = []
@@ -361,14 +443,12 @@ def build_tfidf(intent_examples: dict):
             all_ngrams.extend(get_ngrams(normalized))
         intent_ngrams[intent] = all_ngrams
 
-    # Step 2: vocabulary ሰራ
     vocab = set()
     for ngrams in intent_ngrams.values():
         vocab.update(ngrams)
     vocab = sorted(vocab)
     vocab_index = {ng: i for i, ng in enumerate(vocab)}
 
-    # Step 3: TF vectors ሰራ
     vectors = {}
     for intent, ngrams in intent_ngrams.items():
         vec = defaultdict(float)
@@ -377,17 +457,15 @@ def build_tfidf(intent_examples: dict):
             vectors[intent] = vec
             continue
         for ng in ngrams:
-            vec[ng] += 1.0 / total  # TF = count / total
+            vec[ng] += 1.0 / total
         vectors[intent] = vec
 
-    # Step 4: IDF ሰራ (ብዙ intent ውስጥ ያለ ngram ያነሰ ክብደት ያለው)
     idf = {}
     num_intents = len(intent_ngrams)
     for ng in vocab:
         doc_count = sum(1 for ngrams in intent_ngrams.values() if ng in ngrams)
         idf[ng] = math.log((num_intents + 1) / (doc_count + 1)) + 1.0
 
-    # Step 5: TF-IDF vectors ሰራ
     tfidf_vectors = {}
     for intent, tf_vec in vectors.items():
         tfidf_vec = {}
@@ -399,7 +477,6 @@ def build_tfidf(intent_examples: dict):
 
 
 def text_to_vector(text: str, idf: dict) -> dict:
-    """ሰው የጻፈውን text ወደ TF-IDF vector ይቀይራል"""
     translated = translate_latin(text)
     normalized = normalize_amharic(translated)
     ngrams = get_ngrams(normalized)
@@ -417,7 +494,6 @@ def text_to_vector(text: str, idf: dict) -> dict:
 
 
 def cosine_similarity(vec_a: dict, vec_b: dict) -> float:
-    """ሁለት vectors ምን ያህል ቅርብ ናቸው — 0.0 እስከ 1.0"""
     if not vec_a or not vec_b:
         return 0.0
     common_keys = set(vec_a.keys()) & set(vec_b.keys())
@@ -430,7 +506,7 @@ def cosine_similarity(vec_a: dict, vec_b: dict) -> float:
 
 
 # ================================================================
-# MODEL BUILD — አንድ ጊዜ ብቻ ይሰራል (startup)
+# MODEL BUILD
 # ================================================================
 
 print("🔧 Building intent vectors...")
@@ -439,22 +515,14 @@ print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
 
 
 # ================================================================
-# DETECT INTENT — ዋናው function (replace ያደረገው)
+# DETECT INTENT
 # ================================================================
 
 def detect_intent(text: str) -> tuple:
-    """
-    ሰው የጻፈውን text ወስዶ intent እና confidence score ይመልሳል።
-    Embedding (TF-IDF + cosine similarity) ይጠቀማል።
-    """
     translated = translate_latin(text)
     normalized = normalize_amharic(translated)
     normalized_lower = normalized.lower()
     numbers_in_text = re.findall(r"\d+", text)
-
-    # ================================================================
-    # PRIORITY RULES — ቁጥር ወይም ቀጥታ keyword ሲኖር
-    # ================================================================
 
     # 1. Account query
     account_keywords_direct = [
@@ -470,6 +538,25 @@ def detect_intent(text: str) -> tuple:
         if change_result:
             return "change_number", 1.0
 
+    # ← ለውጥ 2B: Type change detection (cancel_number በፊት)
+    TYPE_FULL_WORDS = ["በሙሉ", "ሙሉ", "bemulu", "mulu"]
+    TYPE_HALF_WORDS = ["በግማሽ", "ግማሽ", "begmash", "gmash"]
+    has_type_full = any(normalize_amharic(w) in normalized_lower for w in TYPE_FULL_WORDS)
+    has_type_half = any(normalize_amharic(w) in normalized_lower for w in TYPE_HALF_WORDS)
+    if numbers_in_text and (has_type_full or has_type_half):
+        ACTION_WORDS = ["አርግ", "አድርግ", "ይሁን", "ቀይር", "ቀይረው", "areg", "adrig", "yihun"]
+        has_action = any(normalize_amharic(w) in normalized_lower for w in ACTION_WORDS)
+        if has_action:
+            return "type_change", 1.0
+
+    # ← ለውጥ 3G: Why not registered
+    WHY_NOT_REG_WORDS = [
+        "ለምን አልያዝ", "ለምን አልፃፍ", "ለምን አልመዘገብ",
+        "ለምን አልተያዘ", "ለምን አልገባ", "lmin alyaz", "lmin altsaf",
+    ]
+    if any(normalize_amharic(w) in normalized_lower for w in WHY_NOT_REG_WORDS):
+        return "why_not_registered", 1.0
+
     # 3. Specific number query
     has_ale = "አለ" in normalized_lower
     has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
@@ -482,9 +569,7 @@ def detect_intent(text: str) -> tuple:
     if len(numbers_in_text) == 1 and has_cancel:
         return "cancel_number", 1.0
 
-    # ================================================================
-    # EMBEDDING SIMILARITY — ዋናው scoring
-    # ================================================================
+    # Embedding similarity
     query_vec = text_to_vector(text, GLOBAL_IDF)
 
     scores = {}
@@ -492,13 +577,11 @@ def detect_intent(text: str) -> tuple:
         sim = cosine_similarity(query_vec, intent_vec)
         scores[intent] = sim
 
-    # ================================================================
-    # CONTEXT BONUS — ቁጥር ሲኖር/ሲጠፋ ማስተካከያ
-    # ================================================================
     for intent in list(scores.keys()):
         bonus = 0.0
         if numbers_in_text:
-            if intent in ("booking", "specific_number_query", "cancel_number", "change_number"):
+            if intent in ("booking", "specific_number_query", "cancel_number",
+                          "change_number", "type_change"):
                 bonus += 0.08
             elif intent == "account_query":
                 pass
@@ -603,6 +686,44 @@ RESPONSES = {
     "change_number_invalid": [
         "ቁጥሩ ትክክል አይደለም 🙏", "ያ ቁጥር የለም 🙏",
     ],
+    # ← ለውጥ 2E: type_change responses
+    "type_change_ack": [
+        "እሺ 🙏",
+        "እሺ ቤተሰብ 🙏",
+        "ተቀይሯል 🙏",
+    ],
+    "type_change_conflict": [
+        "ቁጥሩ {num} slot 2 ተይዟል መቀየር አይቻልም 🙏",
+        "{num} ሌላ ሰው slot 2 ላይ አለ 🙏",
+    ],
+    "type_change_not_yours": [
+        "ቁጥሩ የእርስዎ አይደለም 🙏",
+        "{num} የእርስዎ ቁጥር አይደለም 🙏",
+    ],
+    # ← ለውጥ 3F: why_not_registered responses
+    "why_not_registered_taken": [
+        "{num} — {name} ቀደምህ ({type}) — {time} 🙏",
+        "ቤተሰብ {num} ቀድሞ ተወስዷል — {name} ({type}) {time} 🙏",
+    ],
+    "why_not_registered_taken_both": [
+        "{num} — slot1: {name1} ({type1}), slot2: {name2} — {time} 🙏",
+    ],
+    "why_not_registered_range": [
+        "{num} ከ total ቁጥሮች ውጭ ነው 🙏",
+        "ቁጥር {num} የለም 🙏",
+    ],
+    "why_not_registered_none": [
+        "መቼ ነው ቤተሰብ 🙏 ተሳስተሃል ቼክ አድርግ",
+        "ቤተሰብ ያ ቁጥር ሞክረሃል አላውቅም ቼክ አድርግ 🙏",
+    ],
+    # ← ለውጥ 4C: winner_greeting responses
+    "winner_greeting": [
+        "እንኳን ደስ አለክ ወዳጄ 🥰",
+        "congraaaaa ቤተሰብ 🥰",
+        "ቡም ቡም ፈነዳ congraaaa 🎉",
+        "ፈነዳ ቤተሰብ እንኳን ደስ አለክ 🥰",
+        "champion እንኳን ደስ አለክ 🏆🥰",
+    ],
 }
 
 
@@ -625,7 +746,7 @@ def get_response(
     failed_numbers: list = None,
 ) -> dict:
 
-    THRESHOLD_RESPOND  = 0.18   # Embedding score ዝቅ ስለሚሆን threshold ቀነሰ
+    THRESHOLD_RESPOND  = 0.18
     THRESHOLD_CONFUSED = 0.08
 
     result = {
@@ -635,9 +756,10 @@ def get_response(
         "resend_remaining": False,
         "cancel_number": None,
         "change_number": None,
+        "type_change": None,        # ← ለውጥ 2F: አዲስ key
+        "why_not_registered": None, # ← ለውጥ 3H: አዲስ key
     }
 
-    # Registration result
     if registration_result is not None:
         if registration_result in ("registered", "registered_half"):
             if remaining_count <= 7:
@@ -678,6 +800,22 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["change_number_ack"]).format(
                 from_num=fmt(from_num), to_num=fmt(to_num)
             )
+        return result
+
+    # ← ለውጥ 2F: type_change handler
+    if intent == "type_change":
+        type_result = detect_type_change(text)
+        if type_result:
+            nums, target = type_result
+            result["type_change"] = {"numbers": nums, "target": target}
+            result["reply"] = random.choice(RESPONSES["type_change_ack"])
+        return result
+
+    # ← ለውጥ 3H: why_not_registered handler
+    if intent == "why_not_registered":
+        numbers_found = re.findall(r"\d+", text)
+        target_num = int(numbers_found[0]) if numbers_found else None
+        result["why_not_registered"] = {"number": target_num}
         return result
 
     if intent == "booking":
@@ -789,6 +927,9 @@ if __name__ == "__main__":
         ("ከፍዬ ቁጥሬ ተነቀለ ለምን", "complaint_paid_removed"),
         ("ለምን ሸጥህ ቁጥሬን", "complaint_why_sold"),
         ("ቀሪ ቁጥሮች ምን አለ ስንት ቀረ", "remaining_query"),
+        ("06 በሙሉ አርግ", "type_change"),
+        ("11 begmash areg", "type_change"),
+        ("ለምን አልያዝክልኝም 05", "why_not_registered"),
     ]
 
     print("\n" + "="*60)
