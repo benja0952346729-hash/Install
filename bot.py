@@ -325,9 +325,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     group_id = update.effective_chat.id
 
-    # ================================================================
-    # TYPING ACTION
-    # ================================================================
     await ctx.bot.send_chat_action(
         chat_id=update.effective_chat.id,
         action="typing"
@@ -343,13 +340,9 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     game_id = settings["id"]
 
-    # ================================================================
-    # WINNER GREETING — ያለፈው round 1ኛ winner check
-    # ================================================================
     if get_ungreeted_winner(game_id, user_id):
         mark_winner_greeted(user_id)
         await msg.reply_text(random.choice(RESPONSES["winner_greeting"]))
-        # greeting ብቻ — ቀጥሎ normal flow ይቀጥላል
 
     taken = get_taken_numbers(game_id)
     paid = get_paid_numbers(game_id)
@@ -357,9 +350,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nekay_list = _build_nekay_from_snap(snap)
     remaining = count_remaining(settings, taken)
 
-    # ================================================================
-    # CANCEL NUMBER
-    # ================================================================
     resp_cancel = get_response(
         text=text,
         settings=settings,
@@ -405,9 +395,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         nekay_numbers.pop(game_id, None)
         return
 
-    # ================================================================
-    # TYPE CHANGE (Half ↔ Full)
-    # ================================================================
     if resp_cancel.get("type_change"):
         tc = resp_cancel["type_change"]
         target = tc["target"]
@@ -417,7 +404,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             actual_num = get_group_start(num, settings["numbers_per_person"]) \
                 if settings["numbers_per_person"] > 1 else num
 
-            # Ownership check
             if not user_owns_number(game_id, user_id, actual_num):
                 await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
                 continue
@@ -436,47 +422,37 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 )
                 continue
 
-        # reply (አንድ ጊዜ ብቻ)
         if resp_cancel["reply"]:
             await msg.reply_text(resp_cancel["reply"])
 
-        # Board refresh
         fresh = get_active_settings()
         if fresh:
             await _refresh_board(ctx, fresh)
         return
 
-    # ================================================================
-    # CHANGE NUMBER
-    # ================================================================
     if resp_cancel.get("change_number"):
         ch = resp_cancel["change_number"]
         from_num = ch["from"]
         to_num   = ch["to"]
 
-        # 1. Ownership check
         if not user_owns_number(game_id, user_id, from_num):
             await msg.reply_text(f"{from_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
             return
 
-        # 2. Target ተከፍሏል?
         if to_num in paid:
             await msg.reply_text(f"{to_num:02d} ✅ ተከፍሏል መቀየር አይቻልም 🙏")
             return
 
-        # 3. Target ተይዟል?
         if to_num in taken:
             await msg.reply_text(f"{to_num:02d} ተይዟል ቤተሰብ ሌላ ምረጥ 🙏")
             return
 
-        # 4. ቀይር — from_num አስወጣ፣ to_num ምዝገብ
         removed = remove_number(game_id, user_id, from_num)
         if removed:
             result = register_number(game_id, user_id, user_name, to_num, False)
             if result in ("registered", "registered_half"):
                 if resp_cancel["reply"]:
                     await msg.reply_text(resp_cancel["reply"])
-                # nekay snap update
                 if game_id in nekay_numbers:
                     snap3 = nekay_numbers.get(game_id, {})
                     if from_num in snap3:
@@ -486,14 +462,10 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 if fresh:
                     await _refresh_board(ctx, fresh)
             else:
-                # to_num register ካልተቻለ from_num ተመልስ
                 register_number(game_id, user_id, user_name, from_num, False)
                 await msg.reply_text(f"{to_num:02d} አልተቻለም 🙏")
         return
 
-    # ================================================================
-    # WHY NOT REGISTERED
-    # ================================================================
     if resp_cancel.get("why_not_registered") is not None:
         target_num = resp_cancel["why_not_registered"]["number"]
         attempts = get_failed_attempts(game_id, user_id, target_num)
@@ -529,9 +501,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await msg.reply_text("\n".join(lines))
         return
 
-    # ================================================================
-    # PARSE NUMBERS — registration
-    # ================================================================
     parse_result = parse_numbers(text)
 
     if not parse_result:
@@ -556,7 +525,6 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
         return
 
-    # ቁጥር አለ — registration
     if photo_processing.get(group_id):
         q = pending_registrations.setdefault(group_id, [])
         q.append((user_id, user_name, text, msg))
@@ -634,6 +602,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
         result = register_number(game_id, user_id, actual_name, actual_num, is_half, force=is_nekay)
         if result in ["registered", "registered_half"]:
+            registered.append((actual_num, is_half))
+        elif isinstance(result, dict) and result.get("status") == "ok":
+            # ← FIX: ባለቤቱ type change ሲያደርግ board refresh ይሆናል
             registered.append((actual_num, is_half))
         else:
             all_taken.append(actual_num)
