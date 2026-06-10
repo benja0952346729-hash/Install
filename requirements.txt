@@ -4,3 +4,4 @@ rapidfuzz
 aiohttp
 groq
 httpx
+regex
