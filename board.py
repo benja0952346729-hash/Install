@@ -9,11 +9,18 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
     prize_2nd = settings.get("prize_2nd")
     prize_3rd = settings.get("prize_3rd")
     payment_info = settings["payment_info"]
+    game_rule = settings.get("game_rule")
+    symbol = settings.get("slot_symbol") or "#"
 
     if paid is None:
         paid = {}
 
     lines = []
+
+    # Rule ከላይ ይሆናል
+    if game_rule:
+        lines.append(game_rule)
+        lines.append("")
 
     lines.append("🎲 ፈጣን ዕድል ጨዋታ")
     lines.append(f"💰 ዋጋ: {price_full} ብር" + (f" | ግማሽ: {price_half} ብር" if price_half else ""))
@@ -30,10 +37,10 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
             entry = taken.get(n, [])
             paid_slots = paid.get(n, set())
             if not entry:
-                lines.append(f"{label}#")
+                lines.append(f"{label}{symbol}")
             else:
                 display = _format_entry(entry, paid_slots)
-                lines.append(f"{label}# {display}")
+                lines.append(f"{label}{symbol} {display}")
     else:
         n = 1
         while n <= total:
@@ -44,13 +51,13 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
             entry = taken.get(group_start, [])
             paid_slots = paid.get(group_start, set())
             if not entry:
-                lines.append(f"{label}#")
+                lines.append(f"{label}{symbol}")
             else:
                 display = _format_entry(entry, paid_slots)
-                lines.append(f"{label}# {display}")
+                lines.append(f"{label}{symbol} {display}")
 
             for sub in range(group_start + 1, group_end + 1):
-                lines.append(f"{format_number(sub)}#")
+                lines.append(f"{format_number(sub)}{symbol}")
 
             lines.append("")
             n += per_person
@@ -144,15 +151,10 @@ def count_remaining(settings: dict, taken: dict) -> int:
 
 
 def build_warning(countdown_text: str = None) -> str:
-    """
-    Board ሲሞላ የሚወጣ warning — 3x ትልቅ ሳጥን
-    countdown_text: ለምሳሌ "⏳ 1:40 ይቀራል" — None ከሆነ መጀመሪያ message
-    """
     if countdown_text is None:
         middle_line = "║      💥 ጊዜ እያለቀ ነው! 💥      ║"
         bar_line    = "║  🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥  ║"
     else:
-        # countdown text ማዕከል
         padded = countdown_text.center(28)
         middle_line = f"║{padded}║"
         bar_line    = "║  🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥🟥  ║"
@@ -176,10 +178,6 @@ def build_warning(countdown_text: str = None) -> str:
 
 
 def build_nekay(unpaid: list) -> str:
-    """
-    ጊዜ ካለቀ በኋላ ነቃይ message
-    unpaid = [(number, is_half), ...]
-    """
     lines = ["⚠️ ነቃይ!"]
     for number, is_half in unpaid:
         label = format_number(number)
