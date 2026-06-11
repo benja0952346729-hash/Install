@@ -174,7 +174,6 @@ LATIN_TO_AMHARIC = {
     "akaunt": "አካውንት",
     "akount": "አካውንት",
     "acwnt": "አካውንት",
-    # ← ለውጥ 2C: type_change Latin entries
     "bemulu areg": "በሙሉ አርግ",
     "bemulu adrig": "በሙሉ አድርግ",
     "bemulu yihun": "በሙሉ ይሁን",
@@ -185,7 +184,6 @@ LATIN_TO_AMHARIC = {
     "gmash yihun": "ግማሽ ይሁን",
     "mulu areg": "ሙሉ አርግ",
     "mulu yihun": "ሙሉ ይሁን",
-    # ← ለውጥ 3F (Latin why_not_registered)
     "lmin alyazkilgnim": "ለምን አልያዝክልኝም",
     "lmin altsafkilgnim": "ለምን አልፃፍክልኝም",
     "lmin almezegbkegnim": "ለምን አልመዘገብከኝም",
@@ -203,6 +201,38 @@ def translate_latin(text: str) -> str:
     for lat, amh in sorted(LATIN_TO_AMHARIC.items(), key=lambda x: -len(x[0])):
         result = result.replace(lat, amh)
     return result
+
+
+# ================================================================
+# ACCOUNT LINE EXTRACTOR — payment_info ውስጥ account lines ብቻ
+# ================================================================
+
+ACCOUNT_PATTERNS = [
+    r"CBE\s*[:\-]?\s*\S+",
+    r"Telebirr\s*[:\-]?\s*\S+",
+    r"Tele\s*[:\-]?\s*\S+",
+    r"Awash\s*[:\-]?\s*\S+",
+    r"ቴሌብር\s*[:\-]?\s*\S+",
+    r"አዋሽ\s*[:\-]?\s*\S+",
+    r"ሲቢኢ\s*[:\-]?\s*\S+",
+    r"ንግድ\s*ባንክ\s*[:\-]?\s*\S+",
+    r"\d{10,}",
+]
+
+
+def _extract_account_lines(payment_info: str) -> str:
+    """CBE/Telebirr/Awash lines ብቻ ለይቶ ይመልሳል"""
+    if not payment_info:
+        return ""
+    lines = payment_info.strip().split("\n")
+    account_lines = [
+        line.strip() for line in lines
+        if line.strip() and any(
+            re.search(p, line.strip(), re.IGNORECASE)
+            for p in ACCOUNT_PATTERNS
+        )
+    ]
+    return "\n".join(account_lines) if account_lines else payment_info.strip()
 
 
 # ================================================================
@@ -241,16 +271,10 @@ def detect_change_number(text: str):
 
 
 # ================================================================
-# TYPE CHANGE DETECTOR (ለውጥ 2D)
+# TYPE CHANGE DETECTOR
 # ================================================================
 
 def detect_type_change(text: str):
-    """
-    "06 በሙሉ አርግ"   → ([6], "full")
-    "06 በግማሽ አርግ"  → ([6], "half")
-    "09 11 begmash"  → ([9, 11], "half")
-    Returns: (numbers_list, target_type) or None
-    """
     translated = translate_latin(text)
     normalized = normalize_amharic(translated)
     lower = normalized.lower()
@@ -273,7 +297,7 @@ def detect_type_change(text: str):
 
 
 # ================================================================
-# INTENT EXAMPLES — ከ keywords + Latin map ተሰብስቦ
+# INTENT EXAMPLES
 # ================================================================
 
 INTENT_EXAMPLES = {
@@ -285,7 +309,6 @@ INTENT_EXAMPLES = {
         "ቁጥሩን አስቀምጥልኝ", "ፃፍ ፃፍ", "ያዝልኝ እባክህ",
         "ቁጥሩን ጻፍልኝ", "ምዝገባ አርግልኝ", "ምዝገባ",
     ],
-
     "nekay_query": [
         "ነቃይ", "ተነቃይ", "ነቃዮች", "ሚሸጥ አለ",
         "ነቃይ አለ", "ነቃይ ዘርዝር", "ነቃይ ንገር",
@@ -293,14 +316,12 @@ INTENT_EXAMPLES = {
         "ነቃይ ላክ", "ነቃይ ምን አለ", "ነቃይ ዝርዝር ስጠኝ",
         "ምን ያህል ነቃይ አለ", "ነቃይ ቁጥር ስንት ነው",
     ],
-
     "remaining_send": [
         "ቀሪ ላክ", "ቁጥር ላክ", "ቀሪ ቁጥሮች ላክ",
         "ቀሪ አሳየኝ", "ቶሎ ቶሎ ቀሪ ላክ",
         "ቀሪ ቁጥሮቹን ላክ", "remaining ላክ",
         "ያልተያዙ ቁጥሮች ላክ", "ያልተያዙ ቁጥሮቹን ስጠኝ",
     ],
-
     "remaining_query": [
         "ቀሪ", "ያልተያዘ", "ያልተያዙ", "ምን አለ", "ስንት ቀረ",
         "ስንት ቁጥሮች", "ስንት አለ", "ቁጥር አለ", "ቀሪ አለ",
@@ -308,19 +329,16 @@ INTENT_EXAMPLES = {
         "ያልተያዙ ቁጥሮች ምን አለ", "ቀሪ ቁጥሮች ስንት ናቸው",
         "ምን ያህል ቀረ", "ቀሪ ቁጥሮቹ ምንድን ናቸው",
     ],
-
     "specific_number_query": [
         "ተያዘ", "ተይዞ", "ተይዙዋል", "አለ ወይ", "አለ",
         "ቁጥሩ ተያዘ ወይ", "ቁጥሩ አለ", "ቁጥሩ ክፍት ነው ወይ",
         "ይህ ቁጥር ተወሰደ ወይ", "ቁጥሩ ነፃ ነው ወይ",
         "ይህ ቁጥር ተያዘ", "ቁጥሩ available ነው ወይ",
     ],
-
     "all_taken_query": [
         "ሁሉም ተይዘዋል", "ሁሉም ተያዘ", "ሁሉም አልተያዙም",
         "ሁሉም ቁጥሮች ተያዙ", "ሁሉም አለቀ", "ሁሉም ተወሰደ",
     ],
-
     "greeting": [
         "ሰላም", "እንዴት ነህ", "ደና አደርክ", "ደና ዋልክ",
         "እንዴት አመሸህ", "ሰላም ዋልክ", "ሰላም አመሸህ",
@@ -329,8 +347,6 @@ INTENT_EXAMPLES = {
         "ሰላም እንዴት ነህ", "ሰላም ወዳጄ", "ሰላምታ",
         "hi", "hello", "hey", "ሰላም ነህ",
     ],
-
-    # ← ለውጥ 1: cancel examples ተጨምረዋል
     "cancel_number": [
         "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
         "አጥፋልኝ", "ሰርዝልኝ", "አውጣልኝ",
@@ -341,21 +357,18 @@ INTENT_EXAMPLES = {
         "አልፈልገውም", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
         "ቁጥሩን አልፈልግም", "ቁጥሩን ሰርዝልኝ",
     ],
-
     "complaint_removed": [
         "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
         "ለምን ተነቀልኩ", "ተነቀልኩ እኮ",
         "ቁጥሬ የለም", "ቁጥሬ ጠፋ ለምን", "ቁጥሬ ሄደ ለምን",
         "ቁጥሬ ተቀነሰ", "ቁጥሬ ተወሰደ ለምን",
     ],
-
     "complaint_why_sold": [
         "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
         "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
         "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥከው",
         "ለምን ቁጥሬን ነቀልክ", "ቁጥሬ ለምን ሄደ",
     ],
-
     "complaint_paid_removed": [
         "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
         "ልክያለው እኮ ለምን ሸጥክ", "ተልኩዋል ለምን ነቀልክ",
@@ -366,14 +379,12 @@ INTENT_EXAMPLES = {
         "payment ላኩ ለምን ሸጥክ", "ከፍዬ ቁጥሬ ሄደ",
         "ብር ልኬ ቁጥሬ ጠፋ",
     ],
-
     "change_number": [
         "ወደ ቀይር", "ቀይር", "ቀይረው", "ቀይርልኝ",
         "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
         "ቁጥሩን ቀይር", "ቁጥሩን ለወጥ", "ቁጥሬን ቀይርልኝ",
         "change አርግ", "ቁጥሩን change አርግ",
     ],
-
     "account_query": [
         "አካውንት", "አካውንት ላክ", "አካውንት ምንድን ነው",
         "ቴሌብር", "አዋሽ", "ሲቢኢ", "ንግድ ባንክ",
@@ -383,8 +394,6 @@ INTENT_EXAMPLES = {
         "ቴሌብር አካውንት ስጠኝ", "ቴሌብር ቁጥርህን ላክ",
         "አዋሽ አካውንት ስጠኝ", "ወዴት ልከፍል",
     ],
-
-    # ← ለውጥ 2A: type_change intent examples
     "type_change": [
         "በሙሉ አርግ", "በሙሉ አድርግ", "በሙሉ ይሁን", "በሙሉ ቀይረው",
         "በሙሉ አርጋት", "ሙሉ አርግ", "ሙሉ ይሁን",
@@ -395,8 +404,6 @@ INTENT_EXAMPLES = {
         "11 21 bemulu qeyirew",
         "gmash +argewo", "06+ argewo",
     ],
-
-    # ← ለውጥ 3E: why_not_registered intent examples
     "why_not_registered": [
         "ለምን አልያዝክልኝም", "ለምን አልፃፍክልኝም", "ለምን አልመዘገብከኝም",
         "ለምን ቁጥሬ አልተያዘም", "ለምን ቁጥሩ አልተያዘም",
@@ -447,7 +454,6 @@ def build_tfidf(intent_examples: dict):
     for ngrams in intent_ngrams.values():
         vocab.update(ngrams)
     vocab = sorted(vocab)
-    vocab_index = {ng: i for i, ng in enumerate(vocab)}
 
     vectors = {}
     for intent, ngrams in intent_ngrams.items():
@@ -524,7 +530,6 @@ def detect_intent(text: str) -> tuple:
     normalized_lower = normalized.lower()
     numbers_in_text = re.findall(r"\d+", text)
 
-    # 1. Account query
     account_keywords_direct = [
         "አካውንት", "አካንት", "ቴሌብር", "አዋሽ", "ሲቢኢ",
         "ንግድ ባንክ", "ባንክ አካውንት", "የሚከፈልበት ቁጥር", "የባንክ ቁጥር",
@@ -532,13 +537,11 @@ def detect_intent(text: str) -> tuple:
     if any(normalize_amharic(kw) in normalized_lower for kw in account_keywords_direct):
         return "account_query", 1.0
 
-    # 2. Change number
     if len(numbers_in_text) >= 2:
         change_result = detect_change_number(text)
         if change_result:
             return "change_number", 1.0
 
-    # ← ለውጥ 2B: Type change detection (cancel_number በፊት)
     TYPE_FULL_WORDS = ["በሙሉ", "ሙሉ", "bemulu", "mulu"]
     TYPE_HALF_WORDS = ["በግማሽ", "ግማሽ", "begmash", "gmash"]
     has_type_full = any(normalize_amharic(w) in normalized_lower for w in TYPE_FULL_WORDS)
@@ -549,7 +552,6 @@ def detect_intent(text: str) -> tuple:
         if has_action:
             return "type_change", 1.0
 
-    # ← ለውጥ 3G: Why not registered
     WHY_NOT_REG_WORDS = [
         "ለምን አልያዝ", "ለምን አልፃፍ", "ለምን አልመዘገብ",
         "ለምን አልተያዘ", "ለምን አልገባ", "lmin alyaz", "lmin altsaf",
@@ -557,21 +559,17 @@ def detect_intent(text: str) -> tuple:
     if any(normalize_amharic(w) in normalized_lower for w in WHY_NOT_REG_WORDS):
         return "why_not_registered", 1.0
 
-    # 3. Specific number query
     has_ale = "አለ" in normalized_lower
     has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
     if numbers_in_text and (has_ale or has_teyaze):
         return "specific_number_query", 1.0
 
-    # 4. Cancel number
     cancel_words = ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
     has_cancel = any(normalize_amharic(w) in normalized_lower for w in cancel_words)
     if len(numbers_in_text) == 1 and has_cancel:
         return "cancel_number", 1.0
 
-    # Embedding similarity
     query_vec = text_to_vector(text, GLOBAL_IDF)
-
     scores = {}
     for intent, intent_vec in TFIDF_VECTORS.items():
         sim = cosine_similarity(query_vec, intent_vec)
@@ -686,7 +684,6 @@ RESPONSES = {
     "change_number_invalid": [
         "ቁጥሩ ትክክል አይደለም 🙏", "ያ ቁጥር የለም 🙏",
     ],
-    # ← ለውጥ 2E: type_change responses
     "type_change_ack": [
         "እሺ 🙏",
         "እሺ ቤተሰብ 🙏",
@@ -700,7 +697,6 @@ RESPONSES = {
         "ቁጥሩ የእርስዎ አይደለም 🙏",
         "{num} የእርስዎ ቁጥር አይደለም 🙏",
     ],
-    # ← ለውጥ 3F: why_not_registered responses
     "why_not_registered_taken": [
         "{num} — {name} ቀደምህ ({type}) — {time} 🙏",
         "ቤተሰብ {num} ቀድሞ ተወስዷል — {name} ({type}) {time} 🙏",
@@ -716,7 +712,6 @@ RESPONSES = {
         "መቼ ነው ቤተሰብ 🙏 ተሳስተሃል ቼክ አድርግ",
         "ቤተሰብ ያ ቁጥር ሞክረሃል አላውቅም ቼክ አድርግ 🙏",
     ],
-    # ← ለውጥ 4C: winner_greeting responses
     "winner_greeting": [
         "እንኳን ደስ አለክ ወዳጄ 🥰",
         "congraaaaa ቤተሰብ 🥰",
@@ -756,8 +751,8 @@ def get_response(
         "resend_remaining": False,
         "cancel_number": None,
         "change_number": None,
-        "type_change": None,        # ← ለውጥ 2F: አዲስ key
-        "why_not_registered": None, # ← ለውጥ 3H: አዲስ key
+        "type_change": None,
+        "why_not_registered": None,
     }
 
     if registration_result is not None:
@@ -784,7 +779,8 @@ def get_response(
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
         if payment_info:
-            result["reply"] = payment_info
+            # Account lines ብቻ ለይቶ ይላካል
+            result["reply"] = _extract_account_lines(payment_info)
         return result
 
     if intent == "change_number":
@@ -802,7 +798,6 @@ def get_response(
             )
         return result
 
-    # ← ለውጥ 2F: type_change handler
     if intent == "type_change":
         type_result = detect_type_change(text)
         if type_result:
@@ -811,7 +806,6 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["type_change_ack"])
         return result
 
-    # ← ለውጥ 3H: why_not_registered handler
     if intent == "why_not_registered":
         numbers_found = re.findall(r"\d+", text)
         target_num = int(numbers_found[0]) if numbers_found else None
@@ -874,8 +868,12 @@ def get_response(
 
     if intent == "nekay_query":
         if nekay_list:
-            result["reply"] = random.choice(RESPONSES["nekay_exists"])
-            result["resend_nekay"] = True
+            # ✅ Fix: አሁን ያለውን nekay list ቀጥታ ያሳያል
+            from board import build_nekay as _build_nekay
+            nekay_text = _build_nekay(nekay_list)
+            ack = random.choice(RESPONSES["nekay_exists"])
+            result["reply"] = f"{ack}\n\n{nekay_text}"
+            result["resend_nekay"] = False
         elif remaining_count > 0:
             result["reply"] = random.choice(RESPONSES["nekay_none_remaining"])
             result["resend_remaining"] = True
@@ -909,39 +907,3 @@ def get_response(
         return result
 
     return result
-
-
-# ================================================================
-# QUICK TEST
-# ================================================================
-
-if __name__ == "__main__":
-    test_cases = [
-        ("ሰላም ወዳጄ እንዴት ነህ", "greeting"),
-        ("05 ቁጥሩን አስቀምጥልኝ እባክህ", "booking"),
-        ("ነቃይ ቁጥሮች ምን አለ", "nekay_query"),
-        ("ቁጥር 07 ተያዘ ወይ", "specific_number_query"),
-        ("ቁጥር 03 አልፈልግም ሰርዝ", "cancel_number"),
-        ("ቁጥር 03 ወደ 07 ቀይርልኝ", "change_number"),
-        ("telebirr ቁጥርህን ላክ", "account_query"),
-        ("ከፍዬ ቁጥሬ ተነቀለ ለምን", "complaint_paid_removed"),
-        ("ለምን ሸጥህ ቁጥሬን", "complaint_why_sold"),
-        ("ቀሪ ቁጥሮች ምን አለ ስንት ቀረ", "remaining_query"),
-        ("06 በሙሉ አርግ", "type_change"),
-        ("11 begmash areg", "type_change"),
-        ("ለምን አልያዝክልኝም 05", "why_not_registered"),
-    ]
-
-    print("\n" + "="*60)
-    print("🧪 TEST RESULTS")
-    print("="*60)
-    correct = 0
-    for text, expected in test_cases:
-        intent, score = detect_intent(text)
-        status = "✅" if intent == expected else "❌"
-        if intent == expected:
-            correct += 1
-        print(f"{status} [{score:.3f}] '{text}'")
-        print(f"   Expected: {expected} | Got: {intent}")
-    print("="*60)
-    print(f"Accuracy: {correct}/{len(test_cases)} = {correct/len(test_cases)*100:.0f}%")
