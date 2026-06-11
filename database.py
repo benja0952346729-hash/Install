@@ -292,6 +292,8 @@ def init_db():
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS sent BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_enabled BOOLEAN DEFAULT TRUE;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_minutes NUMERIC DEFAULT 2;")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("""
                 DO $$
@@ -591,14 +593,17 @@ def save_settings(data: dict, group_id: int = None):
     cur.execute("""
         INSERT INTO game_settings
         (total_numbers, numbers_per_person, price_full, price_half,
-         prize_1st, prize_2nd, prize_3rd, payment_info, group_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+         prize_1st, prize_2nd, prize_3rd, payment_info, group_id,
+         countdown_enabled, countdown_minutes)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
     """, (
         data["total_numbers"], data["numbers_per_person"],
         data["price_full"], data.get("price_half"),
         data["prize_1st"], data.get("prize_2nd"), data.get("prize_3rd"),
-        data["payment_info"], group_id
+        data["payment_info"], group_id,
+        data.get("countdown_enabled", True),
+        data.get("countdown_minutes", 2),
     ))
     game_id = cur.fetchone()[0]
     conn.commit()
@@ -629,7 +634,7 @@ def get_active_settings(group_id: int = None):
     cols = ["id", "total_numbers", "numbers_per_person", "price_full", "price_half",
             "prize_1st", "prize_2nd", "prize_3rd", "payment_info",
             "board_message_id", "remaining_message_id", "group_id",
-            "is_active", "created_at"]
+            "is_active", "created_at", "countdown_enabled", "countdown_minutes"]
     return dict(zip(cols, row))
 
 
