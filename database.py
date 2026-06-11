@@ -294,7 +294,19 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_enabled BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_minutes NUMERIC DEFAULT 2;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS game_rule TEXT;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
+            # Warning media table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS warning_media (
+                    id SERIAL PRIMARY KEY,
+                    minutes NUMERIC NOT NULL UNIQUE,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT DEFAULT 'photo',
+                    added_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
             cur.execute("""
                 DO $$
                 BEGIN
@@ -594,8 +606,8 @@ def save_settings(data: dict, group_id: int = None):
         INSERT INTO game_settings
         (total_numbers, numbers_per_person, price_full, price_half,
          prize_1st, prize_2nd, prize_3rd, payment_info, group_id,
-         countdown_enabled, countdown_minutes)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         countdown_enabled, countdown_minutes, game_rule, slot_symbol)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
     """, (
         data["total_numbers"], data["numbers_per_person"],
@@ -604,6 +616,8 @@ def save_settings(data: dict, group_id: int = None):
         data["payment_info"], group_id,
         data.get("countdown_enabled", True),
         data.get("countdown_minutes", 2),
+        data.get("game_rule") or None,
+        data.get("slot_symbol") or "#",
     ))
     game_id = cur.fetchone()[0]
     conn.commit()
@@ -634,12 +648,71 @@ def get_active_settings(group_id: int = None):
     cols = ["id", "total_numbers", "numbers_per_person", "price_full", "price_half",
             "prize_1st", "prize_2nd", "prize_3rd", "payment_info",
             "board_message_id", "remaining_message_id", "group_id",
-            "is_active", "created_at", "countdown_enabled", "countdown_minutes"]
+            "is_active", "created_at", "countdown_enabled", "countdown_minutes",
+            "game_rule", "slot_symbol"]
     return dict(zip(cols, row))
 
 
-def update_board_message_id(game_id, msg_id):
+# ============================================================
+# WARNING MEDIA
+# ============================================================
+
+def set_warning_media(minutes: float, file_id: str, media_type: str, set_by: int):
+    """Main admin warning media ያስቀምጣል"""
     conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO warning_media (minutes, file_id, media_type, set_by)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (minutes) DO UPDATE
+            SET file_id=EXCLUDED.file_id,
+                media_type=EXCLUDED.media_type,
+                set_by=EXCLUDED.set_by,
+                created_at=NOW()
+    """, (minutes, file_id, media_type, set_by))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_warning_media(minutes: float) -> dict:
+    """ለዚህ ደቂቃ warning media ያምጣል — exact ካልሆነ closest ይፈልጋል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT minutes, file_id, media_type
+        FROM warning_media
+        ORDER BY ABS(minutes - %s) ASC
+        LIMIT 1
+    """, (minutes,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {"minutes": float(row[0]), "file_id": row[1], "media_type": row[2]}
+
+
+def get_all_warning_media() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT minutes, file_id, media_type FROM warning_media ORDER BY minutes")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"minutes": float(r[0]), "file_id": r[1], "media_type": r[2]} for r in rows]
+
+
+def delete_warning_media(minutes: float):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM warning_media WHERE minutes=%s", (minutes,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def update_board_message_id(game_id, msg_id):    conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE game_settings SET board_message_id=%s WHERE id=%s", (msg_id, game_id))
     conn.commit()
