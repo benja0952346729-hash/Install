@@ -868,12 +868,8 @@ def get_response(
 
     if intent == "nekay_query":
         if nekay_list:
-            # ✅ Fix: አሁን ያለውን nekay list ቀጥታ ያሳያል
-            from board import build_nekay as _build_nekay
-            nekay_text = _build_nekay(nekay_list)
-            ack = random.choice(RESPONSES["nekay_exists"])
-            result["reply"] = f"{ack}\n\n{nekay_text}"
-            result["resend_nekay"] = False
+            result["reply"] = random.choice(RESPONSES["nekay_exists"])
+            result["resend_nekay"] = True
         elif remaining_count > 0:
             result["reply"] = random.choice(RESPONSES["nekay_none_remaining"])
             result["resend_remaining"] = True
