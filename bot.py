@@ -57,12 +57,13 @@ from responder import get_response, RESPONSES
 import random
 
 (
+    ASK_RULES,
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
     ASK_PRIZE_3, ASK_PAYMENT, ASK_COUNTDOWN_ENABLED,
     ASK_COUNTDOWN_MINUTES,
     ASK_SEND_PLACE, ASK_SEND_AMOUNT
-) = range(12)
+) = range(13)
 
 pending_ambiguous = {}
 active_countdowns = {}
@@ -379,34 +380,30 @@ async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     ctx.user_data["setup_group_id"] = group_id
 
-    # ❗ Rules preface — admin ይህን ያያል ከላይ፣ reply ያደርጋል
-    rules_text = (
-        "📋 **ጨዋታ Rules / Settings**\n\n"
-        "ከዚህ በታች ያሉትን በ reply ይሙሉ (በ order):\n\n"
-        "1️⃣ ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)\n"
-        "2️⃣ ለ1 ሰው ስንት ቁጥሮች? (ለምሳሌ: 5)\n"
-        "3️⃣ ሙሉ ዋጋ ስንት ብር?\n"
-        "4️⃣ ግማሽ ዋጋ ካለ ብር (ወይም 'አይደለም')\n"
-        "5️⃣ 1ኛ ሽልማት ስንት ብር?\n"
-        "6️⃣ 2ኛ ሽልማት? (ወይም 'አይደለም')\n"
-        "7️⃣ 3ኛ ሽልማት? (ወይም 'አይደለም')\n"
-        "8️⃣ Payment info (CBE, Telebirr...):\n"
-        "9️⃣ Countdown አለ? (አዎ/አይደለም)\n"
-        "🔟 Countdown minutes (0.5 - 10)\n\n"
-        "💡 **ምሳሌ:**\n"
-        "`100`\n"
-        "`5`\n"
-        "`50`\n"
-        "`25`\n"
-        "`5000`\n"
-        "`2000`\n"
-        "`አይደለም`\n"
-        "`CBE: 1000123456789`\n"
-        "`አዎ`\n"
-        "`2`\n\n"
-        "⏭️ ለመጀመሪያ ጥያቄ ይመልሱ: **ስንት ቁጥሮች አሉ?**"
+    # ❗ Step 1: Rules text — admin የፈለገውን ራሱ ይጽፋል
+    await update.message.reply_text(
+        "📋 **ጨዋታ Rules ጻፍ**\n\n"
+        "ለምሳሌ:\n"
+        "`በ 400 ብር 5 ቁጥሮችን በተከታታይ በመያዝ እድሎን ይሞክሩ`\n"
+        "`ለ 20 ሰው ብቻ ፈጣን ዕድል`\n"
+        "`መደብ 👉በ 400 ብር`\n"
+        "`👉ግማሽ 200 ብር`\n"
+        "`1ኛ 5000 ብር`\n"
+        "`2ኛ 1000 ብር`\n"
+        "`3ኛ 400 ብር`\n\n"
+        "⏭️ Rules ሙሉ ለማይፈልግ 'skip' ወይም 'አይደለም' ጻፍ",
+        parse_mode="Markdown"
     )
-    await update.message.reply_text(rules_text, parse_mode="Markdown")
+    return ASK_RULES
+
+
+async def ask_rules(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Step 1: Rules text — admin የፈለገውን ራሱ ይጽፋል"""
+    text = update.message.text.strip()
+    if text.lower() in ["አይደለም", "aydelem", "no", "skip", "ዝለል"]:
+        ctx.user_data["rules_text"] = None
+    else:
+        ctx.user_data["rules_text"] = text
     await update.message.reply_text("🎮 ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)")
     return ASK_TOTAL
 
@@ -537,6 +534,9 @@ async def ask_countdown_minutes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _finish_setgame(update, ctx):
     setup_group_id = ctx.user_data.get("setup_group_id")
+    rules_text = ctx.user_data.get("rules_text")
+
+    # ❗ Rules text ከሆነ ከላይ ላይ — board ላይ edit
     game_id = save_settings(ctx.user_data, group_id=setup_group_id)
 
     settings = get_active_settings(group_id=setup_group_id)
@@ -545,14 +545,23 @@ async def _finish_setgame(update, ctx):
 
     target = setup_group_id or GROUP_ID
     if target:
-        msg = await ctx.bot.send_message(chat_id=target, text=board_text)
+        if rules_text:
+            # Rules ከላይ — board ከዛ ይከተላል
+            full_text = f"📋 **Rules:**\n{rules_text}\n\n{'─' * 20}\n\n{board_text}"
+            msg = await ctx.bot.send_message(
+                chat_id=target, text=full_text, parse_mode="Markdown"
+            )
+        else:
+            msg = await ctx.bot.send_message(chat_id=target, text=board_text)
         update_board_message_id(game_id, msg.message_id)
 
     countdown_status = "✅ On" if ctx.user_data.get("countdown_enabled") else "❌ Off"
     mins = ctx.user_data.get("countdown_minutes", 0)
+    rules_status = "✅" if rules_text else "❌"
     await update.message.reply_text(
         f"✅ Settings ተቀምጧል!\n"
         f"Game ID: {game_id}\n"
+        f"📋 Rules: {rules_status}\n"
         f"⏳ Countdown: {countdown_status}"
         + (f" ({mins} ደቂቃ)" if ctx.user_data.get("countdown_enabled") else "")
     )
@@ -2019,6 +2028,7 @@ def main():
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setgame", setgame_start)],
         states={
+            ASK_RULES: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_rules)],
             ASK_TOTAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_total)],
             ASK_PER_PERSON: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_per_person)],
             ASK_PRICE_FULL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_price_full)],
