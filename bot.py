@@ -229,7 +229,12 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
         try:
             await bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
         except Exception:
-            pass  # ❗ FIX 2: no resend fallback
+            try:
+                await bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+            except Exception:
+                pass
+            new_msg = await bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_msg.message_id)
     else:
         new_msg = await bot.send_message(chat_id=group_id, text=board_text)
         update_board_message_id(game_id, new_msg.message_id)
@@ -546,11 +551,18 @@ async def _finish_setgame(update, ctx):
     target = setup_group_id or GROUP_ID
     if target:
         if rules_text:
-            # Rules ከላይ — board ከዛ ይከተላል
-            full_text = f"📋 **Rules:**\n{rules_text}\n\n{'─' * 20}\n\n{board_text}"
-            msg = await ctx.bot.send_message(
-                chat_id=target, text=full_text, parse_mode="Markdown"
-            )
+            # ❗ Markdown escape — admin text ውስጥ special chars fail እንዳይሆን
+            safe_rules = rules_text.replace("*", "").replace("_", "").replace("`", "").replace("[", "")
+            full_text = f"📋 Rules:\n{safe_rules}\n\n{ ' ' * 20 }\n\n{board_text}"
+            try:
+                msg = await ctx.bot.send_message(chat_id=target, text=full_text)
+            except Exception:
+                # ❗ Final fallback — rules alone + board alone
+                try:
+                    await ctx.bot.send_message(chat_id=target, text=f"📋 Rules:\n{safe_rules}")
+                except Exception:
+                    pass
+                msg = await ctx.bot.send_message(chat_id=target, text=board_text)
         else:
             msg = await ctx.bot.send_message(chat_id=target, text=board_text)
         update_board_message_id(game_id, msg.message_id)
@@ -717,7 +729,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 elif resp["reply"]:
                     await msg.reply_text(resp["reply"])
 
-        # ❗ FIX 1: type_change board — edit only, no resend fallback
+        # ❗ FIX 1: type_change board — edit only, resend on fail
         fresh = get_active_settings(group_id=group_id)
         if fresh:
             fresh_taken = get_taken_numbers(game_id)
@@ -732,7 +744,13 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         chat_id=group_id, message_id=fresh_board_msg_id, text=fresh_board
                     )
                 except Exception:
-                    pass  # ❗ FIX 1: resend አይሆንም
+                    # Edit fail — resend (no double board since we delete first)
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=fresh_board_msg_id)
+                    except Exception:
+                        pass
+                    new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
+                    update_board_message_id(game_id, new_msg.message_id)
             else:
                 new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                 update_board_message_id(game_id, new_msg.message_id)
@@ -943,7 +961,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     if remaining_count > 7:
         should_resend = False
 
-    # ❗ FIX 2 & 3: nekay_active branch — board edit only
+    # ❗ FIX 2 & 3: nekay_active branch — board edit, resend on fail
     if game_id in nekay_active:
         if board_msg_id:
             try:
@@ -951,7 +969,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                     chat_id=group_id, message_id=board_msg_id, text=board_text
                 )
             except Exception:
-                pass  # ❗ FIX 2: resend አይሆንም
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
         else:
             new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(game_id, new_board.message_id)
@@ -981,7 +1004,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             nekay_numbers.pop(game_id, None)
             _stop_inactivity_tracker(game_id)
 
-    # ❗ FIX 3: remaining_count <= 7 — crossed_into_low ብቻ resend, ቀሪ edit only
+    # ❗ FIX 3: remaining_count <= 7 — edit, resend on fail
     elif remaining_count <= 7:
         if crossed_into_low:
             # 7 ሲቀር ለመጀመሪያ ጊዜ — delete + resend
@@ -993,14 +1016,18 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(game_id, new_board.message_id)
         else:
-            # edit only
             if board_msg_id:
                 try:
                     await ctx.bot.edit_message_text(
                         chat_id=group_id, message_id=board_msg_id, text=board_text
                     )
                 except Exception:
-                    pass  # ❗ FIX 3: resend አይሆንም
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                    except Exception:
+                        pass
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
             else:
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 update_board_message_id(game_id, new_board.message_id)
@@ -1008,14 +1035,19 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         _reset_inactivity_tracker(ctx.bot, game_id, group_id)
 
     else:
-        # ቀሪ 7+ — edit only
+        # ቀሪ 7+ — edit, resend on fail
         if board_msg_id:
             try:
                 await ctx.bot.edit_message_text(
                     chat_id=group_id, message_id=board_msg_id, text=board_text
                 )
             except Exception:
-                pass  # ❗ FIX 3: resend አይሆንም
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
         else:
             new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(game_id, new_board.message_id)
@@ -1066,7 +1098,13 @@ async def _refresh_board(ctx, settings, group_id=None):
         try:
             await ctx.bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
         except Exception:
-            pass  # ❗ FIX: no resend fallback (keeps single board)
+            # ❗ Edit fail (parse error / too long) — resend to keep message alive
+            try:
+                await ctx.bot.delete_message(chat_id=_group_id, message_id=board_msg_id)
+            except Exception:
+                pass
+            new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
+            update_board_message_id(game_id, new_msg.message_id)
     else:
         new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
         update_board_message_id(game_id, new_msg.message_id)
