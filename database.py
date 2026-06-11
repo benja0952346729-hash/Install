@@ -712,7 +712,8 @@ def delete_warning_media(minutes: float):
     conn.close()
 
 
-def update_board_message_id(game_id, msg_id):    conn = get_conn()
+def update_board_message_id(game_id, msg_id):
+    conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE game_settings SET board_message_id=%s WHERE id=%s", (msg_id, game_id))
     conn.commit()
