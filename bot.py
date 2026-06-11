@@ -1,3 +1,12 @@
+"""
+FULL BOT.PY — with all 4 fixes integrated:
+1. type_change board: edit only, no resend fallback
+2. process_registration nekay_active: edit only
+3. process_registration remaining<=7: edit only (crossed_into_low ብቻ resend)
+4. Countdown double-start: asyncio.Lock race-safe
+5. /setgame: rules preface message ከላይ
+"""
+
 import os
 import logging
 import asyncio
@@ -20,23 +29,15 @@ from database import (
     change_number_type,
     save_failed_attempt, get_failed_attempts,
     get_ungreeted_winner, mark_winner_greeted,
-    # Multi-group
     enable_group, disable_group, is_group_enabled,
     get_enabled_groups, register_group, add_group_admin,
     remove_group_admin, is_group_admin, get_group_admins,
-    # Username tracking
     track_username, get_usernames, mark_usernames_read, clear_usernames,
-    # Activity
     log_activity, get_activity,
-    # DB management
     get_db_status, clear_db_data, check_and_rotate_db,
-    # Winners
     get_recent_winners, mark_winner_sent, cleanup_old_winners,
-    # Balance
     clear_balance_all, clear_balance_by_username,
-    # On/Off
     set_group_active, is_group_active,
-    # Report
     get_report, save_game_report, cleanup_old_reports,
     calculate_game_profit,
 )
@@ -74,8 +75,6 @@ pending_registrations = {}
 
 handled_winner_photos = set()
 
-# ቀሪ 7 ሲቀሩ — inactivity tracker
-# {game_id: {"task": Task, "group_id": int, "last_activity": float}}
 low_remaining_trackers = {}
 
 URGENCY_MESSAGES = [
@@ -86,11 +85,16 @@ URGENCY_MESSAGES = [
 
 
 # ============================================================
-# TYPING INDICATOR — መልስ እስኪታይ ይቀጥላል
+# FIX 4: Countdown lock — race-safe
+# ============================================================
+_countdown_lock = asyncio.Lock()
+
+
+# ============================================================
+# TYPING INDICATOR
 # ============================================================
 
 async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
-    """Typing indicator — stop_event ሲቀናጀ ይቆማል"""
     while not stop_event.is_set():
         try:
             await bot.send_chat_action(chat_id=chat_id, action="typing")
@@ -100,20 +104,14 @@ async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
 
 
 # ============================================================
-# INACTIVITY NOTIFICATION — ቀሪ 7 ሲቀሩ 2 ደቂቃ ማንም ካልገባ
+# INACTIVITY NOTIFICATION
 # ============================================================
 
 async def _inactivity_notify_task(bot, game_id: int, group_id: int):
-    """
-    Loop:
-    2 ደቂቃ ይጠብቃል → notification → 10s → remaining resend
-    → ቁጥሮቹ እስኪያልቁ ወይም tracker እስኪቆም ይደጋገማል
-    """
     try:
         while True:
-            await asyncio.sleep(120)  # 2 ደቂቃ ይጠብቃል
+            await asyncio.sleep(120)
 
-            # Tracker ጠፍቶ ካለ (countdown ወይም newgame) → ይቆማል
             if game_id not in low_remaining_trackers:
                 return
 
@@ -124,17 +122,14 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
             taken = get_taken_numbers(game_id)
             remaining_count = count_remaining(settings, taken)
 
-            # ሁሉም ተያዘ ወይም countdown ጀምሯል → ይቆማል
             if remaining_count == 0 or game_id in active_countdowns:
                 return
 
-            # Notification
             notif = random.choice(URGENCY_MESSAGES)
             await bot.send_message(chat_id=group_id, text=notif)
 
-            await asyncio.sleep(10)  # 10 seconds ቆይቶ remaining resend
+            await asyncio.sleep(10)
 
-            # እንደገና check — ምናልባት ሰው ገብቶ ሊሆን ይችላል
             if game_id not in low_remaining_trackers:
                 return
 
@@ -160,8 +155,6 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
                     rem_msg = await bot.send_message(chat_id=group_id, text=remaining_text)
                     update_remaining_message_id(game_id, rem_msg.message_id)
 
-            # ቀጥሎ loop ይቀጥላል — እንደገና 2 ደቂቃ ይጠብቃል
-
     except asyncio.CancelledError:
         pass
     except Exception as e:
@@ -171,7 +164,6 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
 
 
 def _reset_inactivity_tracker(bot, game_id: int, group_id: int):
-    """ሰው ሲገባ — tracker ሰርዞ እንደገና ይጀምራል"""
     existing = low_remaining_trackers.get(game_id)
     if existing and not existing["task"].done():
         existing["task"].cancel()
@@ -180,14 +172,13 @@ def _reset_inactivity_tracker(bot, game_id: int, group_id: int):
 
 
 def _stop_inactivity_tracker(game_id: int):
-    """Game አልቆ ወይም countdown ሲጀምር — tracker ያጠፋል"""
     existing = low_remaining_trackers.pop(game_id, None)
     if existing and not existing["task"].done():
         existing["task"].cancel()
 
 
 # ============================================================
-# ADMIN CHECK — Main admin OR Group admin
+# ADMIN CHECK
 # ============================================================
 
 def is_main_admin(user_id: int) -> bool:
@@ -195,7 +186,6 @@ def is_main_admin(user_id: int) -> bool:
 
 
 def is_admin(user_id: int, group_id: int = None) -> bool:
-    """Main admin ወይም group admin ነው ወይ?"""
     if user_id in ADMIN_IDS:
         return True
     if group_id:
@@ -238,8 +228,10 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
         try:
             await bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
         except Exception:
-            new_msg = await bot.send_message(chat_id=group_id, text=board_text)
-            update_board_message_id(game_id, new_msg.message_id)
+            pass  # ❗ FIX 2: no resend fallback
+    else:
+        new_msg = await bot.send_message(chat_id=group_id, text=board_text)
+        update_board_message_id(game_id, new_msg.message_id)
 
     rem_msg_id = settings.get("remaining_message_id")
     if rem_msg_id:
@@ -257,7 +249,6 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
         update_remaining_message_id(game_id, None)
         nekay_active.discard(game_id)
         nekay_numbers.pop(game_id, None)
-        # ሁሉም ✅ paid ሲሆን tracker ያቁም
         _stop_inactivity_tracker(game_id)
 
 
@@ -349,6 +340,27 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
 
 # ============================================================
+# FIX 4: Countdown race-safe starter
+# ============================================================
+async def _start_countdown_safe(ctx, game_id, group_id, settings):
+    """asyncio.Lock — concurrent registrations ላይ double countdown አይጀምርም"""
+    if not settings.get("countdown_enabled", True):
+        return
+
+    async with _countdown_lock:
+        if game_id in active_countdowns:
+            return  # ሌላ coroutine አስቀድሎ ጀምሯል
+
+        countdown_mins = settings.get("countdown_minutes") or 2
+        warn_secs = int(float(countdown_mins) * 60)
+
+        task = asyncio.create_task(
+            _countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs)
+        )
+        active_countdowns[game_id] = task
+
+
+# ============================================================
 # /start
 # ============================================================
 
@@ -357,7 +369,7 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# SETGAME CONVERSATION
+# FIX 5: SETGAME — rules preface
 # ============================================================
 
 async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -366,6 +378,35 @@ async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Admin ብቻ ነው!")
         return ConversationHandler.END
     ctx.user_data["setup_group_id"] = group_id
+
+    # ❗ Rules preface — admin ይህን ያያል ከላይ፣ reply ያደርጋል
+    rules_text = (
+        "📋 **ጨዋታ Rules / Settings**\n\n"
+        "ከዚህ በታች ያሉትን በ reply ይሙሉ (በ order):\n\n"
+        "1️⃣ ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)\n"
+        "2️⃣ ለ1 ሰው ስንት ቁጥሮች? (ለምሳሌ: 5)\n"
+        "3️⃣ ሙሉ ዋጋ ስንት ብር?\n"
+        "4️⃣ ግማሽ ዋጋ ካለ ብር (ወይም 'አይደለም')\n"
+        "5️⃣ 1ኛ ሽልማት ስንት ብር?\n"
+        "6️⃣ 2ኛ ሽልማት? (ወይም 'አይደለም')\n"
+        "7️⃣ 3ኛ ሽልማት? (ወይም 'አይደለም')\n"
+        "8️⃣ Payment info (CBE, Telebirr...):\n"
+        "9️⃣ Countdown አለ? (አዎ/አይደለም)\n"
+        "🔟 Countdown minutes (0.5 - 10)\n\n"
+        "💡 **ምሳሌ:**\n"
+        "`100`\n"
+        "`5`\n"
+        "`50`\n"
+        "`25`\n"
+        "`5000`\n"
+        "`2000`\n"
+        "`አይደለም`\n"
+        "`CBE: 1000123456789`\n"
+        "`አዎ`\n"
+        "`2`\n\n"
+        "⏭️ ለመጀመሪያ ጥያቄ ይመልሱ: **ስንት ቁጥሮች አሉ?**"
+    )
+    await update.message.reply_text(rules_text, parse_mode="Markdown")
     await update.message.reply_text("🎮 ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)")
     return ASK_TOTAL
 
@@ -538,32 +579,26 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     group_id = update.effective_chat.id
 
-    # Enabled group check
     if not is_group_enabled(group_id):
         return
 
-    # On/Off check
     if not is_group_active(group_id):
         return
 
-    # Admin በራሱ group ላይ — text ignore (commands ብቻ ይሰራሉ)
     if is_admin(user_id, group_id):
         return
 
-    # Username tracking
     if user.username:
         try:
             track_username(group_id, user.username)
         except Exception:
             pass
 
-    # Activity log
     try:
         log_activity(group_id, messages=1)
     except Exception:
         pass
 
-    # Typing indicator start
     stop_typing = asyncio.Event()
     typing_task = asyncio.create_task(keep_typing(ctx.bot, group_id, stop_typing))
 
@@ -579,25 +614,20 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text, group_id):
-    """ሁሉም logic እዚህ — typing ከ wrapper ይቆጣጠራል"""
-
     if user_id in pending_ambiguous:
         await handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id)
         return
 
-    # DB ሁለት ጊዜ አይጠራም — አንድ ጊዜ fetch
     settings = get_active_settings(group_id=group_id)
     if not settings:
         return
 
     game_id = settings["id"]
 
-    # Winner greeting check
     if get_ungreeted_winner(game_id, user_id):
         mark_winner_greeted(user_id)
         await msg.reply_text(random.choice(RESPONSES["winner_greeting"]))
 
-    # Single DB fetch — ሁሉም ቦታ ይጠቀማል
     taken = get_taken_numbers(game_id)
     paid = get_paid_numbers(game_id)
     snap = nekay_numbers.get(game_id, {})
@@ -678,9 +708,9 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 elif resp["reply"]:
                     await msg.reply_text(resp["reply"])
 
+        # ❗ FIX 1: type_change board — edit only, no resend fallback
         fresh = get_active_settings(group_id=group_id)
         if fresh:
-            # Fix 1: type_change board — remaining > 7 ሆነ edit ብቻ
             fresh_taken = get_taken_numbers(game_id)
             fresh_paid = get_paid_numbers(game_id)
             fresh_remaining = count_remaining(fresh, fresh_taken)
@@ -693,8 +723,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         chat_id=group_id, message_id=fresh_board_msg_id, text=fresh_board
                     )
                 except Exception:
-                    new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
-                    update_board_message_id(game_id, new_msg.message_id)
+                    pass  # ❗ FIX 1: resend አይሆንም
             else:
                 new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                 update_board_message_id(game_id, new_msg.message_id)
@@ -809,7 +838,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
 
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
 
-    # Activity
     try:
         log_activity(group_id, registrations=1)
     except Exception:
@@ -870,7 +898,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         else:
             all_taken.append(actual_num)
 
-    # Fresh data after registration
     taken = get_taken_numbers(game_id)
     paid = get_paid_numbers(game_id)
     remaining_count = count_remaining(settings, taken)
@@ -900,34 +927,25 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     board_text = build_board(settings, taken, paid)
     board_msg_id = settings.get("board_message_id")
 
-    # should_resend — 7 እና ከዛ በታች ሲቀሩ ብቻ ወይም every 6 messages
     should_resend = _increment_counter(group_id)
-
-    # Fix 1: 7 ሲቀሩ ለመጀመሪያ ጊዜ ሲደረስ resend
     crossed_into_low = (remaining_before > 7) and (remaining_count <= 7)
     if crossed_into_low:
         should_resend = True
-
-    # ቀሪ 7+ ሲሆን resend አይሁን — edit ብቻ
     if remaining_count > 7:
         should_resend = False
 
+    # ❗ FIX 2 & 3: nekay_active branch — board edit only
     if game_id in nekay_active:
-        if should_resend:
-            if board_msg_id:
-                try:
-                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
-                except Exception:
-                    pass
+        if board_msg_id:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=group_id, message_id=board_msg_id, text=board_text
+                )
+            except Exception:
+                pass  # ❗ FIX 2: resend አይሆንም
+        else:
             new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(game_id, new_board.message_id)
-        else:
-            if board_msg_id:
-                try:
-                    await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
-                except Exception:
-                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                    update_board_message_id(game_id, new_board.message_id)
 
         for num, is_half in registered:
             if num in snap:
@@ -952,11 +970,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             update_remaining_message_id(game_id, None)
             nekay_active.discard(game_id)
             nekay_numbers.pop(game_id, None)
-            # ነቃይ ሁሉም ሲያዙ tracker ያቁም
             _stop_inactivity_tracker(game_id)
 
+    # ❗ FIX 3: remaining_count <= 7 — crossed_into_low ብቻ resend, ቀሪ edit only
     elif remaining_count <= 7:
-        if should_resend:
+        if crossed_into_low:
+            # 7 ሲቀር ለመጀመሪያ ጊዜ — delete + resend
             if board_msg_id:
                 try:
                     await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
@@ -965,37 +984,38 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(game_id, new_board.message_id)
         else:
+            # edit only
             if board_msg_id:
                 try:
-                    await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+                    await ctx.bot.edit_message_text(
+                        chat_id=group_id, message_id=board_msg_id, text=board_text
+                    )
                 except Exception:
-                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                    update_board_message_id(game_id, new_board.message_id)
+                    pass  # ❗ FIX 3: resend አይሆንም
+            else:
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
         await _send_remaining(ctx, settings, group_id)
-
-        # Fix 2: ቀሪ 7 ሲሆን inactivity tracker ይጀምራል/ይሰርዛል
         _reset_inactivity_tracker(ctx.bot, game_id, group_id)
 
     else:
-        # ቀሪ 7+ — edit ብቻ፣ resend አይሁን
+        # ቀሪ 7+ — edit only
         if board_msg_id:
             try:
-                await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+                await ctx.bot.edit_message_text(
+                    chat_id=group_id, message_id=board_msg_id, text=board_text
+                )
             except Exception:
-                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                update_board_message_id(game_id, new_board.message_id)
+                pass  # ❗ FIX 3: resend አይሆንም
+        else:
+            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_board.message_id)
 
-    if remaining_count == 0 and game_id not in active_countdowns:
-        # Countdown on/off check + configurable minutes
+    # ❗ FIX 4: Countdown race-safe
+    if remaining_count == 0:
         _stop_inactivity_tracker(game_id)
-        countdown_enabled = settings.get("countdown_enabled", True)
-        if countdown_enabled:
-            countdown_mins = settings.get("countdown_minutes") or 2
-            warn_secs = int(float(countdown_mins) * 60)
-            task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
-            active_countdowns[game_id] = task
+        await _start_countdown_safe(ctx, game_id, group_id, settings)
 
-    # DB rotation check
     try:
         check_and_rotate_db()
     except Exception:
@@ -1037,8 +1057,7 @@ async def _refresh_board(ctx, settings, group_id=None):
         try:
             await ctx.bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
         except Exception:
-            new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
-            update_board_message_id(game_id, new_msg.message_id)
+            pass  # ❗ FIX: no resend fallback (keeps single board)
     else:
         new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
         update_board_message_id(game_id, new_msg.message_id)
@@ -1236,25 +1255,23 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _refresh_board(ctx, settings, group_id)
 
     reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
-    msg = f"✅ {reg_list} → {user_name} ተመዘገበ!"
+    msg = f"✅ {reg_list} → {user_name} ተመዘበ!"
     if failed:
         msg += f"\n❌ {', '.join(failed)} ቀድሞ ተወስዷል!"
     await update.message.reply_text(msg)
 
 
 # ============================================================
-# MULTI-GROUP COMMANDS — Main admin only
+# MULTI-GROUP COMMANDS
 # ============================================================
 
 async def handle_enable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Main admin — group ያስነሳል"""
     if not is_main_admin(update.effective_user.id):
         await update.message.reply_text("❌ Main admin ብቻ ነው!")
         return
 
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        # ያለው group ላይ ከሆነ
         if update.effective_chat.type != "private":
             gid = update.effective_chat.id
             gname = update.effective_chat.title or str(gid)
@@ -1273,7 +1290,6 @@ async def handle_enable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_disable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Main admin — group ያጠፋል"""
     if not is_main_admin(update.effective_user.id):
         await update.message.reply_text("❌ Main admin ብቻ ነው!")
         return
@@ -1297,7 +1313,6 @@ async def handle_disable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_enablelist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Main admin — enabled groups ዝርዝር"""
     if not is_main_admin(update.effective_user.id):
         return
 
@@ -1316,7 +1331,6 @@ async def handle_enablelist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_addadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Group admin ይጨምራል — main admin ወይም group ውስጥ ሆኖ main admin"""
     if not is_main_admin(update.effective_user.id):
         await update.message.reply_text("❌ Main admin ብቻ ነው!")
         return
@@ -1366,7 +1380,6 @@ async def handle_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_userlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Username list — main admin ወይም group admin"""
     group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1390,7 +1403,6 @@ async def handle_userlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_clearusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Username list ያጸዳል"""
     group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1406,7 +1418,6 @@ async def handle_clearusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Enabled groups activity — main admin"""
     if not is_main_admin(update.effective_user.id):
         return
 
@@ -1435,7 +1446,6 @@ async def handle_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_dbstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """DB status — main admin"""
     if not is_main_admin(update.effective_user.id):
         return
 
@@ -1455,7 +1465,6 @@ async def handle_dbstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_dbclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """DB data ያጸዳል (username ሳይነካ) — main admin"""
     if not is_main_admin(update.effective_user.id):
         return
 
@@ -1466,7 +1475,8 @@ async def handle_dbclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         db_num = int(parts[1])
-        if db_num < 1 or db_num > len(get_all_db_urls() if True else []):
+        from config import DATABASE_URLS
+        if db_num < 1 or db_num > len(DATABASE_URLS):
             await update.message.reply_text(f"❌ DB{db_num} የለም!")
             return
         clear_db_data(db_num)
@@ -1475,17 +1485,11 @@ async def handle_dbclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
 
 
-def get_all_db_urls():
-    from config import DATABASE_URLS
-    return DATABASE_URLS
-
-
 # ============================================================
 # WINNER COMMANDS
 # ============================================================
 
 async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Winner history — group admin የራሱን group ብቻ"""
     group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1515,7 +1519,6 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n\n".join(lines))
 
-    # Cleanup old winners
     try:
         cleanup_old_winners()
     except Exception:
@@ -1527,7 +1530,6 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Bot on ያደርጋል"""
     group_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1536,7 +1538,6 @@ async def handle_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Bot off ያደርጋል"""
     group_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1549,7 +1550,6 @@ async def handle_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Balance ያጸዳል — ሁሉም ወይም @username"""
     group_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1573,7 +1573,6 @@ async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Real-time report — last 24hr"""
     group_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, group_id):
         return
@@ -1639,7 +1638,6 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     settings = get_active_settings(group_id=group_id)
     game_id = settings["id"] if settings else None
 
-    # Username tracking
     if update.effective_user.username:
         try:
             track_username(group_id, update.effective_user.username)
@@ -1686,7 +1684,6 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
     game_id = settings["id"]
     _group_id = group_id or settings.get("group_id") or GROUP_ID
 
-    # Game profit ያስቀምጣል (15+ registered ከሆነ)
     try:
         profit_data = calculate_game_profit(game_id)
         if profit_data and profit_data.get("counted") and _group_id:
@@ -1721,7 +1718,7 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
 
 
 # ============================================================
-# /send CONVERSATION — per group isolated
+# /send CONVERSATION
 # ============================================================
 
 async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1731,9 +1728,6 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    # Group ማንነቱን ማወቅ — ctx.args ወይም previous context
-    # ለ simplicity: admin የሆነበትን groups ይፈልጋል
-    # Main admin ሁሉንም ያያል ብቻ የራሱን group
     parts = update.message.text.strip().split()
     group_id = None
     if len(parts) > 1:
@@ -1743,7 +1737,6 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             pass
 
     if not group_id:
-        # Admin የሆነበትን groups ይፈልጋል
         enabled = get_enabled_groups()
         admin_groups = []
         for g in enabled:
@@ -1794,7 +1787,6 @@ async def _send_show_places(update, ctx, group_id: int):
 
 
 async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # Group selection ከሆነ
     if ctx.user_data.get("awaiting_group_id"):
         try:
             group_id = int(update.message.text.strip())
@@ -1824,7 +1816,6 @@ async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {place}ኛ winner አልተመዘገበም!")
         return ConversationHandler.END
 
-    # Group isolation — winner የዚሁ group ብቻ
     if winner.get("group_id") and winner["group_id"] != group_id:
         await update.message.reply_text("❌ ይህ winner የዚህ group አይደለም!")
         return ConversationHandler.END
@@ -1872,7 +1863,6 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ]
     await update.message.reply_text("\n".join(lines))
 
-    # Group ላይ announcement
     if group_id:
         try:
             announcement = (
@@ -1958,7 +1948,6 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 async def handle_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Bot group ውስጥ ሲጨመር ይመዘግባል"""
     chat = update.effective_chat
     if chat.type in ("group", "supergroup"):
         try:
@@ -2063,7 +2052,6 @@ def main():
     app.add_handler(CommandHandler("newgame", handle_newgame))
     app.add_handler(send_conv)
 
-    # Multi-group commands (main admin)
     app.add_handler(CommandHandler("enable", handle_enable))
     app.add_handler(CommandHandler("disable", handle_disable))
     app.add_handler(CommandHandler("enablelist", handle_enablelist))
@@ -2073,24 +2061,18 @@ def main():
     app.add_handler(CommandHandler("dbstatus", handle_dbstatus))
     app.add_handler(CommandHandler("dbclear", handle_dbclear))
 
-    # Username commands
     app.add_handler(CommandHandler("userlist", handle_userlist))
     app.add_handler(CommandHandler("clearusers", handle_clearusers))
 
-    # Winner command
     app.add_handler(CommandHandler("winners", handle_winners))
 
-    # On/Off commands
     app.add_handler(CommandHandler("on", handle_on))
     app.add_handler(CommandHandler("off", handle_off))
 
-    # Balance clear
     app.add_handler(CommandHandler("clearbalance", handle_clearbalance))
 
-    # Report
     app.add_handler(CommandHandler("report", handle_report))
 
-    # Photo & messages
     app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.GROUPS,
         handle_group_photo
@@ -2100,7 +2082,6 @@ def main():
         handle_group_message
     ))
 
-    # Bot added to group
     from telegram.ext import ChatMemberHandler
     app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
 
@@ -2110,20 +2091,17 @@ def main():
     global _bot_instance
     _bot_instance = app.bot
 
-    # Daily report scheduler — ከምሽቱ 5 (11 PM UTC+3 = 20:00 UTC)
     async def _daily_report_scheduler():
         import pytz
         et_tz = pytz.timezone("Africa/Addis_Ababa")
         while True:
             now = datetime.now(et_tz)
-            # ከምሽቱ 5 = 23:00 ET
             target = now.replace(hour=23, minute=0, second=0, microsecond=0)
             if now >= target:
                 target = target + timedelta(days=1)
             wait_secs = (target - now).total_seconds()
             await asyncio.sleep(wait_secs)
 
-            # ሁሉም enabled groups ላይ report ይላካል
             try:
                 groups = get_enabled_groups()
                 for g in groups:
