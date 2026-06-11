@@ -292,6 +292,7 @@ def init_db():
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS sent BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("""
                 DO $$
                 BEGIN
@@ -1483,3 +1484,273 @@ def mark_winner_greeted(telegram_id: int):
     conn.commit()
     cur.close()
     conn.close()
+
+
+# ============================================================
+# BALANCE CLEAR
+# ============================================================
+
+def clear_balance_all(group_id: int):
+    """Group ውስጥ ሁሉም balance ያጸዳል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE user_balance SET balance=0, updated_at=NOW()
+        WHERE game_id IN (
+            SELECT id FROM game_settings WHERE group_id=%s
+        )
+    """, (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def clear_balance_by_username(group_id: int, username: str) -> bool:
+    """አንድ user balance ያጸዳል — username ይፈልጋል"""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Username → user_id ከ group_members
+    cur.execute("""
+        SELECT gm.username, r.user_id
+        FROM group_members gm
+        JOIN registrations r ON r.user_name = gm.username
+        JOIN game_settings gs ON gs.id = r.game_id
+        WHERE gm.group_id=%s AND LOWER(gm.username)=LOWER(%s)
+        LIMIT 1
+    """, (group_id, username.lstrip("@")))
+    row = cur.fetchone()
+
+    if not row:
+        cur.close()
+        conn.close()
+        return False
+
+    user_id = row[1]
+    cur.execute("""
+        UPDATE user_balance SET balance=0, updated_at=NOW()
+        WHERE telegram_id=%s AND game_id IN (
+            SELECT id FROM game_settings WHERE group_id=%s
+        )
+    """, (user_id, group_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+# ============================================================
+# GROUP ON/OFF
+# ============================================================
+
+def set_group_active(group_id: int, is_active: bool):
+    """Group bot on/off"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE groups SET is_active=%s WHERE group_id=%s
+    """, (is_active, group_id))
+    if cur.rowcount == 0:
+        cur.execute("""
+            INSERT INTO groups (group_id, is_enabled, is_active)
+            VALUES (%s, TRUE, %s)
+            ON CONFLICT (group_id) DO UPDATE SET is_active=EXCLUDED.is_active
+        """, (group_id, is_active))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def is_group_active(group_id: int) -> bool:
+    """Group bot on ነው ወይ?"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT is_active FROM groups WHERE group_id=%s
+    """, (group_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row is None:
+        return False
+    # is_active column የለም ከሆነ default True
+    return bool(row[0]) if row[0] is not None else True
+
+
+# ============================================================
+# REPORT
+# ============================================================
+
+def save_game_report(group_id: int, game_id: int, total_bet: float,
+                     prize_total: float, profit: float, registered_count: int):
+    """Game አልቆ report ያስቀምጣል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS game_reports (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            game_id INT,
+            total_bet NUMERIC DEFAULT 0,
+            prize_total NUMERIC DEFAULT 0,
+            profit NUMERIC DEFAULT 0,
+            registered_count INT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        INSERT INTO game_reports
+        (group_id, game_id, total_bet, prize_total, profit, registered_count)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (group_id, game_id, total_bet, prize_total, profit, registered_count))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_report(group_id: int) -> dict:
+    """Last 24 ሰዓት report — real-time"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=24)
+
+    # Game reports table ካለ
+    try:
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(total_bet),0),
+                   COALESCE(SUM(prize_total),0), COALESCE(SUM(profit),0),
+                   COALESCE(SUM(registered_count),0)
+            FROM game_reports
+            WHERE group_id=%s AND created_at >= %s
+        """, (group_id, cutoff))
+        row = cur.fetchone()
+        games_count = int(row[0] or 0)
+        total_bet = float(row[1] or 0)
+        prize_total = float(row[2] or 0)
+        profit = float(row[3] or 0)
+        registered_count = int(row[4] or 0)
+    except Exception:
+        games_count = total_bet = prize_total = profit = registered_count = 0
+
+    # Active game real-time
+    cur.execute("""
+        SELECT gs.id, gs.price_full, gs.price_half,
+               gs.prize_1st, gs.prize_2nd, gs.prize_3rd,
+               gs.numbers_per_person, gs.total_numbers
+        FROM game_settings gs
+        WHERE gs.group_id=%s AND gs.is_active=TRUE
+        ORDER BY gs.id DESC LIMIT 1
+    """, (group_id,))
+    active = cur.fetchone()
+
+    active_data = None
+    if active:
+        (game_id, price_full, price_half,
+         prize_1st, prize_2nd, prize_3rd,
+         per_person, total_numbers) = active
+
+        price_full = float(price_full or 0)
+        prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
+
+        # Filled groups — half든 full든 አንድ group ነው
+        cur.execute("""
+            SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
+        """, (game_id,))
+        filled_groups = cur.fetchone()[0] or 0
+
+        # Total registered slots
+        cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
+        total_slots = cur.fetchone()[0] or 0
+
+        total_bet = filled_groups * price_full
+        active_profit = total_bet - prize_total if total_slots >= 15 else 0
+
+        active_data = {
+            "game_id": game_id,
+            "total_slots": total_slots,
+            "filled_groups": filled_groups,
+            "total_bet": total_bet,
+            "prize_total": prize_total,
+            "profit": active_profit,
+            "counted": total_slots >= 15,
+        }
+
+    cur.close()
+    conn.close()
+
+    return {
+        "games_count": games_count,
+        "total_bet": total_bet,
+        "prize_total": prize_total,
+        "profit": profit,
+        "registered_count": registered_count,
+        "active": active_data,
+    }
+
+
+def cleanup_old_reports():
+    """24 ሰዓት ያለፈ reports ያጸዳል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=24)
+    try:
+        cur.execute("DELETE FROM game_reports WHERE created_at < %s", (cutoff,))
+        conn.commit()
+    except Exception:
+        pass
+    cur.close()
+    conn.close()
+
+
+def calculate_game_profit(game_id: int) -> dict:
+    """Game አልቆ profit ያሰላል — filled groups × price_full"""
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT price_full, price_half, prize_1st, prize_2nd, prize_3rd,
+               numbers_per_person, total_numbers, group_id
+        FROM game_settings WHERE id=%s
+    """, (game_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {}
+
+    price_full, price_half, prize_1st, prize_2nd, prize_3rd, \
+        per_person, total_numbers, group_id = row
+
+    price_full = float(price_full or 0)
+    prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
+
+    # Filled groups — half든 full든 አንድ group ነው
+    total_groups = total_numbers // per_person if per_person else total_numbers
+
+    # ስንት groups ቢያንስ አንድ slot ተይዟል
+    cur.execute("""
+        SELECT COUNT(DISTINCT number) FROM registrations
+        WHERE game_id=%s
+    """, (game_id,))
+    filled_groups = cur.fetchone()[0] or 0
+
+    # Total registered slots
+    cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
+    registered_count = cur.fetchone()[0] or 0
+
+    total_bet = filled_groups * price_full
+    profit = total_bet - prize_total
+
+    cur.close()
+    conn.close()
+
+    return {
+        "game_id": game_id,
+        "group_id": group_id,
+        "filled_groups": filled_groups,
+        "total_bet": total_bet,
+        "prize_total": prize_total,
+        "profit": profit,
+        "registered_count": registered_count,
+        "counted": registered_count >= 15,
+    }
