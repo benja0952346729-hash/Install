@@ -58,9 +58,10 @@ import random
 (
     ASK_TOTAL, ASK_PER_PERSON, ASK_PRICE_FULL,
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
-    ASK_PRIZE_3, ASK_PAYMENT,
+    ASK_PRIZE_3, ASK_PAYMENT, ASK_COUNTDOWN_ENABLED,
+    ASK_COUNTDOWN_MINUTES,
     ASK_SEND_PLACE, ASK_SEND_AMOUNT
-) = range(10)
+) = range(12)
 
 pending_ambiguous = {}
 active_countdowns = {}
@@ -282,7 +283,6 @@ def _build_nekay_from_snap(snap: dict) -> list:
 
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
     warn_msg = await bot.send_message(chat_id=group_id, text=build_warning())
-
     interval = 3
     steps = warn_seconds // interval
     total_bars = 12
@@ -454,6 +454,47 @@ async def ask_prize_3(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["payment_info"] = update.message.text.strip()
+    await update.message.reply_text(
+        "⏳ ተነቃይ countdown አለ?\n"
+        "(አዎ / አይደለም)"
+    )
+    return ASK_COUNTDOWN_ENABLED
+
+
+async def ask_countdown_enabled(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.strip().lower()
+    yes = text in ["አዎ", "awo", "yes", "aha", "አዎን"]
+    ctx.user_data["countdown_enabled"] = yes
+
+    if yes:
+        await update.message.reply_text(
+            "⏱️ ስንት ደቂቃ?\n"
+            "0.5 = 30 ሰከንድ\n"
+            "1 = 1 ደቂቃ\n"
+            "2 = 2 ደቂቃ\n"
+            "5 = 5 ደቂቃ\n"
+            "10 = 10 ደቂቃ\n"
+            "(0.5 እስከ 10)"
+        )
+        return ASK_COUNTDOWN_MINUTES
+    else:
+        ctx.user_data["countdown_minutes"] = 0
+        return await _finish_setgame(update, ctx)
+
+
+async def ask_countdown_minutes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        mins = float(update.message.text.strip())
+        if mins < 0.5 or mins > 10:
+            raise ValueError
+        ctx.user_data["countdown_minutes"] = mins
+    except ValueError:
+        await update.message.reply_text("❌ 0.5 እስከ 10 ብቻ ጻፍ!")
+        return ASK_COUNTDOWN_MINUTES
+    return await _finish_setgame(update, ctx)
+
+
+async def _finish_setgame(update, ctx):
     setup_group_id = ctx.user_data.get("setup_group_id")
     game_id = save_settings(ctx.user_data, group_id=setup_group_id)
 
@@ -466,7 +507,14 @@ async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         msg = await ctx.bot.send_message(chat_id=target, text=board_text)
         update_board_message_id(game_id, msg.message_id)
 
-    await update.message.reply_text(f"✅ Settings ተቀምጧል!\nGame ID: {game_id}")
+    countdown_status = "✅ On" if ctx.user_data.get("countdown_enabled") else "❌ Off"
+    mins = ctx.user_data.get("countdown_minutes", 0)
+    await update.message.reply_text(
+        f"✅ Settings ተቀምጧል!\n"
+        f"Game ID: {game_id}\n"
+        f"⏳ Countdown: {countdown_status}"
+        + (f" ({mins} ደቂቃ)" if ctx.user_data.get("countdown_enabled") else "")
+    )
     return ConversationHandler.END
 
 
@@ -938,10 +986,14 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 update_board_message_id(game_id, new_board.message_id)
 
     if remaining_count == 0 and game_id not in active_countdowns:
-        # Countdown ሲጀምር inactivity tracker ያቁም
+        # Countdown on/off check + configurable minutes
         _stop_inactivity_tracker(game_id)
-        task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id))
-        active_countdowns[game_id] = task
+        countdown_enabled = settings.get("countdown_enabled", True)
+        if countdown_enabled:
+            countdown_mins = settings.get("countdown_minutes") or 2
+            warn_secs = int(float(countdown_mins) * 60)
+            task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
+            active_countdowns[game_id] = task
 
     # DB rotation check
     try:
@@ -1986,6 +2038,8 @@ def main():
             ASK_PRIZE_2: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_2)],
             ASK_PRIZE_3: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_3)],
             ASK_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_payment)],
+            ASK_COUNTDOWN_ENABLED: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_countdown_enabled)],
+            ASK_COUNTDOWN_MINUTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_countdown_minutes)],
         },
         fallbacks=[CommandHandler("cancel", cancel_setup)],
     )
