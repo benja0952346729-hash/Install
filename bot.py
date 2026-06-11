@@ -553,7 +553,7 @@ async def _finish_setgame(update, ctx):
         if rules_text:
             # ❗ Markdown escape — admin text ውስጥ special chars fail እንዳይሆን
             safe_rules = rules_text.replace("*", "").replace("_", "").replace("`", "").replace("[", "")
-            full_text = f"📋 Rules:\n{safe_rules}\n\n{ ' ' * 20 }\n\n{board_text}"
+            full_text = f"📋 Rules:\n{safe_rules}\n\n{ ' ' * 10 }\n\n{board_text}"
             try:
                 msg = await ctx.bot.send_message(chat_id=target, text=full_text)
             except Exception:
