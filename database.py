@@ -1311,7 +1311,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
 
     cur.close()
     conn.close()
-    return {"status": "ok", "refund": 0, "charge": 0, "is_paid": is_paid}
+    return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
 
 
 # ============================================================
