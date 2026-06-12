@@ -257,7 +257,7 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
 
 def _increment_counter(group_id: int) -> bool:
     msg_counter[group_id] = msg_counter.get(group_id, 0) + 1
-    if msg_counter[group_id] >= 6:
+    if msg_counter[group_id] >= 4:
         msg_counter[group_id] = 0
         return True
     return False
@@ -893,6 +893,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     registered = []
     all_taken = []
 
+    # Toggle ("06+" → half↔full) single number ሲጻፍ ብቻ ይሰራል
+    allow_toggle = (len(numbers) == 1)
+
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
         actual_name = parsed_name if parsed_name else user_name
@@ -902,7 +905,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             continue
 
         is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
-        result = register_number(game_id, user_id, actual_name, actual_num, is_half, force=is_nekay)
+        result = register_number(game_id, user_id, actual_name, actual_num, is_half, force=is_nekay, allow_toggle=allow_toggle)
         if result in ["registered", "registered_half"]:
             registered.append((actual_num, is_half))
         elif isinstance(result, dict) and result.get("status") == "ok":
@@ -944,19 +947,20 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     board_text = build_board(settings, taken, paid)
     board_msg_id = settings.get("board_message_id")
 
-    # should_resend — 7 እና ከዛ በታች ሲቀሩ ብቻ ወይም every 6 messages
+    # should_resend — 4 messages ሲሞላ ብቻ resend (ካልሆነ edit)
     should_resend = _increment_counter(group_id)
 
-    # Fix 1: 7 ሲቀሩ ለመጀመሪያ ጊዜ ሲደረስ resend
+    # Fix 1: 7 ሲቀሩ ለመጀመሪያ ጊዜ ሲደረስ resend (nekay active ካልሆነ)
     crossed_into_low = (remaining_before > 7) and (remaining_count <= 7)
-    if crossed_into_low:
+    if crossed_into_low and game_id not in nekay_active:
         should_resend = True
 
-    # ቀሪ 7+ ሲሆን resend አይሁን — edit ብቻ
-    if remaining_count > 7:
+    # ቀሪ 7+ ሲሆን resend አይሁን — edit ብቻ (nekay active ካልሆነ)
+    if remaining_count > 7 and game_id not in nekay_active:
         should_resend = False
 
     if game_id in nekay_active:
+        # Board — 4 messages ሲሞላ ብቻ resend፣ ካልሆነ edit
         if should_resend:
             if board_msg_id:
                 try:
@@ -981,6 +985,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                     del snap[num]
         nekay_numbers[game_id] = snap
 
+        # Nekay list — ሁልጊዜ resend (delete old → send new)
         rem_msg_id = settings.get("remaining_message_id")
         if rem_msg_id:
             try:
