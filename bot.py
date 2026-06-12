@@ -979,7 +979,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     snap = nekay_numbers.get(game_id, {})
     nekay_list = _build_nekay_from_snap(snap)
 
-    reg_result = "registered" if registered else (None if no_change_reply else ("taken" if all_taken else None))
+    # ምንም ለውጥ ካልተደረገ (pure no_change, registration/taken የለም) → "እሺ 🙏" ብቻ
+    if not registered and not all_taken and no_change_reply:
+        await msg.reply_text("እሺ 🙏")
+        return
+
+    reg_result = "registered" if registered else ("taken" if all_taken else None)
 
     resp = get_response(
         text=msg.text or "",
@@ -997,9 +1002,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         await msg.reply_text(resp["reply"])
 
     if not registered:
-        # ምንም ለውጥ ካልተደረገ (no_change) ወይም ሁሉም taken ከሆነ — board update አያስፈልግም
-        if no_change_reply and not all_taken:
-            await msg.reply_text("እሺ 🙏")
         return
 
     # type_change loop ውስጥ ሲጠራ — board update loop ውጪ አንድ ጊዜ ብቻ ይደረጋል
@@ -1022,22 +1024,13 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         should_resend = False
 
     if game_id in nekay_active:
-        # Board — 4 messages ሲሞላ ብቻ resend፣ ካልሆነ edit
-        if should_resend:
-            if board_msg_id:
-                try:
-                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
-                except Exception:
-                    pass
-            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-            update_board_message_id(game_id, new_board.message_id)
-        else:
-            if board_msg_id:
-                try:
-                    await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
-                except Exception:
-                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                    update_board_message_id(game_id, new_board.message_id)
+        # Nekay active ሆኖ ሳለ — board ሁልጊዜ edit ብቻ (resend የለም, duplicate ይከላከላል)
+        if board_msg_id:
+            try:
+                await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+            except Exception:
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
 
         for num, is_half in registered:
             if num in snap:
