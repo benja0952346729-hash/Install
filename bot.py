@@ -59,6 +59,7 @@ import random
 
 pending_ambiguous = {}
 active_countdowns = {}
+countdown_done = set()  # countdown አንድ ጊዜ ካልቃ ድጋሚ አይጀመርም (game_id ቅያሪ ድረስ)
 nekay_active = set()
 nekay_numbers = {}
 msg_counter = {}
@@ -710,13 +711,13 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
 
         fresh = get_active_settings(group_id=group_id)
         if fresh:
-            # Fix 1: type_change board — remaining > 7 ሆነ edit ብቻ
             fresh_taken = get_taken_numbers(game_id)
             fresh_paid = get_paid_numbers(game_id)
             fresh_remaining = count_remaining(fresh, fresh_taken)
             fresh_board = build_board(fresh, fresh_taken, fresh_paid)
             fresh_board_msg_id = fresh.get("board_message_id")
 
+            # Board — edit ብቻ (resend የለም)
             if fresh_board_msg_id:
                 try:
                     await ctx.bot.edit_message_text(
@@ -729,19 +730,50 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                 update_board_message_id(game_id, new_msg.message_id)
 
-            if fresh_remaining <= 7:
-                await _send_remaining(ctx, fresh, group_id)
-                _reset_inactivity_tracker(ctx.bot, game_id, group_id)
+            if game_id in nekay_active:
+                # Nekay active — type change ሲደረግ snap update + nekay list resend
+                snap_fresh = nekay_numbers.get(game_id, {})
+                for num in numbers:
+                    actual_num = get_group_start(num, fresh["numbers_per_person"]) \
+                        if fresh["numbers_per_person"] > 1 else num
+                    if actual_num in snap_fresh:
+                        if target == "half" and snap_fresh[actual_num] == 0:
+                            snap_fresh[actual_num] = 2
+                        elif target == "full":
+                            del snap_fresh[actual_num]
+                nekay_numbers[game_id] = snap_fresh
 
-            # ቁጥሮች ካለቁ countdown ይጀምራል
-            if fresh_remaining == 0 and game_id not in active_countdowns:
-                _stop_inactivity_tracker(game_id)
-                countdown_enabled = fresh.get("countdown_enabled", True)
-                if countdown_enabled:
-                    countdown_mins = fresh.get("countdown_minutes") or 2
-                    warn_secs = int(float(countdown_mins) * 60)
-                    task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
-                    active_countdowns[game_id] = task
+                rem_msg_id = fresh.get("remaining_message_id")
+                if rem_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                    except Exception:
+                        pass
+                if snap_fresh:
+                    nekay_list_f = _build_nekay_from_snap(snap_fresh)
+                    nekay_text_f = build_nekay(nekay_list_f)
+                    new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_f)
+                    update_remaining_message_id(game_id, new_nekay.message_id)
+                else:
+                    update_remaining_message_id(game_id, None)
+                    nekay_active.discard(game_id)
+                    nekay_numbers.pop(game_id, None)
+                    _stop_inactivity_tracker(game_id)
+            else:
+                if fresh_remaining <= 7:
+                    await _send_remaining(ctx, fresh, group_id)
+                    _reset_inactivity_tracker(ctx.bot, game_id, group_id)
+
+                # ቁጥሮች ካለቁ countdown ይጀምራል (አንድ ጊዜ ብቻ)
+                if fresh_remaining == 0 and game_id not in active_countdowns and game_id not in countdown_done:
+                    _stop_inactivity_tracker(game_id)
+                    countdown_enabled = fresh.get("countdown_enabled", True)
+                    if countdown_enabled:
+                        countdown_mins = fresh.get("countdown_minutes") or 2
+                        warn_secs = int(float(countdown_mins) * 60)
+                        task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
+                        active_countdowns[game_id] = task
+                        countdown_done.add(game_id)
         return
 
     # Change number
@@ -1034,7 +1066,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 update_board_message_id(game_id, new_board.message_id)
 
-    if remaining_count == 0 and game_id not in active_countdowns:
+    if remaining_count == 0 and game_id not in active_countdowns and game_id not in countdown_done:
         # Countdown on/off check + configurable minutes
         _stop_inactivity_tracker(game_id)
         countdown_enabled = settings.get("countdown_enabled", True)
@@ -1043,6 +1075,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             warn_secs = int(float(countdown_mins) * 60)
             task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
             active_countdowns[game_id] = task
+            countdown_done.add(game_id)
 
     # DB rotation check
     try:
@@ -1217,6 +1250,7 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nekay_active.discard(settings["id"])
     active_countdowns.pop(settings["id"], None)
     nekay_numbers.pop(settings["id"], None)
+    countdown_done.discard(settings["id"])
     _stop_inactivity_tracker(settings["id"])
 
     rem_msg_id = settings.get("remaining_message_id")
@@ -1865,6 +1899,7 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
     nekay_active.discard(game_id)
     active_countdowns.pop(game_id, None)
     nekay_numbers.pop(game_id, None)
+    countdown_done.discard(game_id)
     _stop_inactivity_tracker(game_id)
 
     rem_msg_id = settings.get("remaining_message_id")
