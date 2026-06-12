@@ -694,7 +694,8 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 await process_registration(
                     ctx, settings,
                     [(actual_num, is_half, None)],
-                    user_id, user_name, group_id, msg
+                    user_id, user_name, group_id, msg,
+                    skip_board_update=True
                 )
             elif not user_owns_number(game_id, user_id, actual_num):
                 await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
@@ -731,6 +732,16 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             if fresh_remaining <= 7:
                 await _send_remaining(ctx, fresh, group_id)
                 _reset_inactivity_tracker(ctx.bot, game_id, group_id)
+
+            # ቁጥሮች ካለቁ countdown ይጀምራል
+            if fresh_remaining == 0 and game_id not in active_countdowns:
+                _stop_inactivity_tracker(game_id)
+                countdown_enabled = fresh.get("countdown_enabled", True)
+                if countdown_enabled:
+                    countdown_mins = fresh.get("countdown_minutes") or 2
+                    warn_secs = int(float(countdown_mins) * 60)
+                    task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
+                    active_countdowns[game_id] = task
         return
 
     # Change number
@@ -872,7 +883,7 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, update.message)
 
 
-async def process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg):
+async def process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg, skip_board_update=False):
     game_id = settings["id"]
     per_person = settings["numbers_per_person"]
 
@@ -924,6 +935,10 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         await msg.reply_text(resp["reply"])
 
     if not registered:
+        return
+
+    # type_change loop ውስጥ ሲጠራ — board update loop ውጪ አንድ ጊዜ ብቻ ይደረጋል
+    if skip_board_update:
         return
 
     board_text = build_board(settings, taken, paid)
