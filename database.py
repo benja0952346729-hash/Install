@@ -815,7 +815,14 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False):
     if owner_row and owner_row[0] == user_id:
         cur.close()
         conn.close()
-        return change_number_type(game_id, user_id, number, "half" if is_half else "full")
+        if is_half:
+            # "+" ካለ → toggle (current state ይቀለበሳል)
+            current_is_half = existing[0][1]
+            target = "full" if current_is_half else "half"
+        else:
+            # "+" ከሌለ → ሁልጊዜ full
+            target = "full"
+        return change_number_type(game_id, user_id, number, target)
 
     if len(existing) == 1 and existing[0][1] == True:
         is_half = True
