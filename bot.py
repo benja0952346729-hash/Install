@@ -707,6 +707,8 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                     await msg.reply_text(
                         random.choice(RESPONSES["type_change_conflict"]).format(num=f"{actual_num:02d}")
                     )
+                elif result_tc["status"] == "no_change":
+                    pass  # ምንም ለውጥ የለም — ምንም reply/board update
                 elif resp["reply"]:
                     await msg.reply_text(resp["reply"])
 
@@ -938,6 +940,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     registered = []
     all_taken = []
+    no_change_reply = False
 
     # Toggle ("06+" → half↔full) single number ሲጻፍ ብቻ ይሰራል
     allow_toggle = (len(numbers) == 1)
@@ -963,6 +966,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                     actual_is_half = n_half
                     break
             registered.append((actual_num, actual_is_half))
+        elif isinstance(result, dict) and result.get("status") == "no_change":
+            # ምንም ለውጥ የለም — board resend/edit አያስፈልግም
+            no_change_reply = True
         else:
             all_taken.append(actual_num)
 
@@ -973,7 +979,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     snap = nekay_numbers.get(game_id, {})
     nekay_list = _build_nekay_from_snap(snap)
 
-    reg_result = "registered" if registered else ("taken" if all_taken else None)
+    reg_result = "registered" if registered else (None if no_change_reply else ("taken" if all_taken else None))
 
     resp = get_response(
         text=msg.text or "",
@@ -991,6 +997,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         await msg.reply_text(resp["reply"])
 
     if not registered:
+        # ምንም ለውጥ ካልተደረገ (no_change) ወይም ሁሉም taken ከሆነ — board update አያስፈልግም
+        if no_change_reply and not all_taken:
+            await msg.reply_text("እሺ 🙏")
         return
 
     # type_change loop ውስጥ ሲጠራ — board update loop ውጪ አንድ ጊዜ ብቻ ይደረጋል
