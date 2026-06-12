@@ -1,7 +1,7 @@
 import re
 import regex  # pip install regex — emoji support ለማስቻል
 
-HALF_WORDS = ["begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ"]
+HALF_WORDS = ["begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ", "begmas", "ግማ", "half"]
 FULL_WORDS = ["bemulu", "mulu", "በሙሉ", "ሙሉ"]
 GLOBAL_HALF_WORDS = ["ሁሉንም በግማሽ", "ሁሉንም ግማሽ", "ሁሉም በግማሽ", "hulunm begmash", "hulunm gmash"]
 GLOBAL_FULL_WORDS = ["ሁሉንም በሙሉ", "ሁሉንም ሙሉ", "ሁሉም ሙሉ", "hulunm bemulu", "hulunm mulu"]
@@ -417,33 +417,3 @@ def parse_numbers(text: str):
 
 def format_number(n: int) -> str:
     return f"{n:02d}"
-
-
-# ================================================================
-# QUICK TEST
-# ================================================================
-if __name__ == "__main__":
-    tests = [
-        ("11 አበበ ቢንያም በል",        [(11, False, "አበበ ቢንያም")]),
-        ("21 ማርቆስ ሰለሞን",           [(21, False, "ማርቆስ ሰለሞን")]),
-        ("41 stotto lemu",          [(41, False, "stotto lemu")]),
-        ("41##",                    [(41, False, "##")]),
-        ("41%%",                    [(41, False, "%%")]),
-        ("11 አበበ ቢንያም ነበር",        None),
-        ("11 ነበር",                  None),
-        ("11 nebere",               None),
-        ("11 አበበ 21 ሰለሞን",         [(11, False, "አበበ"), (21, False, "ሰለሞን")]),
-        ("11+ አበበ",                 [(11, True,  "አበበ")]),
-        ("11 ብለህ",                  [(11, False, None)]),
-    ]
-
-    print("=" * 50)
-    for text, expected in tests:
-        result = parse_numbers(text)
-        nums = result["numbers"] if result else None
-        ok = "✅" if nums == expected else "❌"
-        print(f"{ok} '{text}'")
-        if nums != expected:
-            print(f"   expected: {expected}")
-            print(f"   got:      {nums}")
-    print("=" * 50)
