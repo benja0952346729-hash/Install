@@ -2,6 +2,7 @@ import os
 import logging
 import asyncio
 import json
+from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
@@ -850,7 +851,20 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         if resp["reply"]:
             await msg.reply_text(resp["reply"])
         if resp["resend_remaining"]:
-            await _send_remaining(ctx, settings, group_id)
+            if game_id in nekay_active:
+                # Nekay active ሆኖ ሳለ — nekay list ብቻ resend (board/remaining አይነካም)
+                rem_msg_id = settings.get("remaining_message_id")
+                if rem_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                    except Exception:
+                        pass
+                if snap:
+                    nekay_text_r = build_nekay(nekay_list)
+                    new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_r)
+                    update_remaining_message_id(game_id, new_nekay.message_id)
+            else:
+                await _send_remaining(ctx, settings, group_id)
         if resp["resend_nekay"]:
             if snap:
                 nekay_text = build_nekay(nekay_list)
@@ -941,7 +955,14 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if result in ["registered", "registered_half"]:
             registered.append((actual_num, is_half))
         elif isinstance(result, dict) and result.get("status") == "ok":
-            registered.append((actual_num, is_half))
+            # Toggle/change_number_type result — actual new is_half state ይፈልጋል
+            new_is_half = get_user_numbers(game_id, user_id)
+            actual_is_half = is_half
+            for n_num, n_half, n_slot, n_paid in new_is_half:
+                if n_num == actual_num and n_slot == 1:
+                    actual_is_half = n_half
+                    break
+            registered.append((actual_num, actual_is_half))
         else:
             all_taken.append(actual_num)
 
