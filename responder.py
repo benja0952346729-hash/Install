@@ -204,7 +204,7 @@ def translate_latin(text: str) -> str:
 
 
 # ================================================================
-# ACCOUNT LINE EXTRACTOR — payment_info ውስጥ account lines ብቻ
+# ACCOUNT LINE EXTRACTOR
 # ================================================================
 
 ACCOUNT_PATTERNS = [
@@ -219,9 +219,7 @@ ACCOUNT_PATTERNS = [
     r"\d{10,}",
 ]
 
-
 def _extract_account_lines(payment_info: str) -> str:
-    """CBE/Telebirr/Awash lines ብቻ ለይቶ ይመልሳል"""
     if not payment_info:
         return ""
     lines = payment_info.strip().split("\n")
@@ -719,6 +717,10 @@ RESPONSES = {
         "ፈነዳ ቤተሰብ እንኳን ደስ አለክ 🥰",
         "champion እንኳን ደስ አለክ 🏆🥰",
     ],
+    # FIX: countdown sleep ውስጥ taken ቁጥር ሲሞከር
+    "nekay_countdown_wait": [
+        "ቤተሰብ ትንሽ ይጠብቁ ነቃይ ላወጣ ነው 🙏",
+    ],
 }
 
 
@@ -779,7 +781,6 @@ def get_response(
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
         if payment_info:
-            # Account lines ብቻ ለይቶ ይላካል
             result["reply"] = _extract_account_lines(payment_info)
         return result
 
@@ -813,6 +814,8 @@ def get_response(
         return result
 
     if intent == "booking":
+        # FIX 3: countdown sleep ውስጥ taken ቁጥር → block message
+        # (ይህ bot.py ውስጥ ነው የሚሰራው — responder ውስጥ countdown message ብቻ)
         if countdown_seconds > 0:
             mins = countdown_seconds // 60
             secs = countdown_seconds % 60
