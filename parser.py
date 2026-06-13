@@ -218,7 +218,7 @@ def _parse_token(tok: str):
                 name = rest
             break
 
-    # attached full word — FIX: name ከ full word በፊት ብቻ ይወሰዳል
+    # attached full word — name ከ full word በፊት ወይም በኋላ ሊሆን ይችላል
     if not is_half:
         for fw in sorted(FULL_WORDS, key=len, reverse=True):
             m = re.match(r'^(\d+)([^\d]*)' + re.escape(fw) + r'(.*)$', tok, re.IGNORECASE)
@@ -227,10 +227,11 @@ def _parse_token(tok: str):
                 name_part = m.group(2).strip()
                 rest = m.group(3).strip()
                 tok = m.group(1)
-                # name ከ full word በፊት ያለው ብቻ
                 if name_part and name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
                     name = name_part
-                # rest (full word በኋላ) → ignore
+                elif rest and rest.lower() not in NON_NAME_WORDS and rest.lower() not in NEBER_WORDS and _is_valid_name(rest):
+                    # full word በኋላ ያለ ስም (ለምሳሌ "11በሙሉአበበ")
+                    name = rest
                 break
 
     # trailing +
@@ -253,7 +254,7 @@ def _parse_token(tok: str):
         m = re.match(r'^(\d+)([^\d\+].+)$', tok)
         if m:
             name_part = m.group(2).strip()
-            # FIX: name_part ውስጥ full/half word ካለ → ቆርጥ
+            # name_part ውስጥ full/half word ካለ → ቆርጥ
             for fw in sorted(FULL_WORDS, key=len, reverse=True):
                 if fw.lower() in name_part.lower():
                     name_part = name_part.lower().replace(fw.lower(), '').strip()
@@ -333,8 +334,13 @@ def parse_numbers(text: str):
                 elif _is_full_word(nxt):
                     is_full = True
                     skip_indices.add(i + 1)
-                    # FIX: full word በኋላ name አይሰበስብም — telegram firstname ይጠቀማል
-                    # name = None ሆኖ ይቀራል
+                    # FIX: full word በኋላ name ይሰበሰብል (name=None ከሆነ)
+                    if name is None:
+                        collected, last_idx = _collect_name(tokens, i + 2, skip_indices)
+                        if collected and _is_valid_name(collected):
+                            name = collected
+                            for idx in range(i + 2, last_idx + 1):
+                                skip_indices.add(idx)
                 elif nxt_lower not in NON_NAME_WORDS and nxt_lower not in NEBER_WORDS and name is None:
                     collected, last_idx = _collect_name(tokens, i + 1, skip_indices)
                     if collected and _is_valid_name(collected):
@@ -404,38 +410,3 @@ def parse_numbers(text: str):
 
 def format_number(n: int) -> str:
     return f"{n:02d}"
-
-
-# ================================================================
-# QUICK TEST
-# ================================================================
-if __name__ == "__main__":
-    tests = [
-        ("11 አበበ ቢንያም በል",        [(11, False, "አበበ ቢንያም")]),
-        ("21 ማርቆስ ሰለሞን",           [(21, False, "ማርቆስ ሰለሞን")]),
-        ("41 stotto lemu",          [(41, False, "stotto lemu")]),
-        ("41##",                    [(41, False, "##")]),
-        ("41%%",                    [(41, False, "%%")]),
-        ("11 አበበ ቢንያም ነበር",        None),
-        ("11 ነበር",                  None),
-        ("11 nebere",               None),
-        ("11 አበበ 21 ሰለሞን",         [(11, False, "አበበ"), (21, False, "ሰለሞን")]),
-        ("11+ አበበ",                 [(11, True,  "አበበ")]),
-        ("11 ብለህ",                  [(11, False, None)]),
-        # NEW TESTS
-        ("12አበበ በሙሉ",               [(12, False, None)]),
-        ("12አበበ begmash",           [(12, True,  None)]),
-        ("11 አበበ በሙሉ",              [(11, False, None)]),
-        ("11 አበበ ብለህ በሙሉ ያዝ",      [(11, False, None)]),
-    ]
-
-    print("=" * 50)
-    for text, expected in tests:
-        result = parse_numbers(text)
-        nums = result["numbers"] if result else None
-        ok = "✅" if nums == expected else "❌"
-        print(f"{ok} '{text}'")
-        if nums != expected:
-            print(f"   expected: {expected}")
-            print(f"   got:      {nums}")
-    print("=" * 50)
