@@ -100,7 +100,13 @@ async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
 # ============================================================
 
 async def _inactivity_notify_task(bot, game_id: int, group_id: int):
-    last_urgency_msg_id = None  # ← track message id
+    import pytz
+    et_tz = pytz.timezone("Africa/Addis_Ababa")
+    
+    last_urgency_msg_id = None
+    urgency_count = 0
+    MAX_COUNT = 4
+
     try:
         while True:
             await asyncio.sleep(120)
@@ -114,11 +120,25 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
 
             taken = get_taken_numbers(game_id)
             remaining_count = count_remaining(settings, taken)
+            is_nekay = game_id in nekay_active
 
-            if remaining_count == 0 or game_id in active_countdowns:
+            if game_id in active_countdowns:
                 return
 
-            # FIX: delete old urgency message before sending new
+            if remaining_count == 0 and not is_nekay:
+                return
+
+            # ሰዓት check — ከምሽቱ 4 (10 PM) እስከ ጠዋቱ 2 (8 AM) አይላክም
+            now_et = datetime.now(et_tz)
+            hour = now_et.hour
+            if hour >= 22 or hour < 8:
+                continue
+
+            # 4 ጊዜ ከላከ በኋላ ማንም ካልወሰደ ይሞታል
+            if urgency_count >= MAX_COUNT:
+                return
+
+            # የቀደመውን urgency message ሰርዝ
             if last_urgency_msg_id:
                 try:
                     await bot.delete_message(chat_id=group_id, message_id=last_urgency_msg_id)
@@ -129,6 +149,7 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
             notif = random.choice(URGENCY_MESSAGES)
             sent = await bot.send_message(chat_id=group_id, text=notif)
             last_urgency_msg_id = sent.message_id
+            urgency_count += 1
 
             await asyncio.sleep(10)
 
@@ -141,11 +162,25 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
 
             taken = get_taken_numbers(game_id)
             remaining_count = count_remaining(settings, taken)
+            is_nekay = game_id in nekay_active
 
-            if remaining_count == 0:
+            if remaining_count == 0 and not is_nekay:
                 return
 
-            if 0 < remaining_count <= 7:
+            if is_nekay:
+                snap = nekay_numbers.get(game_id, {})
+                if snap:
+                    rem_msg_id = settings.get("remaining_message_id")
+                    if rem_msg_id:
+                        try:
+                            await bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                        except Exception:
+                            pass
+                    nekay_list = _build_nekay_from_snap(snap)
+                    nekay_text = build_nekay(nekay_list)
+                    rem_msg = await bot.send_message(chat_id=group_id, text=nekay_text)
+                    update_remaining_message_id(game_id, rem_msg.message_id)
+            elif 0 < remaining_count <= 7:
                 remaining_text = build_remaining(settings, taken)
                 rem_msg_id = settings.get("remaining_message_id")
                 if rem_msg_id:
@@ -171,6 +206,7 @@ def _reset_inactivity_tracker(bot, game_id: int, group_id: int):
         existing["task"].cancel()
     task = asyncio.create_task(_inactivity_notify_task(bot, game_id, group_id))
     low_remaining_trackers[game_id] = {"task": task, "group_id": group_id}
+
 
 
 def _stop_inactivity_tracker(game_id: int):
@@ -1113,6 +1149,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             nekay_active.discard(game_id)
             nekay_numbers.pop(game_id, None)
             _stop_inactivity_tracker(game_id)
+
+        # ነቃይ ጊዜ ሰው ቁጥር ሲወስድ tracker reset
+        _reset_inactivity_tracker(ctx.bot, game_id, group_id)
 
     elif remaining_count <= 7:
         if should_resend:
