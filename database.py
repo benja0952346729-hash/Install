@@ -747,7 +747,7 @@ def get_registrations(game_id):
     return rows
 
 
-def register_number(game_id, user_id, user_name, number, is_half, force=False, allow_toggle=True):
+def register_number(game_id, user_id, user_name, number, is_half, force=False, allow_toggle=True, is_parsed_name=False):
     conn = get_conn()
     cur = conn.cursor()
 
@@ -813,10 +813,8 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False, a
     """, (game_id, number))
     owner_row = cur.fetchone()
     if owner_row and owner_row[0] == user_id:
-        # FIX (Issue 3): ስም ከ telegram firstname የተለየ ሲሆን (user_name ራሱ telegram firstname ካልሆነ)
-        # stored name ይቀየራል
         old_name = owner_row[1]
-        if user_name and user_name.strip() and user_name.strip() != old_name:
+        if is_parsed_name and user_name and user_name.strip() != old_name:
             cur.execute("""
                 UPDATE registrations SET user_name=%s
                 WHERE game_id=%s AND number=%s AND user_id=%s
@@ -826,14 +824,11 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False, a
         cur.close()
         conn.close()
         if not allow_toggle:
-            # ብዙ numbers ጋር ሲጻፍ — as-written (toggle የለም)
             target = "half" if is_half else "full"
         elif is_half:
-            # single number "+" ካለ → toggle (current state ይቀለበሳል)
             current_is_half = existing[0][1]
             target = "full" if current_is_half else "half"
         else:
-            # single number "+" ከሌለ → ሁልጊዜ full
             target = "full"
         return change_number_type(game_id, user_id, number, target)
 
