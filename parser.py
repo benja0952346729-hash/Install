@@ -253,7 +253,9 @@ def _scan_for_half_full(tokens: list, start: int, skip_indices: set):
             j += 1
             continue
         jtok = tokens[j].strip().lower()
-        if _is_half_word(jtok):
+        if jtok == '+':
+            return "half", j
+        elif _is_half_word(jtok):
             return "half", j
         elif _is_full_word(jtok):
             return "full", j
@@ -305,7 +307,16 @@ def parse_numbers(text: str):
             nxt = tokens[i + 1].strip()
             if not re.search(r'\d', nxt):
                 nxt_lower = nxt.lower()
-                if _is_half_word(nxt):
+                if nxt_lower == '+':
+                    is_half = True
+                    skip_indices.add(i + 1)
+                    if name is None:
+                        collected, last_idx = _collect_name(tokens, i + 2, skip_indices)
+                        if collected and _is_valid_name(collected):
+                            name = collected
+                            for idx in range(i + 2, last_idx + 1):
+                                skip_indices.add(idx)
+                elif _is_half_word(nxt):
                     is_half = True
                     skip_indices.add(i + 1)
                     if name is None:
@@ -418,6 +429,8 @@ if __name__ == "__main__":
         ("11 አበበ g",               [(11, True,  "አበበ")]),
         ("03 አበበ ብለህ በግማሽ ያዝ",    [(3,  True,  "አበበ")]),
         ("03 አበበ ብለህ begmash ያዝ",  [(3,  True,  "አበበ")]),
+        ("01 አበበ +",               [(1,  True,  "አበበ")]),
+        ("05 ሰለሞን +",              [(5,  True,  "ሰለሞን")]),
     ]
 
     print("=" * 50)
