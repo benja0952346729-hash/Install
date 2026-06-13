@@ -334,7 +334,6 @@ def parse_numbers(text: str):
                         name = collected
                         for idx in range(i + 1, last_idx + 1):
                             skip_indices.add(idx)
-                        # FIX: name collect ካደረገ በኋላ remaining tokens ውስጥ half/full ፈልግ
                         modifier, mod_idx = _scan_for_half_full(tokens, last_idx + 1, skip_indices)
                         if modifier == "half":
                             is_half = True
@@ -373,6 +372,13 @@ def parse_numbers(text: str):
         if is_full:
             is_half = False
         result.append((num, is_half, name))
+
+    # ስም propagation — መጨረሻ ላይ 1 ስም ብቻ ሲሆን ለሁሉም ይሰጥ
+    all_named = [(i, nm) for i, (_, _, nm) in enumerate(result) if nm]
+    if len(all_named) == 1:
+        only_idx, only_name = all_named[0]
+        if only_idx == len(result) - 1:
+            result = [(n, h, only_name) for n, h, _ in result]
 
     ambiguous = None
     ambiguous_number = None
