@@ -660,6 +660,12 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         target = tc["target"]
         numbers = tc["numbers"]
 
+        # parsed_name ከ parse_numbers ይወስድ
+        parse_result = parse_numbers(text)
+        parsed_name = None
+        if parse_result and parse_result["numbers"]:
+            parsed_name = parse_result["numbers"][0][2]
+
         for num in numbers:
             actual_num = get_group_start(num, settings["numbers_per_person"]) \
                 if settings["numbers_per_person"] > 1 else num
@@ -668,13 +674,25 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 is_half = (target == "half")
                 await process_registration(
                     ctx, settings,
-                    [(actual_num, is_half, None)],
+                    [(actual_num, is_half, parsed_name)],
                     user_id, user_name, group_id, msg,
                     skip_board_update=True
                 )
             elif not user_owns_number(game_id, user_id, actual_num):
                 await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
             else:
+                # parsed_name ካለ ስም update አርግ
+                if parsed_name:
+                    conn = get_conn()
+                    cur = conn.cursor()
+                    cur.execute("""
+                        UPDATE registrations SET user_name=%s
+                        WHERE game_id=%s AND number=%s AND user_id=%s
+                    """, (parsed_name, game_id, actual_num, user_id))
+                    conn.commit()
+                    cur.close()
+                    conn.close()
+
                 result_tc = change_number_type(game_id, user_id, actual_num, target)
                 if result_tc["status"] == "conflict":
                     await msg.reply_text(
@@ -696,7 +714,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             should_resend_tc = _increment_counter(group_id)
 
             if game_id in nekay_active:
-                # FIX 1: ነቃይ active — 4 messages ሲሞላ delete old + resend
                 if should_resend_tc:
                     if fresh_board_msg_id:
                         try:
@@ -763,7 +780,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 if snap_fresh:
                     nekay_list_f = _build_nekay_from_snap(snap_fresh)
                     nekay_text_f = build_nekay(nekay_list_f)
-                    # FIX 5: ነቃይ list ሁሌ new send
                     new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_f)
                     update_remaining_message_id(game_id, new_nekay.message_id)
                 else:
@@ -877,7 +893,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         if resp["resend_nekay"]:
             if snap:
                 nekay_text = build_nekay(nekay_list)
-                # FIX 2: old delete ከዚያ new send — duplicate fix
                 rem_msg_id = settings.get("remaining_message_id")
                 if rem_msg_id:
                     try:
@@ -910,19 +925,15 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             await msg.reply_text(f"{format_number(ambiguous_number)} ብቻ በግማሽ ነው? (አዎ/አይደለም)")
         return
 
-    # FIX 3: countdown sleep ውስጥ — taken ቁጥር ሲሞከር block
     if game_id in active_countdowns:
-        # ሰው የራሱ ቁጥር ካልሆነ block
         per_person = settings["numbers_per_person"]
-        has_own = False
         for num, is_half, parsed_name in numbers:
             actual_num = get_group_start(num, per_person) if per_person > 1 else num
             if actual_num in taken and user_owns_number(game_id, user_id, actual_num):
-                has_own = True
+                pass
             elif actual_num in taken and not user_owns_number(game_id, user_id, actual_num):
                 await msg.reply_text(NEKAY_COUNTDOWN_MESSAGE)
                 return
-        # taken ያልሆነ ቁጥር → normally ይቀጥላል
 
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
 
