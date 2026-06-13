@@ -975,7 +975,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
-        # FIX: parsed_name ካለ ይጠቀም፣ ከሌለ board ላይ ያለውን፣ ከሌለ telegram name
         if parsed_name:
             actual_name = parsed_name
         elif actual_num in taken_before:
@@ -990,7 +989,11 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             continue
 
         is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
-        result = register_number(game_id, user_id, actual_name, actual_num, is_half, force=is_nekay, allow_toggle=allow_toggle)
+        result = register_number(
+            game_id, user_id, actual_name, actual_num, is_half,
+            force=is_nekay, allow_toggle=allow_toggle,
+            is_parsed_name=bool(parsed_name)
+        )
         if result in ["registered", "registered_half"]:
             registered.append((actual_num, is_half))
         elif isinstance(result, dict) and result.get("status") == "ok":
@@ -1141,7 +1144,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         check_and_rotate_db()
     except Exception:
         pass
-
 
 # ============================================================
 # HELPERS
