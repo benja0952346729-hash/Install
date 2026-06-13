@@ -401,6 +401,7 @@ INTENT_EXAMPLES = {
         "06 bemulu", "11 begmash", "09 11 begmash",
         "11 21 bemulu qeyirew",
         "gmash +argewo", "06+ argewo",
+        "11በሙሉ", "05በሙሉ", "11በግማሽ", "05በግማሽ",
     ],
     "why_not_registered": [
         "ለምን አልያዝክልኝም", "ለምን አልፃፍክልኝም", "ለምን አልመዘገብከኝም",
@@ -544,11 +545,11 @@ def detect_intent(text: str) -> tuple:
     TYPE_HALF_WORDS = ["በግማሽ", "ግማሽ", "begmash", "gmash"]
     has_type_full = any(normalize_amharic(w) in normalized_lower for w in TYPE_FULL_WORDS)
     has_type_half = any(normalize_amharic(w) in normalized_lower for w in TYPE_HALF_WORDS)
+
+    # ======= FIX: action word ሳይኖር ቁጥር + type word ብቻ ሲኖር type_change ይመልሳል =======
     if numbers_in_text and (has_type_full or has_type_half):
-        ACTION_WORDS = ["አርግ", "አድርግ", "ይሁን", "ቀይር", "ቀይረው", "areg", "adrig", "yihun"]
-        has_action = any(normalize_amharic(w) in normalized_lower for w in ACTION_WORDS)
-        if has_action:
-            return "type_change", 1.0
+        return "type_change", 1.0
+    # =================================================================================
 
     WHY_NOT_REG_WORDS = [
         "ለምን አልያዝ", "ለምን አልፃፍ", "ለምን አልመዘገብ",
@@ -717,7 +718,6 @@ RESPONSES = {
         "ፈነዳ ቤተሰብ እንኳን ደስ አለክ 🥰",
         "champion እንኳን ደስ አለክ 🏆🥰",
     ],
-    # FIX: countdown sleep ውስጥ taken ቁጥር ሲሞከር
     "nekay_countdown_wait": [
         "ቤተሰብ ትንሽ ይጠብቁ ነቃይ ላወጣ ነው 🙏",
     ],
@@ -814,8 +814,6 @@ def get_response(
         return result
 
     if intent == "booking":
-        # FIX 3: countdown sleep ውስጥ taken ቁጥር → block message
-        # (ይህ bot.py ውስጥ ነው የሚሰራው — responder ውስጥ countdown message ብቻ)
         if countdown_seconds > 0:
             mins = countdown_seconds // 60
             secs = countdown_seconds % 60
