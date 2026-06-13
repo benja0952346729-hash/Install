@@ -21,13 +21,12 @@ NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
     "ያዛት", "yazat", "ያዛቸው", "yazachew",
     "ፃፍልኝ", "tsafligni", "መዝግብልኝ", "mezgibligni",
     "እና", "ena", "and", "ና", "na",
-    # ← አዲስ: command words
     "በል", "ብለህ", "ብለሽ", "ብለው",
     "bel", "bleh", "blesh", "blew",
 ]])
 
 # ================================================================
-# NEBER WORDS — sentence መጨረሻ ላይ ከመጡ → reject booking
+# NEBER WORDS
 # ================================================================
 NEBER_WORDS = {"ነበር", "ነበረ", "nebere", "neber"}
 
@@ -45,7 +44,6 @@ def _is_full_word(w):
 SEPARATOR_CHARS = set('+-/.,|*= \t\n')
 
 def _is_symbol_name(s: str) -> bool:
-    """## %% @@ — 2+ non-word, non-space chars → valid name"""
     if len(s) < 2:
         return False
     return bool(re.match(r'^[^\w\s]{2,}$', s))
@@ -73,14 +71,9 @@ def _is_valid_name(s: str) -> bool:
 
 
 # ================================================================
-# _collect_name() — multi-word name collector
+# _collect_name()
 # ================================================================
 def _collect_name(tokens: list, start: int, skip_indices: set) -> tuple:
-    """
-    tokens[start] ጀምሮ NON_NAME_WORD / separator / digit / NEBER እስኪመጣ
-    multi-word name ይሰበስባል።
-    returns (name_or_None, last_consumed_index)
-    """
     parts = []
     i = start
     while i < len(tokens):
@@ -89,20 +82,15 @@ def _collect_name(tokens: list, start: int, skip_indices: set) -> tuple:
         tok = tokens[i].strip()
         if not tok:
             break
-        # digit token → stop
         if re.search(r'\d', tok):
             break
-        # pure separator token → stop
         if all(c in SEPARATOR_CHARS for c in tok):
             break
         tok_lower = tok.lower()
-        # NEBER → stop (don't consume)
         if tok_lower in NEBER_WORDS:
             break
-        # NON_NAME_WORD → stop (don't consume)
         if tok_lower in NON_NAME_WORDS:
             break
-        # half/full word → stop
         if _is_half_word(tok) or _is_full_word(tok):
             break
         parts.append(tok)
@@ -121,14 +109,9 @@ def _collect_name(tokens: list, start: int, skip_indices: set) -> tuple:
 
 def _pre_tokenize(text: str) -> list:
     tokens = []
-    # word separators → space
     text = re.sub(r'\bእና\b|\bና\b|\band\b', ' ', text, flags=re.IGNORECASE)
-    # single # only → space (## or more = symbol name, keep intact)
     text = re.sub(r'(?<!#)#(?!#)', ' ', text)
-    # + → keep attached to left number (11+ stays), split right side
-    # e.g. "11+21" → "11+ 21"
     text = re.sub(r'(\d+\+)(\d)', r'\1 \2', text)
-    # * and other separators → space
     parts = re.sub(r'[,=/&?*]', ' ', text).split()
 
     for part in parts:
@@ -204,7 +187,7 @@ def _split_mixed(s: str) -> list:
 
 
 # ================================================================
-# PARSE SINGLE TOKEN → (num, is_half, is_full, name)
+# PARSE SINGLE TOKEN
 # ================================================================
 
 def _parse_token(tok: str):
@@ -216,7 +199,7 @@ def _parse_token(tok: str):
     is_full = False
     name = None
 
-    # attached half word: 11gmash, 41ግ
+    # attached half word
     for hw in sorted(HALF_WORDS, key=len, reverse=True):
         m = re.match(r'^(\d+)\+?' + re.escape(hw) + r'(.*)$', tok, re.IGNORECASE)
         if m:
@@ -235,16 +218,19 @@ def _parse_token(tok: str):
                 name = rest
             break
 
-    # attached full word
+    # attached full word — FIX: name ከ full word በፊት ብቻ ይወሰዳል
     if not is_half:
         for fw in sorted(FULL_WORDS, key=len, reverse=True):
-            m = re.match(r'^(\d+)' + re.escape(fw) + r'(.*)$', tok, re.IGNORECASE)
+            m = re.match(r'^(\d+)([^\d]*)' + re.escape(fw) + r'(.*)$', tok, re.IGNORECASE)
             if m:
                 is_full = True
-                rest = m.group(2).strip()
+                name_part = m.group(2).strip()
+                rest = m.group(3).strip()
                 tok = m.group(1)
-                if rest and rest.lower() not in NON_NAME_WORDS and rest.lower() not in NEBER_WORDS and _is_valid_name(rest):
-                    name = rest
+                # name ከ full word በፊት ያለው ብቻ
+                if name_part and name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
+                    name = name_part
+                # rest (full word በኋላ) → ignore
                 break
 
     # trailing +
@@ -252,7 +238,7 @@ def _parse_token(tok: str):
         tok = tok[:-1]
         is_half = True
 
-    # number + + + name: "11+ayele"
+    # number+name: "11+ayele"
     if not is_half and not is_full:
         m = re.match(r'^(\d+)\+([^\d].+)$', tok)
         if m:
@@ -262,12 +248,23 @@ def _parse_token(tok: str):
                 name = name_part
             tok = m.group(1)
 
-    # number + attached name: "21አበበ", "21##"
+    # number + attached name: "21አበበ"
     if name is None:
         m = re.match(r'^(\d+)([^\d\+].+)$', tok)
         if m:
             name_part = m.group(2).strip()
-            if name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
+            # FIX: name_part ውስጥ full/half word ካለ → ቆርጥ
+            for fw in sorted(FULL_WORDS, key=len, reverse=True):
+                if fw.lower() in name_part.lower():
+                    name_part = name_part.lower().replace(fw.lower(), '').strip()
+                    is_full = True
+                    break
+            for hw in sorted(HALF_WORDS, key=len, reverse=True):
+                if hw.lower() in name_part.lower():
+                    name_part = name_part.lower().replace(hw.lower(), '').strip()
+                    is_half = True
+                    break
+            if name_part and name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
                 name = name_part
             tok = m.group(1)
 
@@ -287,9 +284,6 @@ def _parse_token(tok: str):
 def parse_numbers(text: str):
     original = text.strip()
 
-    # ================================================================
-    # NEBER CHECK — sentence መጨረሻ ላይ "ነበር/ነበረ/nebere/neber" ካለ → None
-    # ================================================================
     stripped = original.rstrip()
     last_word = stripped.split()[-1].lower() if stripped.split() else ""
     if last_word in NEBER_WORDS:
@@ -339,12 +333,8 @@ def parse_numbers(text: str):
                 elif _is_full_word(nxt):
                     is_full = True
                     skip_indices.add(i + 1)
-                    if name is None:
-                        collected, last_idx = _collect_name(tokens, i + 2, skip_indices)
-                        if collected and _is_valid_name(collected):
-                            name = collected
-                            for idx in range(i + 2, last_idx + 1):
-                                skip_indices.add(idx)
+                    # FIX: full word በኋላ name አይሰበስብም — telegram firstname ይጠቀማል
+                    # name = None ሆኖ ይቀራል
                 elif nxt_lower not in NON_NAME_WORDS and nxt_lower not in NEBER_WORDS and name is None:
                     collected, last_idx = _collect_name(tokens, i + 1, skip_indices)
                     if collected and _is_valid_name(collected):
@@ -358,9 +348,7 @@ def parse_numbers(text: str):
     if not numbers:
         return None
 
-    # ================================================================
     # QUERY GUARD
-    # ================================================================
     QUERY_WORDS = [
         "አለ", "ale", "ቢል", "bill", "ነው", "yaze", "ተያዘ",
         "ክፍት", "kift", "ወይ", "wey", "teyaze", "new",
@@ -372,7 +360,6 @@ def parse_numbers(text: str):
         if has_query and nm is None:
             return None
 
-    # trailing global full word
     last_tok = tokens[-1].strip().lower() if tokens else ""
     if not re.search(r'\d', last_tok) and any(last_tok == fw.lower() for fw in ["bemulu", "mulu", "ሙሉ", "በሙሉ"]):
         is_global_full = True
@@ -435,6 +422,11 @@ if __name__ == "__main__":
         ("11 አበበ 21 ሰለሞን",         [(11, False, "አበበ"), (21, False, "ሰለሞን")]),
         ("11+ አበበ",                 [(11, True,  "አበበ")]),
         ("11 ብለህ",                  [(11, False, None)]),
+        # NEW TESTS
+        ("12አበበ በሙሉ",               [(12, False, None)]),
+        ("12አበበ begmash",           [(12, True,  None)]),
+        ("11 አበበ በሙሉ",              [(11, False, None)]),
+        ("11 አበበ ብለህ በሙሉ ያዝ",      [(11, False, None)]),
     ]
 
     print("=" * 50)
