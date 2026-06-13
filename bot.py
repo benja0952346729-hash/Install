@@ -79,6 +79,8 @@ URGENCY_MESSAGES = [
     "ቤተሰብ ቀሪ ቁጥሮች ብቻ አሉ ገባ ገባ በሉ 🙏",
 ]
 
+NEKAY_COUNTDOWN_MESSAGE = "ቤተሰብ ትንሽ ይጠብቁ ነቃይ ላወጣ ነው 🙏"
+
 
 # ============================================================
 # TYPING INDICATOR
@@ -303,28 +305,14 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         nekay_list = _build_nekay_from_snap(snap)
         nekay_text = build_nekay(nekay_list)
 
-        nekay_sent = None
-        if warn_msg and not media:
-            try:
-                await bot.edit_message_text(
-                    chat_id=group_id,
-                    message_id=warn_msg.message_id,
-                    text=nekay_text
-                )
-                nekay_sent = warn_msg
-            except Exception:
-                nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
-        else:
-            nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
+        # FIX 4: warning message አይጠፋም — ነቃይ list አዲስ message ከታች ይላካል
+        nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
 
         nekay_active.add(game_id)
         update_remaining_message_id(game_id, nekay_sent.message_id if nekay_sent else None)
     else:
-        if warn_msg:
-            try:
-                await bot.delete_message(chat_id=group_id, message_id=warn_msg.message_id)
-            except Exception:
-                pass
+        # unpaid የለም — warning message ይቀራል (አይጠፋም)
+        pass
 
     active_countdowns.pop(game_id, None)
 
@@ -603,7 +591,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     nekay_list = _build_nekay_from_snap(snap)
     remaining = count_remaining(settings, taken)
 
-    # ── Problem 4 fix: countdown ቀሪ ጊዜ ── 
     cd_data = active_countdowns.get(game_id)
     if cd_data and isinstance(cd_data, dict):
         elapsed = time.time() - cd_data["start"]
@@ -696,29 +683,35 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             fresh_board = build_board(fresh, fresh_taken, fresh_paid)
             fresh_board_msg_id = fresh.get("board_message_id")
 
-            # ── Problem 2 fix: type_change board resend logic ──
             should_resend_tc = _increment_counter(group_id)
-            crossed_into_low_tc = False  # type_change ላይ remaining_before track የለም — skip
 
             if game_id in nekay_active:
-                # Nekay active — board edit only, no resend
-                if fresh_board_msg_id:
-                    try:
-                        await ctx.bot.edit_message_text(
-                            chat_id=group_id, message_id=fresh_board_msg_id, text=fresh_board
-                        )
-                    except Exception:
+                # FIX 1: ነቃይ active — 4 messages ሲሞላ delete old + resend
+                if should_resend_tc:
+                    if fresh_board_msg_id:
                         try:
                             await ctx.bot.delete_message(chat_id=group_id, message_id=fresh_board_msg_id)
                         except Exception:
                             pass
-                        new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
-                        update_board_message_id(game_id, new_msg.message_id)
-                else:
                     new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                     update_board_message_id(game_id, new_msg.message_id)
+                else:
+                    if fresh_board_msg_id:
+                        try:
+                            await ctx.bot.edit_message_text(
+                                chat_id=group_id, message_id=fresh_board_msg_id, text=fresh_board
+                            )
+                        except Exception:
+                            try:
+                                await ctx.bot.delete_message(chat_id=group_id, message_id=fresh_board_msg_id)
+                            except Exception:
+                                pass
+                            new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
+                            update_board_message_id(game_id, new_msg.message_id)
+                    else:
+                        new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
+                        update_board_message_id(game_id, new_msg.message_id)
             elif fresh_remaining <= 7 and should_resend_tc:
-                # Resend: delete old + send new
                 if fresh_board_msg_id:
                     try:
                         await ctx.bot.delete_message(chat_id=group_id, message_id=fresh_board_msg_id)
@@ -727,7 +720,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                 update_board_message_id(game_id, new_msg.message_id)
             else:
-                # Edit only
                 if fresh_board_msg_id:
                     try:
                         await ctx.bot.edit_message_text(
@@ -761,6 +753,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 if snap_fresh:
                     nekay_list_f = _build_nekay_from_snap(snap_fresh)
                     nekay_text_f = build_nekay(nekay_list_f)
+                    # FIX 5: ነቃይ list ሁሌ new send
                     new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_f)
                     update_remaining_message_id(game_id, new_nekay.message_id)
                 else:
@@ -874,7 +867,15 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         if resp["resend_nekay"]:
             if snap:
                 nekay_text = build_nekay(nekay_list)
-                await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+                # FIX 2: old delete ከዚያ new send — duplicate fix
+                rem_msg_id = settings.get("remaining_message_id")
+                if rem_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                    except Exception:
+                        pass
+                new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+                update_remaining_message_id(game_id, new_nekay.message_id)
         return
 
     if photo_processing.get(group_id):
@@ -898,6 +899,20 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         elif ambiguous == "last_half":
             await msg.reply_text(f"{format_number(ambiguous_number)} ብቻ በግማሽ ነው? (አዎ/አይደለም)")
         return
+
+    # FIX 3: countdown sleep ውስጥ — taken ቁጥር ሲሞከር block
+    if game_id in active_countdowns:
+        # ሰው የራሱ ቁጥር ካልሆነ block
+        per_person = settings["numbers_per_person"]
+        has_own = False
+        for num, is_half, parsed_name in numbers:
+            actual_num = get_group_start(num, per_person) if per_person > 1 else num
+            if actual_num in taken and user_owns_number(game_id, user_id, actual_num):
+                has_own = True
+            elif actual_num in taken and not user_owns_number(game_id, user_id, actual_num):
+                await msg.reply_text(NEKAY_COUNTDOWN_MESSAGE)
+                return
+        # taken ያልሆነ ቁጥር → normally ይቀጥላል
 
     await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
 
@@ -1008,7 +1023,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     board_text = build_board(settings, taken, paid)
     board_msg_id = settings.get("board_message_id")
 
-    # ── Problem 1 fix: should_resend logic ──
     should_resend = _increment_counter(group_id)
 
     crossed_into_low = (remaining_before > 7) and (remaining_count <= 7)
@@ -1019,21 +1033,29 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         should_resend = False
 
     if game_id in nekay_active:
-        # ── Nekay active: board edit only, never resend ──
-        if board_msg_id:
-            try:
-                await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
-            except Exception:
-                # Edit fail → delete old + send new
+        # FIX 1: ነቃይ active — 4 messages ሲሞላ delete old + resend, አለዚያ edit
+        if should_resend:
+            if board_msg_id:
                 try:
                     await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
                 except Exception:
                     pass
-                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                update_board_message_id(game_id, new_board.message_id)
-        else:
             new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(game_id, new_board.message_id)
+        else:
+            if board_msg_id:
+                try:
+                    await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+                except Exception:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                    except Exception:
+                        pass
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
+            else:
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
 
         for num, is_half in registered:
             if num in snap:
@@ -1052,6 +1074,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if snap:
             nekay_list2 = _build_nekay_from_snap(snap)
             nekay_text = build_nekay(nekay_list2)
+            # FIX 5: ነቃይ list ሁሌ new send
             new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
             update_remaining_message_id(game_id, new_nekay.message_id)
         else:
@@ -1458,10 +1481,6 @@ async def handle_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ትክክለኛ ID ጻፍ!")
 
 
-# ============================================================
-# USERNAME COMMANDS
-# ============================================================
-
 async def handle_userlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
     if not is_admin(update.effective_user.id, group_id):
@@ -1496,10 +1515,6 @@ async def handle_clearusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("✅ Username list ጸዳ!")
 
 
-# ============================================================
-# ACTIVITY COMMAND
-# ============================================================
-
 async def handle_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
         return
@@ -1523,10 +1538,6 @@ async def handle_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text("\n\n".join(lines))
 
-
-# ============================================================
-# DB STATUS & CLEAR
-# ============================================================
 
 async def handle_dbstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
@@ -1572,10 +1583,6 @@ def get_all_db_urls():
     return DATABASE_URLS
 
 
-# ============================================================
-# WINNER COMMANDS
-# ============================================================
-
 async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
     if not is_admin(update.effective_user.id, group_id):
@@ -1612,10 +1619,6 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         pass
 
 
-# ============================================================
-# ON / OFF
-# ============================================================
-
 async def handle_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, group_id):
@@ -1631,10 +1634,6 @@ async def handle_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     set_group_active(group_id, False)
     await update.message.reply_text("🔴 Bot off ሆኗል!")
 
-
-# ============================================================
-# CLEAR BALANCE
-# ============================================================
 
 async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
@@ -1654,10 +1653,6 @@ async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await update.message.reply_text(f"❌ @{username} አልተገኘም!")
 
-
-# ============================================================
-# REPORT
-# ============================================================
 
 async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
@@ -1697,10 +1692,6 @@ async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception:
         pass
 
-
-# ============================================================
-# WARNING MEDIA COMMANDS
-# ============================================================
 
 async def handle_setwarnmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
