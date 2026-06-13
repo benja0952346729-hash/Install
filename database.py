@@ -813,23 +813,10 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False, a
     """, (game_id, number))
     owner_row = cur.fetchone()
     if owner_row and owner_row[0] == user_id:
-        old_name = owner_row[1]
-        existing_is_half = owner_row[2]  # FIX: existing is_half ያስቀምጣል
-
-        # FIX: ስም ሲቀይር existing is_half ይጠበቅ
-        if user_name and user_name.strip() and user_name.strip() != old_name:
-            cur.execute("""
-                UPDATE registrations SET user_name=%s
-                WHERE game_id=%s AND number=%s AND user_id=%s
-            """, (user_name.strip(), game_id, number, user_id))
-            conn.commit()
-            cur.close()
-            conn.close()
-            # is_half ሳይቀይር ስም ብቻ ተቀይሯል — no_change አይደለም
-            return {"status": "ok", "refund": 0, "charge": 0, "is_paid": existing[0][1] if existing else False}
-
+        existing_is_half = owner_row[2]
         cur.close()
         conn.close()
+
         if not allow_toggle:
             target = "half" if is_half else "full"
         elif is_half:
@@ -1853,4 +1840,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-}
+    }
