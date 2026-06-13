@@ -975,7 +975,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
-        # FIX: existing name ከ board ይጠቀም — telegram name አይደለም
+        # FIX: parsed_name ካለ ይጠቀም፣ ከሌለ board ላይ ያለውን፣ ከሌለ telegram name
         if parsed_name:
             actual_name = parsed_name
         elif actual_num in taken_before:
