@@ -810,6 +810,10 @@ def get_response(
         type_result = detect_type_change(text)
         if type_result:
             nums, target = type_result
+            # ቁጥሩ taken ካልሆነ booking ይሆናል
+            num = nums[0]
+            if num not in taken:
+                return result  # parse_numbers ይሠራዋል → booking
             result["type_change"] = {"numbers": nums, "target": target}
             result["reply"] = random.choice(RESPONSES["type_change_ack"])
         return result
