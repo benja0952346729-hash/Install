@@ -100,6 +100,7 @@ async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
 # ============================================================
 
 async def _inactivity_notify_task(bot, game_id: int, group_id: int):
+    last_urgency_msg_id = None  # ← track message id
     try:
         while True:
             await asyncio.sleep(120)
@@ -117,8 +118,17 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
             if remaining_count == 0 or game_id in active_countdowns:
                 return
 
+            # FIX: delete old urgency message before sending new
+            if last_urgency_msg_id:
+                try:
+                    await bot.delete_message(chat_id=group_id, message_id=last_urgency_msg_id)
+                except Exception:
+                    pass
+                last_urgency_msg_id = None
+
             notif = random.choice(URGENCY_MESSAGES)
-            await bot.send_message(chat_id=group_id, text=notif)
+            sent = await bot.send_message(chat_id=group_id, text=notif)
+            last_urgency_msg_id = sent.message_id
 
             await asyncio.sleep(10)
 
