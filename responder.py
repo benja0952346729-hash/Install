@@ -546,10 +546,17 @@ def detect_intent(text: str) -> tuple:
     has_type_full = any(normalize_amharic(w) in normalized_lower for w in TYPE_FULL_WORDS)
     has_type_half = any(normalize_amharic(w) in normalized_lower for w in TYPE_HALF_WORDS)
 
-    # ======= FIX: action word ሳይኖር ቁጥር + type word ብቻ ሲኖር type_change ይመልሳል =======
     if numbers_in_text and (has_type_full or has_type_half):
-        return "type_change", 1.0
-    # =================================================================================
+        TYPE_ACTION_WORDS = [
+            "አርግ", "አድርግ", "ይሁን", "ቀይር", "ቀይረው",
+            "areg", "adrig", "yihun", "qeyir", "qeyirew",
+        ]
+        has_action = any(
+            normalize_amharic(w) in normalized_lower
+            for w in TYPE_ACTION_WORDS
+        )
+        if has_action:
+            return "type_change", 1.0
 
     WHY_NOT_REG_WORDS = [
         "ለምን አልያዝ", "ለምን አልፃፍ", "ለምን አልመዘገብ",
