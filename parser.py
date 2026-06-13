@@ -1,7 +1,6 @@
 import re
 import regex  # pip install regex — emoji support ለማስቻል
 
-
 HALF_WORDS = ["begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ", "begmas", "ግማ", "half"]
 FULL_WORDS = ["bemulu", "mulu", "በሙሉ", "ሙሉ"]
 GLOBAL_HALF_WORDS = ["ሁሉንም በግማሽ", "ሁሉንም ግማሽ", "ሁሉም በግማሽ", "hulunm begmash", "hulunm gmash"]
@@ -177,6 +176,7 @@ def _parse_token(tok: str):
     is_full = False
     name = None
 
+    # attached half word
     for hw in sorted(HALF_WORDS, key=len, reverse=True):
         m = re.match(r'^(\d+)\+?' + re.escape(hw) + r'(.*)$', tok, re.IGNORECASE)
         if m:
@@ -195,6 +195,7 @@ def _parse_token(tok: str):
                 name = rest
             break
 
+    # attached full word
     if not is_half:
         for fw in sorted(FULL_WORDS, key=len, reverse=True):
             m = re.match(r'^(\d+)([^\d]*)' + re.escape(fw) + r'(.*)$', tok, re.IGNORECASE)
@@ -206,10 +207,12 @@ def _parse_token(tok: str):
                     name = name_part
                 break
 
+    # trailing +
     if not is_half and not is_full and tok.endswith('+'):
         tok = tok[:-1]
         is_half = True
 
+    # number+name: "11+ayele"
     if not is_half and not is_full:
         m = re.match(r'^(\d+)\+([^\d].+)$', tok)
         if m:
@@ -219,6 +222,7 @@ def _parse_token(tok: str):
                 name = name_part
             tok = m.group(1)
 
+    # number + attached name: "21አበበ"
     if name is None:
         m = re.match(r'^(\d+)([^\d\+].+)$', tok)
         if m:
@@ -288,71 +292,33 @@ def parse_numbers(text: str):
                 if _is_half_word(nxt):
                     is_half = True
                     skip_indices.add(i + 1)
-                    # FIX: half word ከኋላ ስም ይሰበስብ
+                    # FIX: half word ከኋላ — name ቀድሞ ሰበሰብን ወይ? ካልሆነ ከፊት ይሰበስብ
                     if name is None:
-                        if i + 2 < len(tokens):
-                            nxt2 = tokens[i + 2].strip()
-                            nxt2_lower = nxt2.lower()
-                            if (not re.search(r'\d', nxt2)
-                                    and nxt2_lower not in NON_NAME_WORDS
-                                    and nxt2_lower not in NEBER_WORDS
-                                    and not _is_half_word(nxt2)
-                                    and not _is_full_word(nxt2)
-                                    and _is_valid_name(nxt2)):
-                                collected, last_idx = _collect_name(tokens, i + 2, skip_indices)
-                                if collected and _is_valid_name(collected):
-                                    name = collected
-                                    for idx in range(i + 2, last_idx + 1):
-                                        skip_indices.add(idx)
+                        collected, last_idx = _collect_name(tokens, i + 2, skip_indices)
+                        if collected and _is_valid_name(collected):
+                            name = collected
+                            for idx in range(i + 2, last_idx + 1):
+                                skip_indices.add(idx)
                 elif _is_full_word(nxt):
                     is_full = True
                     skip_indices.add(i + 1)
-                    # FIX: full word ከኋላ ስም ይሰበስብ
-                    if name is None:
-                        if i + 2 < len(tokens):
-                            nxt2 = tokens[i + 2].strip()
-                            nxt2_lower = nxt2.lower()
-                            if (not re.search(r'\d', nxt2)
-                                    and nxt2_lower not in NON_NAME_WORDS
-                                    and nxt2_lower not in NEBER_WORDS
-                                    and not _is_half_word(nxt2)
-                                    and not _is_full_word(nxt2)
-                                    and _is_valid_name(nxt2)):
-                                collected, last_idx = _collect_name(tokens, i + 2, skip_indices)
-                                if collected and _is_valid_name(collected):
-                                    name = collected
-                                    for idx in range(i + 2, last_idx + 1):
-                                        skip_indices.add(idx)
                 elif nxt_lower not in NON_NAME_WORDS and nxt_lower not in NEBER_WORDS and name is None:
+                    # FIX: ስም ከቁጥር ቀጥሎ ይሰበስብ — ከዚያ half/full word ይፈልግ
                     collected, last_idx = _collect_name(tokens, i + 1, skip_indices)
                     if collected and _is_valid_name(collected):
                         name = collected
                         for idx in range(i + 1, last_idx + 1):
                             skip_indices.add(idx)
-
-        # FIX: ስም ከቁጥር በፊት ከሆነ (ስም begmash 02)
-        if name is None and i > 0:
-            prev_parts = []
-            j = i - 1
-            while j >= 0:
-                if j in skip_indices:
-                    break
-                prev_tok = tokens[j].strip()
-                prev_lower = prev_tok.lower()
-                if re.search(r'\d', prev_tok):
-                    break
-                if prev_lower in NON_NAME_WORDS or prev_lower in NEBER_WORDS:
-                    break
-                if _is_half_word(prev_tok) or _is_full_word(prev_tok):
-                    break
-                if all(c in SEPARATOR_CHARS for c in prev_tok):
-                    break
-                prev_parts.insert(0, prev_tok)
-                j -= 1
-            if prev_parts:
-                candidate = " ".join(prev_parts)
-                if _is_valid_name(candidate):
-                    name = candidate
+                        # FIX: ስም ከሰበሰብን በኋላ — ቀጣዩ token half/full word ነው?
+                        next_after_name = last_idx + 1
+                        if next_after_name < len(tokens):
+                            nxt2 = tokens[next_after_name].strip()
+                            if _is_half_word(nxt2):
+                                is_half = True
+                                skip_indices.add(next_after_name)
+                            elif _is_full_word(nxt2):
+                                is_full = True
+                                skip_indices.add(next_after_name)
 
         numbers.append((num, is_half, is_full, name))
         i += 1
@@ -433,13 +399,13 @@ if __name__ == "__main__":
         ("12አበበ begmash",           [(12, True,  None)]),
         ("11 አበበ በሙሉ",              [(11, False, None)]),
         ("11 አበበ ብለህ በሙሉ ያዝ",      [(11, False, None)]),
-        # NEW: ስም ከ half/full word ጋር
         ("02 አበበ begmash",          [(2,  True,  "አበበ")]),
         ("02 አበበ በግማሽ",             [(2,  True,  "አበበ")]),
         ("02 አበበ bemulu",           [(2,  False, "አበበ")]),
         ("02 አበበ በሙሉ",              [(2,  False, "አበበ")]),
-        ("begmash 02 አበበ",          [(2,  True,  "አበበ")]),
-        ("bemulu 02 አበበ",           [(2,  False, "አበበ")]),
+        ("02 አበበ g",                [(2,  True,  "አበበ")]),
+        ("02 አበበ ግ",                [(2,  True,  "አበበ")]),
+        ("11 አበበ 21 ሰለሞን begmash", [(11, False, "አበበ"), (21, True, "ሰለሞን")]),
     ]
 
     print("=" * 50)
