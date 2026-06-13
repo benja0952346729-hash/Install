@@ -974,7 +974,16 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
-        actual_name = parsed_name if parsed_name else user_name
+
+        # FIX: existing name ከ board ይጠቀም — telegram name አይደለም
+        if parsed_name:
+            actual_name = parsed_name
+        elif actual_num in taken_before:
+            existing_slots = taken_before[actual_num]
+            slot1 = next((s for s in existing_slots if s[2] == 1), None)
+            actual_name = slot1[0] if slot1 else user_name
+        else:
+            actual_name = user_name
 
         if actual_num < 1 or actual_num > settings["total_numbers"]:
             all_taken.append(actual_num)
@@ -1043,7 +1052,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         should_resend = False
 
     if game_id in nekay_active:
-        # FIX 1: ነቃይ active — 4 messages ሲሞላ delete old + resend, አለዚያ edit
         if should_resend:
             if board_msg_id:
                 try:
@@ -1084,7 +1092,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if snap:
             nekay_list2 = _build_nekay_from_snap(snap)
             nekay_text = build_nekay(nekay_list2)
-            # FIX 5: ነቃይ list ሁሌ new send
             new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
             update_remaining_message_id(game_id, new_nekay.message_id)
         else:
