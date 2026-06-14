@@ -1,5 +1,6 @@
 import psycopg2
 import json as _json
+import re
 from datetime import datetime, timedelta
 from config import DATABASE_URLS, DB_ROW_LIMIT
 
@@ -64,10 +65,8 @@ def _migrate_active_game(from_idx: int, to_idx: int):
         from_cur = from_conn.cursor()
         to_cur = to_conn.cursor()
 
-        # Init destination DB
         _init_db_conn(to_conn, to_cur)
 
-        # Active settings
         from_cur.execute("SELECT * FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
         settings_row = from_cur.fetchone()
         if not settings_row:
@@ -78,7 +77,6 @@ def _migrate_active_game(from_idx: int, to_idx: int):
         settings_dict = dict(zip(cols, settings_row))
         game_id = settings_dict["id"]
 
-        # Insert settings to new DB
         to_cur.execute("UPDATE game_settings SET is_active = FALSE")
         to_cur.execute("""
             INSERT INTO game_settings
@@ -97,7 +95,6 @@ def _migrate_active_game(from_idx: int, to_idx: int):
         ))
         new_game_id = to_cur.fetchone()[0]
 
-        # Registrations
         from_cur.execute("SELECT * FROM registrations WHERE game_id=%s", (game_id,))
         regs = from_cur.fetchall()
         from_cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='registrations' ORDER BY ordinal_position")
@@ -111,7 +108,6 @@ def _migrate_active_game(from_idx: int, to_idx: int):
             """, (new_game_id, rd["user_id"], rd["user_name"], rd["number"],
                   rd["is_half"], rd["slot"], rd["is_paid"], rd.get("is_nekay", False)))
 
-        # User balance
         from_cur.execute("SELECT * FROM user_balance WHERE game_id=%s", (game_id,))
         balances = from_cur.fetchall()
         for bal in balances:
@@ -121,7 +117,6 @@ def _migrate_active_game(from_idx: int, to_idx: int):
                 ON CONFLICT (game_id, telegram_id) DO UPDATE SET balance=EXCLUDED.balance
             """, (new_game_id, bal[2], bal[3]))
 
-        # Winners
         from_cur.execute("SELECT * FROM winners WHERE game_id=%s", (game_id,))
         winners = from_cur.fetchall()
         for w in winners:
@@ -186,8 +181,9 @@ def _init_db_conn(conn, cur):
 
         CREATE TABLE IF NOT EXISTS sms_payments (
             id SERIAL PRIMARY KEY,
-            ref_no TEXT UNIQUE NOT NULL,
+            ref_no TEXT UNIQUE,
             amount NUMERIC,
+            sender_name TEXT,
             pay_type TEXT,
             raw_sms TEXT,
             matched BOOLEAN DEFAULT FALSE,
@@ -213,6 +209,8 @@ def _init_db_conn(conn, cur):
             id SERIAL PRIMARY KEY,
             telegram_id BIGINT,
             ref_no TEXT UNIQUE,
+            amount NUMERIC,
+            sender_name TEXT,
             pay_type TEXT,
             description TEXT,
             matched BOOLEAN DEFAULT FALSE,
@@ -274,10 +272,6 @@ def _init_db_conn(conn, cur):
     conn.commit()
 
 
-# ============================================================
-# INIT DB
-# ============================================================
-
 def init_db():
     for i in range(len(DATABASE_URLS)):
         try:
@@ -297,6 +291,13 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS game_rule TEXT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
+
+            # --- Payment matching: amount range + sender_name (አዲስ) ---
+            cur.execute("ALTER TABLE sms_payments ALTER COLUMN ref_no DROP NOT NULL;")
+            cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
+            cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS amount NUMERIC;")
+            cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
+
             # Warning media table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS warning_media (
@@ -662,14 +663,13 @@ def set_warning_media(minutes: float, file_id: str, media_type: str, set_by: int
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO warning_media (minutes, file_id, media_type, set_by)
-        VALUES (%s, %s, %s, %s)
+        INSERT INTO warning_media (minutes, file_id, media_type)
+        VALUES (%s, %s, %s)
         ON CONFLICT (minutes) DO UPDATE
             SET file_id=EXCLUDED.file_id,
                 media_type=EXCLUDED.media_type,
-                set_by=EXCLUDED.set_by,
-                created_at=NOW()
-    """, (minutes, file_id, media_type, set_by))
+                added_at=NOW()
+    """, (minutes, file_id, media_type))
     conn.commit()
     cur.close()
     conn.close()
@@ -942,7 +942,6 @@ def confirm_payment(telegram_id: int, amount: float) -> dict:
     cur.close()
     conn.close()
 
-    # Activity log
     if confirmed:
         try:
             settings = get_active_settings()
@@ -1373,103 +1372,185 @@ def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
 
 
 # ============================================================
-# FUZZY MATCH & PAYMENTS
+# PAYMENT MATCHING — amount range + sender_name (Telebirr: + ref)
 # ============================================================
 
-def fuzzy_ref_match(ref1: str, ref2: str) -> bool:
-    if not ref1 or not ref2:
-        return False
-    if ref1 == ref2:
-        return True
-    r1, r2 = ref1.upper(), ref2.upper()
-    if len(r1) != len(r2):
-        return False
-    known_confusions = [('5', 'S'), ('0', 'O'), ('1', 'I')]
-    def is_known(a, b):
-        return any((a == x and b == y) or (a == y and b == x) for x, y in known_confusions)
-    known_errors = unknown_errors = 0
-    for c1, c2 in zip(r1, r2):
-        if c1 == c2:
-            continue
-        if is_known(c1, c2):
-            known_errors += 1
-        else:
-            unknown_errors += 1
-        if unknown_errors >= 2 or known_errors > 2 or known_errors + unknown_errors > 2:
-            return False
-    return True
+AMOUNT_TOLERANCE = 20  # ETB — amount ላይ የሚታገስ ልዩነት
 
 
-def try_match(ref_no: str) -> dict:
-    if not ref_no:
-        return {"matched": None}
+def _normalize_name(name: str) -> set:
+    """ስም ወደ ቃላት ስብስብ ይቀየራል — fuzzy match ለማድረግ"""
+    if not name:
+        return set()
+    cleaned = re.sub(r"[^a-zA-Z\u1200-\u137F\s]", "", name.lower())
+    return set(w for w in cleaned.split() if len(w) > 1)
+
+
+def _names_match(name1: str, name2: str) -> bool:
+    """ሁለት ስሞች ይዛመዳሉ ወይ? — ቢያንስ አንድ የጋራ ቃል ካላቸው True"""
+    n1, n2 = _normalize_name(name1), _normalize_name(name2)
+    if not n1 or not n2:
+        return False
+    return bool(n1 & n2)
+
+
+def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str) -> dict:
+    """
+    SMS ይቀመጣል። ቀደም ሲል pending ሆኖ የተቀመጠ screenshot ካለ
+    (Telebirr → ref match, ሌሎች → amount range + sender_name) ይዛመዳል።
+    """
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, ref_no, amount, pay_type FROM sms_payments WHERE matched = FALSE")
-    all_sms = cur.fetchall()
-    cur.execute("SELECT id, telegram_id, ref_no FROM screenshot_payments WHERE matched = FALSE")
-    all_screenshots = cur.fetchall()
-    for sms_id, sms_ref, amount, pay_type in all_sms:
-        for scr_id, telegram_id, scr_ref in all_screenshots:
-            if fuzzy_ref_match(sms_ref, scr_ref):
-                matched_data = {
-                    "telegram_id": telegram_id, "amount": float(amount),
-                    "type": pay_type, "refNo": sms_ref, "screenshotRef": scr_ref,
-                }
-                matched_json = _json.dumps(matched_data)
-                cur.execute("UPDATE sms_payments SET matched=TRUE, matched_data=%s WHERE id=%s", (matched_json, sms_id))
-                cur.execute("UPDATE screenshot_payments SET matched=TRUE, matched_data=%s WHERE id=%s", (matched_json, scr_id))
-                conn.commit()
-                cur.close()
-                conn.close()
-                return {"matched": matched_data}
+
+    cur.execute("""
+        INSERT INTO sms_payments (ref_no, amount, sender_name, pay_type, raw_sms, matched)
+        VALUES (%s, %s, %s, %s, %s, FALSE)
+        ON CONFLICT (ref_no) DO UPDATE
+            SET amount=EXCLUDED.amount, sender_name=EXCLUDED.sender_name,
+                pay_type=EXCLUDED.pay_type, raw_sms=EXCLUDED.raw_sms, matched=FALSE
+        RETURNING id
+    """, (ref, amount, sender_name, sms_type, raw_sms))
+    sms_id = cur.fetchone()[0]
+    conn.commit()
+
+    # Pending screenshot ካለ ይፈልጋል
+    cur.execute("""
+        SELECT id, telegram_id, ref_no, amount, sender_name
+        FROM screenshot_payments
+        WHERE matched=FALSE AND pay_type=%s
+          AND amount BETWEEN %s AND %s
+        ORDER BY created_at ASC
+    """, (sms_type, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    candidates = cur.fetchall()
+
+    chosen = None
+    if ref:
+        for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
+            if scr_ref and scr_ref == ref:
+                chosen = (scr_id, telegram_id, scr_sender)
+                break
+    if not chosen and sender_name:
+        for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
+            if _names_match(sender_name, scr_sender):
+                chosen = (scr_id, telegram_id, scr_sender)
+                break
+    if not chosen and len(candidates) == 1:
+        scr_id, telegram_id, scr_ref, scr_amount, scr_sender = candidates[0]
+        chosen = (scr_id, telegram_id, scr_sender)
+
+    matched_data = None
+    if chosen:
+        scr_id, telegram_id, scr_sender = chosen
+        cur.execute("UPDATE sms_payments SET matched=TRUE WHERE id=%s", (sms_id,))
+        cur.execute("UPDATE screenshot_payments SET matched=TRUE WHERE id=%s", (scr_id,))
+        conn.commit()
+        matched_data = {
+            "telegram_id": telegram_id,
+            "amount": float(amount),
+            "type": sms_type,
+            "sender_name": sender_name or scr_sender,
+        }
+
+    cur.close()
+    conn.close()
+    return {"matched": matched_data}
+
+
+def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_type: str):
+    """
+    Screenshot ሲደርስ — SMS ቀድሞ ደርሶ ይሁን ይፈልጋል።
+    Priority: Telebirr ref match → sender_name fuzzy match → ብቸኛ candidate ከሆነ
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, ref_no, amount, sender_name, pay_type
+        FROM sms_payments
+        WHERE matched=FALSE AND pay_type=%s
+          AND amount BETWEEN %s AND %s
+        ORDER BY created_at ASC
+    """, (pay_type, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    candidates = cur.fetchall()
+    cur.close()
+    conn.close()
+
+    if not candidates:
+        return None
+
+    if ref:
+        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+            if sms_ref and sms_ref == ref:
+                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
+                        "sender_name": sender_name or sms_sender}
+
+    if sender_name:
+        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+            if _names_match(sender_name, sms_sender):
+                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
+                        "sender_name": sender_name or sms_sender}
+
+    if len(candidates) == 1:
+        sms_id, sms_ref, sms_amount, sms_sender, sms_type = candidates[0]
+        return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
+                "sender_name": sender_name or sms_sender}
+
+    return None
+
+
+def mark_sms_as_used(sms_id: int):
+    """Match ሲሆን SMS used (matched) ይደረግበታል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE sms_payments SET matched=TRUE WHERE id=%s", (sms_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
+                             ref: str, pay_type: str, description: str) -> dict:
+    """SMS ገና ካልደረሰ — screenshot pending ሆኖ ይቀመጣል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO screenshot_payments
+        (telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
+        VALUES (%s, %s, %s, %s, %s, %s, FALSE)
+        ON CONFLICT (ref_no) DO UPDATE
+            SET telegram_id=EXCLUDED.telegram_id, amount=EXCLUDED.amount,
+                sender_name=EXCLUDED.sender_name, pay_type=EXCLUDED.pay_type,
+                description=EXCLUDED.description, matched=FALSE
+    """, (telegram_id, ref, amount, sender_name, pay_type, description))
     conn.commit()
     cur.close()
     conn.close()
     return {"matched": None}
 
 
-def save_sms_payment(ref_no: str, amount, pay_type: str, raw_sms: str) -> dict:
+def get_sms_payment_by_ref(ref_no: str):
+    if not ref_no:
+        return None
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO sms_payments (ref_no, amount, pay_type, raw_sms, matched)
-        VALUES (%s, %s, %s, %s, FALSE)
-        ON CONFLICT (ref_no) DO UPDATE SET matched = FALSE
-    """, (ref_no, amount, pay_type, raw_sms))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return try_match(ref_no)
-
-
-def get_sms_payment_by_ref(ref_no: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT id, ref_no, amount, pay_type FROM sms_payments WHERE ref_no = %s", (ref_no,))
+        SELECT id, ref_no, amount, sender_name, pay_type
+        FROM sms_payments WHERE ref_no = %s
+    """, (ref_no,))
     row = cur.fetchone()
     cur.close()
     conn.close()
     if not row:
         return None
-    return {"id": row[0], "refNo": row[1], "amount": row[2], "type": row[3]}
-
-
-def save_screenshot_payment(telegram_id: int, ref_no: str, pay_type: str, description: str) -> dict:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO screenshot_payments (telegram_id, ref_no, pay_type, description, matched)
-        VALUES (%s, %s, %s, %s, FALSE)
-        ON CONFLICT (ref_no) DO UPDATE SET matched=FALSE, telegram_id=EXCLUDED.telegram_id
-    """, (telegram_id, ref_no, pay_type, description))
-    conn.commit()
-    cur.close()
-    conn.close()
-    return try_match(ref_no)
+    return {
+        "id": row[0], "refNo": row[1],
+        "amount": float(row[2]) if row[2] is not None else None,
+        "sender_name": row[3], "type": row[4],
+    }
 
 
 def is_ref_matched_already(ref_no: str) -> bool:
+    if not ref_no:
+        return False
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1604,7 +1685,6 @@ def clear_balance_by_username(group_id: int, username: str) -> bool:
     conn = get_conn()
     cur = conn.cursor()
 
-    # Username → user_id ከ group_members
     cur.execute("""
         SELECT gm.username, r.user_id
         FROM group_members gm
@@ -1667,7 +1747,6 @@ def is_group_active(group_id: int) -> bool:
     conn.close()
     if row is None:
         return False
-    # is_active column የለም ከሆነ default True
     return bool(row[0]) if row[0] is not None else True
 
 
@@ -1708,7 +1787,6 @@ def get_report(group_id: int) -> dict:
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=24)
 
-    # Game reports table ካለ
     try:
         cur.execute("""
             SELECT COUNT(*), COALESCE(SUM(total_bet),0),
@@ -1726,7 +1804,6 @@ def get_report(group_id: int) -> dict:
     except Exception:
         games_count = total_bet = prize_total = profit = registered_count = 0
 
-    # Active game real-time
     cur.execute("""
         SELECT gs.id, gs.price_full, gs.price_half,
                gs.prize_1st, gs.prize_2nd, gs.prize_3rd,
@@ -1746,13 +1823,11 @@ def get_report(group_id: int) -> dict:
         price_full = float(price_full or 0)
         prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
 
-        # Filled groups — half든 full든 አንድ group ነው
         cur.execute("""
             SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
         """, (game_id,))
         filled_groups = cur.fetchone()[0] or 0
 
-        # Total registered slots
         cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
         total_slots = cur.fetchone()[0] or 0
 
@@ -1818,17 +1893,12 @@ def calculate_game_profit(game_id: int) -> dict:
     price_full = float(price_full or 0)
     prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
 
-    # Filled groups — half든 full든 አንድ group ነው
-    total_groups = total_numbers // per_person if per_person else total_numbers
-
-    # ስንት groups ቢያንስ አንድ slot ተይዟል
     cur.execute("""
         SELECT COUNT(DISTINCT number) FROM registrations
         WHERE game_id=%s
     """, (game_id,))
     filled_groups = cur.fetchone()[0] or 0
 
-    # Total registered slots
     cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
     registered_count = cur.fetchone()[0] or 0
 
