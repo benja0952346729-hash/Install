@@ -308,7 +308,6 @@ def _build_nekay_from_snap(snap: dict) -> list:
 # COUNTDOWN TASK
 # ============================================================
 
-, None)
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
     countdown_mins = warn_seconds / 60
 
@@ -382,11 +381,13 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         nekay_list = _build_nekay_from_snap(snap)
         nekay_text = build_nekay(nekay_list)
 
+        # FIX 4: warning message አይጠፋም — ነቃይ list አዲስ message ከታች ይላካል
         nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
 
         nekay_active.add(game_id)
         update_remaining_message_id(game_id, nekay_sent.message_id if nekay_sent else None)
     else:
+        # unpaid የለም — warning message ይቀራል (አይጠፋም)
         pass
 
     active_countdowns.pop(game_id, None)
