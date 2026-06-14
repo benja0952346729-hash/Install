@@ -1514,13 +1514,9 @@ def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO screenshot_payments
-        (telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
-        VALUES (%s, %s, %s, %s, %s, %s, FALSE)
-        ON CONFLICT (ref_no) DO UPDATE
-            SET telegram_id=EXCLUDED.telegram_id, amount=EXCLUDED.amount,
-                sender_name=EXCLUDED.sender_name, pay_type=EXCLUDED.pay_type,
-                description=EXCLUDED.description, matched=FALSE
-    """, (telegram_id, ref, amount, sender_name, pay_type, description))
+        (telegram_id, amount, sender_name, pay_type, description, matched)
+        VALUES (%s, %s, %s, %s, %s, FALSE)
+    """, (telegram_id, amount, sender_name, pay_type, description))
     conn.commit()
     cur.close()
     conn.close()
@@ -1917,4 +1913,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-    }
+                    }
