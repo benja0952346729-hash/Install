@@ -1027,7 +1027,10 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         elif actual_num in taken_before:
             existing_slots = taken_before[actual_num]
             slot1 = next((s for s in existing_slots if s[2] == 1), None)
-            actual_name = slot1[0] if slot1 else user_name
+            if slot1 and slot1[0] != user_name and slot1[1]:  # ሌላ user + half
+                actual_name = user_name
+            else:
+                actual_name = slot1[0] if slot1 else user_name
         else:
             actual_name = user_name
 
@@ -1194,7 +1197,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         check_and_rotate_db()
     except Exception:
         pass
-
 # ============================================================
 # HELPERS
 # ============================================================
