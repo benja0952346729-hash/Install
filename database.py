@@ -1427,10 +1427,10 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     cur.execute("""
         SELECT id, telegram_id, ref_no, amount, sender_name
         FROM screenshot_payments
-        WHERE matched=FALSE AND pay_type=%s
+        WHERE matched=FALSE
           AND amount BETWEEN %s AND %s
         ORDER BY created_at ASC
-    """, (sms_type, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     candidates = cur.fetchall()
 
     chosen = None
@@ -1465,21 +1465,16 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     conn.close()
     return {"matched": matched_data}
 
-
 def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_type: str):
-    """
-    Screenshot ሲደርስ — SMS ቀድሞ ደርሶ ይሁን ይፈልጋል።
-    Priority: Telebirr ref match → sender_name fuzzy match → ብቸኛ candidate ከሆነ
-    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, ref_no, amount, sender_name, pay_type
         FROM sms_payments
-        WHERE matched=FALSE AND pay_type=%s
+        WHERE matched=FALSE
           AND amount BETWEEN %s AND %s
         ORDER BY created_at ASC
-    """, (pay_type, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     candidates = cur.fetchall()
     cur.close()
     conn.close()
