@@ -1273,27 +1273,34 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
             cur.close()
             conn.close()
             return {"status": "conflict"}
-        refund = price_full - price_half
+
         cur.execute("UPDATE registrations SET is_half=TRUE WHERE id=%s", (reg_id,))
-        if refund > 0:
-            cur.execute("""
-                INSERT INTO user_balance (game_id, telegram_id, balance)
-                VALUES (%s, %s, %s)
-                ON CONFLICT (game_id, telegram_id)
-                DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
-            """, (game_id, user_id, refund, refund))
-            balance += refund
-        if not is_paid and balance >= price_half:
-            cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
-            cur.execute("""
-                UPDATE user_balance SET balance=%s, updated_at=NOW()
-                WHERE game_id=%s AND telegram_id=%s
-            """, (balance - price_half, game_id, user_id))
-            is_paid = True
+
+        if is_paid:
+            # ✅ paid ነበር → refund ይሰጥ
+            refund = price_full - price_half
+            if refund > 0:
+                cur.execute("""
+                    INSERT INTO user_balance (game_id, telegram_id, balance)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (game_id, telegram_id)
+                    DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
+                """, (game_id, user_id, refund, refund))
+                balance += refund
+        else:
+            # unpaid — balance ይፈትሽ
+            if balance >= price_half:
+                cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
+                cur.execute("""
+                    UPDATE user_balance SET balance=%s, updated_at=NOW()
+                    WHERE game_id=%s AND telegram_id=%s
+                """, (balance - price_half, game_id, user_id))
+                is_paid = True
+
         conn.commit()
         cur.close()
         conn.close()
-        return {"status": "ok", "refund": refund, "charge": 0, "is_paid": is_paid}
+        return {"status": "ok", "refund": 0, "charge": 0, "is_paid": is_paid}
 
     if target == "full" and is_half:
         charge = price_full - price_half
@@ -1324,7 +1331,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
     cur.close()
     conn.close()
     return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
-
 # ============================================================
 # FAILED ATTEMPTS
 # ============================================================
@@ -1971,4 +1977,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-    }
+}
