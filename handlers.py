@@ -21,12 +21,14 @@ from database import (
     add_winner_balance,
     save_winner,
     log_activity,
+    find_matching_sms,        # አዲስ — amount range + sender name ይፈልጋል
+    mark_sms_as_used,         # አዲስ — match ሲሆን used ያደርጋል
 )
 
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# GROQ KEY ROTATION — circular 1→N→1
+# GROQ KEY ROTATION
 # ============================================================
 
 _groq_index = 0
@@ -34,7 +36,6 @@ _groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS el
 
 
 def _get_groq_client() -> Groq:
-    """Circular rotation — 1→2→...→N→1"""
     global _groq_index
     if not _groq_clients:
         raise RuntimeError("GROQ_API_KEY ያልተቀመጠ!")
@@ -44,13 +45,8 @@ def _get_groq_client() -> Groq:
 
 
 def _call_groq_with_rotation(call_fn, max_retries: int = None):
-    """
-    Groq call ያደርጋል — rate limit ሲሆን ቀጣዩ key ይሞክራል
-    call_fn: lambda client: client.chat.completions.create(...)
-    """
     if max_retries is None:
         max_retries = len(_groq_clients) if _groq_clients else 1
-
     last_err = None
     for _ in range(max_retries):
         try:
@@ -66,6 +62,118 @@ def _call_groq_with_rotation(call_fn, max_retries: int = None):
 
 
 # ============================================================
+# SMS PARSER — Groq based
+# ============================================================
+
+async def parse_sms(sms: str) -> Optional[dict]:
+    """
+    Groq ተጠቅሞ SMS ይፈትሻል።
+    Returns:
+      {
+        "is_incoming": bool,
+        "type": "Telebirr" | "CBE" | "Awash" | "BOA" | "Other",
+        "amount": float,          # እኔጋ የደረሰው ብር
+        "sender_name": str|None,  # የላኪ ስም (ካለ)
+        "ref": str|None,          # transaction ref (Telebirr ብቻ)
+        "has_url": bool,          # URL አለ?
+        "url": str|None,          # URL (ካለ)
+      }
+    """
+    prompt = """You are an Ethiopian bank SMS parser.
+
+Analyze this SMS and extract payment information.
+
+Rules:
+- is_incoming: true only if money was RECEIVED (credited, received). false if money was SENT (transferred, debited).
+- type: "Telebirr", "CBE", "Awash", "BOA", or "Other"
+- amount: the amount received (not including service charges/VAT)
+- sender_name: name of who sent the money (if mentioned). null if not found.
+- ref: transaction reference number. Only extract if Telebirr (transaction number). null for others.
+- url: any URL found in the SMS. null if none.
+
+Respond ONLY in this exact JSON format with no extra text:
+{
+  "is_incoming": true or false,
+  "type": "CBE" or "Telebirr" or "Awash" or "BOA" or "Other",
+  "amount": <number or null>,
+  "sender_name": "<name or null>",
+  "ref": "<ref or null>",
+  "url": "<url or null>"
+}"""
+
+    try:
+        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": sms},
+            ],
+            max_tokens=300,
+            temperature=0.1,
+        ))
+        text = response.choices[0].message.content.strip()
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+
+        # Normalize
+        if parsed.get("sender_name") in ("null", "None", "", "N/A"):
+            parsed["sender_name"] = None
+        if parsed.get("ref") in ("null", "None", "", "N/A"):
+            parsed["ref"] = None
+        if parsed.get("url") in ("null", "None", "", "N/A"):
+            parsed["url"] = None
+
+        return parsed
+
+    except Exception as e:
+        logger.error(f"[SMS Parse] Groq error: {e}", exc_info=True)
+        return None
+
+
+# ============================================================
+# JINA — URL ላይ ስም ማውጣት
+# ============================================================
+
+async def fetch_sender_name_from_url(url: str) -> Optional[str]:
+    """
+    URL ከፍቶ Payer/Sender name ያወጣል።
+    CBE receipt: Payer field
+    BOA receipt: Payer field
+    Awash receipt: Payer/Sender field
+    """
+    try:
+        jina_url = f"https://r.jina.ai/{url}"
+        async with httpx.AsyncClient(timeout=20) as client:
+            res = await client.get(jina_url, headers={
+                "Accept": "text/plain",
+                "User-Agent": "Mozilla/5.0",
+            })
+            if res.status_code != 200:
+                return None
+            text = res.text
+
+        patterns = [
+            r"Payer\s*[:\-]\s*([A-Za-z\s]+)",
+            r"Sender\s*[:\-]\s*([A-Za-z\s]+)",
+            r"From\s*[:\-]\s*([A-Za-z\s]+)",
+            r"Customer Name\s*[:\-]\s*([A-Za-z\s]+)",
+        ]
+        for pattern in patterns:
+            m = re.search(pattern, text, re.IGNORECASE)
+            if m:
+                name = m.group(1).strip()
+                if name:
+                    return name
+        return None
+
+    except Exception as e:
+        logger.error(f"[Jina] Error: {e}")
+        return None
+
+
+# ============================================================
 # SMS WEBHOOK
 # ============================================================
 
@@ -74,29 +182,49 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
 
     parsed = await parse_sms(raw_sms)
     if not parsed:
-        logger.info("[SMS] Could not parse SMS")
         return {"success": False, "reason": "unparseable"}
 
-    ref_no = parsed.get("refNo")
+    # Outgoing SMS → skip
+    if not parsed.get("is_incoming"):
+        logger.info("[SMS] Outgoing SMS — skipping")
+        return {"success": False, "reason": "outgoing"}
+
     amount = parsed.get("amount")
+    sender_name = parsed.get("sender_name")
+    ref = parsed.get("ref")
     sms_type = parsed.get("type")
+    url = parsed.get("url")
 
-    logger.info(f"[SMS] Parsed → Type: {sms_type} | Ref: {ref_no} | Amount: {amount}")
+    if not amount:
+        return {"success": False, "reason": "no_amount"}
 
-    if not ref_no:
-        return {"success": False, "reason": "no_ref"}
+    # Sender name URL ላይ ካለ ያወጣል
+    if not sender_name and url:
+        logger.info(f"[SMS] No sender name — fetching from URL: {url}")
+        sender_name = await fetch_sender_name_from_url(url)
 
-    if get_sms_payment_by_ref(ref_no):
-        logger.info(f"[SMS] Ref {ref_no} already exists — skipping")
-        return {"success": False, "reason": "ref_already_used", "refNo": ref_no}
+    logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref}")
 
-    result = save_sms_payment(ref_no, amount, sms_type, raw_sms)
+    # DB ይቀምጣል
+    result = save_sms_payment(
+        amount=amount,
+        sender_name=sender_name,
+        ref=ref,
+        sms_type=sms_type,
+        raw_sms=raw_sms,
+    )
 
     if result.get("matched") and bot:
-        from config import GROUP_CHAT_ID
         await notify_match(bot, result["matched"], chat_id=GROUP_CHAT_ID, nekay_cb=nekay_cb)
 
-    return {"success": True, "matched": result.get("matched"), **parsed}
+    return {
+        "success": True,
+        "matched": result.get("matched"),
+        "amount": amount,
+        "sender_name": sender_name,
+        "ref": ref,
+        "type": sms_type,
+    }
 
 
 # ============================================================
@@ -109,7 +237,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
     username = msg.from_user.username or msg.from_user.first_name or "Unknown"
 
     if str(chat_id) != str(GROUP_CHAT_ID):
-        # multi-group: enabled group ላይ ይሰራ
         from database import is_group_enabled
         if not is_group_enabled(chat_id):
             return
@@ -127,11 +254,8 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
             return
 
         photo_type = analysis.get("photoType", "other")
-        ref_no = analysis.get("refNo")
 
-        logger.info(f"[Payment] photoType={photo_type} | refNo={ref_no} | user={username}")
-
-        if photo_type not in ("CBE", "Telebirr"):
+        if photo_type == "other":
             description = analysis.get("description", "ክፍያ ያልሆነ ምስል")
             try:
                 desc = await describe_photo_in_amharic(description)
@@ -141,26 +265,46 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
             await msg.reply_text(desc)
             return
 
-        if not ref_no:
-            await msg.reply_text("⚠️ Reference number ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
+        amount = analysis.get("amount")
+        sender_name = analysis.get("sender_name")
+        ref = analysis.get("ref")  # Telebirr ብቻ
+
+        if not amount:
+            await msg.reply_text("⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
-        if is_ref_matched_already(ref_no):
-            await msg.reply_text("⚠️ ይህ ክፍያ ቀደም ሲል ተረጋግጧል።")
-            return
+        logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username}")
 
-        result = save_screenshot_payment(
-            telegram_id, ref_no, photo_type, analysis.get("description", "")
+        # Match ይፈልጋል
+        match = find_matching_sms(
+            telegram_id=telegram_id,
+            amount=amount,
+            sender_name=sender_name,
+            ref=ref,
+            pay_type=photo_type,
         )
 
-        if result.get("matched"):
-            await notify_match(bot, result["matched"], msg.message_id, chat_id, nekay_cb=nekay_cb)
-        else:
+        if not match:
             await msg.reply_text(
-                f"✅ Screenshot ተቀብሏል። SMS ሲረጋገጥ ይወጣዋል...\n🔖 Ref: {ref_no}"
+                f"⏳ SMS ገና አልደረሰም። ሲደርስ ይወጣዋል...\n"
+                f"💰 ETB {amount}"
+                + (f"\n👤 {sender_name}" if sender_name else "")
             )
+            # Pending ሆኖ ይቀምጣል — SMS ሲደርስ match ያደርጋል
+            save_screenshot_payment(
+                telegram_id=telegram_id,
+                amount=amount,
+                sender_name=sender_name,
+                ref=ref,
+                pay_type=photo_type,
+                description=analysis.get("description", ""),
+            )
+            return
 
-        # Activity log
+        # Match ተገኘ!
+        mark_sms_as_used(match["id"])
+        await notify_match(bot, {**match, "telegram_id": telegram_id}, msg.message_id, chat_id, nekay_cb=nekay_cb)
+
         try:
             log_activity(chat_id, payments=1)
         except Exception:
@@ -169,6 +313,66 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
     except Exception as e:
         logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
         await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
+
+
+# ============================================================
+# SCREENSHOT ANALYZER
+# ============================================================
+
+async def analyze_screenshot(image_base64: str) -> dict:
+    prompt = """You are a payment receipt analyzer for Ethiopian banks.
+
+Supported: CBE, Telebirr, Awash, BOA (Bank of Abyssinia), and other Ethiopian banks.
+
+Extract:
+- photoType: "CBE", "Telebirr", "Awash", "BOA", "Other", or "other" (if not a receipt)
+- amount: the transferred/received amount (number only, no currency)
+- sender_name: name of the person who SENT the money (Payer field). null if not found.
+- ref: transaction reference. Only for Telebirr. null for others.
+- description: brief description in English
+
+CRITICAL: Read numbers carefully — check 0/O, 1/I, 5/S confusion.
+
+Respond ONLY in this exact JSON format:
+{
+  "photoType": "CBE" or "Telebirr" or "Awash" or "BOA" or "Other" or "other",
+  "amount": <number or null>,
+  "sender_name": "<name or null>",
+  "ref": "<ref or null>",
+  "description": "<description>"
+}"""
+
+    try:
+        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
+            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+            max_tokens=300,
+            temperature=0.1,
+        ))
+        text = response.choices[0].message.content.strip()
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+
+        for field in ("sender_name", "ref"):
+            if parsed.get(field) in ("null", "None", "", "N/A"):
+                parsed[field] = None
+
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[Screenshot] JSON parse error: {e}")
+        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not parse"}
+    except Exception as e:
+        logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
+        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
 
 
 # ============================================================
@@ -240,7 +444,6 @@ Only include places that have prizes. Numbers must be integers."""
 # ============================================================
 
 async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
-    """Admin winner ፎቶ ሲልክ ይጠራል"""
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
@@ -294,7 +497,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
         announcement = "\n".join(lines)
         await msg.reply_text(announcement)
 
-        # Group ላይ winner announcement
         if _group_id:
             try:
                 await bot.send_message(chat_id=_group_id, text=announcement)
@@ -307,148 +509,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
 
 
 # ============================================================
-# SMS PARSER
-# ============================================================
-
-async def parse_sms(sms: str) -> Optional[dict]:
-    m = re.search(r"Credited with ETB ([\d,]+\.?\d*).+?Ref No\s+([A-Z0-9]+)", sms, re.DOTALL)
-    if m:
-        return {"type": "CBE", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
-
-    m = re.search(
-        r"(?:received|transferred) ETB ([\d,]+\.?\d*).+(https://Mbreciept\S+)",
-        sms, re.DOTALL | re.IGNORECASE
-    )
-    if m:
-        amount = float(m.group(1).replace(",", ""))
-        ref_no = await fetch_ref_from_url(m.group(2).strip())
-        return {"type": "CBE", "amount": amount, "refNo": ref_no}
-
-    m = re.search(
-        r"transferred ETB ([\d,]+\.?\d*).+?bank transaction number is\s+([A-Z0-9]+)",
-        sms, re.DOTALL
-    )
-    if m:
-        return {"type": "Telebirr", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
-
-    m = re.search(
-        r"received ETB ([\d,]+\.?\d*).+?transaction number is\s+([A-Z0-9]+)",
-        sms, re.DOTALL
-    )
-    if m:
-        return {"type": "Telebirr", "amount": float(m.group(1).replace(",", "")), "refNo": m.group(2)}
-
-    return None
-
-
-# ============================================================
-# CBE RECEIPT URL → REF
-# ============================================================
-
-async def fetch_ref_from_url(url: str) -> Optional[str]:
-    try:
-        jina_url = f"https://r.jina.ai/{url}"
-        async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.get(jina_url, headers={
-                "Accept": "text/plain",
-                "User-Agent": "Mozilla/5.0",
-            })
-            if res.status_code != 200:
-                return None
-            text = res.text
-
-        patterns = [
-            r"VAT Receipt No[:\s]+([A-Z0-9]+)",
-            r"Reference No\.\s*\(VAT Invoice No\)[:\s]+([A-Z0-9]+)",
-            r"Reference No[:\s]+([A-Z0-9]+)",
-            r"Ref No[:\s]+([A-Z0-9]+)",
-        ]
-        for pattern in patterns:
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                return m.group(1)
-        return None
-    except Exception as e:
-        logger.error(f"[RefFetch] Error: {e}")
-        return None
-
-
-# ============================================================
-# GROQ — SCREENSHOT ANALYZER
-# ============================================================
-
-async def analyze_screenshot(image_base64: str) -> dict:
-    prompt = """You are a payment receipt analyzer. Look at this image and extract information.
-
-CRITICAL: Read the reference number with extreme care — check 0/O, 1/I, 5/S confusion.
-
-Respond ONLY in this exact JSON format with no extra text:
-{
-  "photoType": "CBE" or "Telebirr" or "other",
-  "refNo": "reference number or null",
-  "description": "brief description in English"
-}
-
-- CBE = Commercial Bank of Ethiopia receipt
-- Telebirr = Telebirr payment receipt
-- refNo: CBE → "VAT Receipt No" or "Ref No" | Telebirr → "transaction number"
-- If not a payment receipt, set photoType to "other" and refNo to null"""
-
-    try:
-        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-            max_tokens=300,
-            temperature=0.1,
-        ))
-        text = response.choices[0].message.content.strip()
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        text = text.strip()
-        parsed = json.loads(text)
-        if parsed.get("refNo") in ("null", "None", "", "N/A"):
-            parsed["refNo"] = None
-        return parsed
-    except json.JSONDecodeError as e:
-        logger.error(f"[Screenshot] JSON parse error: {e}")
-        return {"photoType": "other", "refNo": None, "description": "Could not parse response"}
-    except Exception as e:
-        logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
-        return {"photoType": "other", "refNo": None, "description": "Could not analyze"}
-
-
-# ============================================================
-# GROQ — አማርኛ ማብራሪያ
-# ============================================================
-
-async def describe_photo_in_amharic(description: str) -> str:
-    try:
-        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{
-                "role": "user",
-                "content": (
-                    f'ይህ ምስል "{description}" ነው። '
-                    "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
-                ),
-            }],
-            max_tokens=100,
-            temperature=0.3,
-        ))
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        logger.error(f"[Describe] Error: {e}")
-        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
-
-
-# ============================================================
 # MATCH NOTIFICATION
 # ============================================================
 
@@ -457,8 +517,8 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
     telegram_id = match_data["telegram_id"]
     amount = match_data["amount"]
-    pay_type = match_data["type"]
-    ref_no = match_data["refNo"]
+    pay_type = match_data.get("type", "Unknown")
+    sender_name = match_data.get("sender_name", "")
 
     result = confirm_payment(telegram_id, amount)
     confirmed = result["confirmed"]
@@ -473,8 +533,8 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
             f"✅ ክፍያ ተረጋግጧል!\n"
             f"💰 Amount: ETB {amount}\n"
             f"🏦 Via: {pay_type}\n"
-            f"🔖 Ref: {ref_no}\n"
-            f"👤 Telegram ID: {telegram_id}\n"
+            + (f"👤 ከ: {sender_name}\n" if sender_name else "")
+            + f"🆔 Telegram ID: {telegram_id}\n"
             f"🎯 ✅ ቁጥሮች: {nums}"
         )
         if remaining_balance > 0:
@@ -482,7 +542,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     else:
         message = (
             f"💰 ETB {amount} ተቀብሏል — ነገር ግን የሚሸፈን ቁጥር የለም።\n"
-            f"👤 Telegram ID: {telegram_id}\n"
+            f"🆔 Telegram ID: {telegram_id}\n"
             f"💳 ባላንስ: ETB {remaining_balance}"
         )
 
@@ -518,6 +578,30 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
                     new_msg = await bot.send_message(chat_id=target_chat, text=board_text)
                     from database import update_board_message_id
                     update_board_message_id(game_id, new_msg.message_id)
+
+
+# ============================================================
+# GROQ — አማርኛ ማብራሪያ
+# ============================================================
+
+async def describe_photo_in_amharic(description: str) -> str:
+    try:
+        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{
+                "role": "user",
+                "content": (
+                    f'ይህ ምስል "{description}" ነው። '
+                    "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
+                ),
+            }],
+            max_tokens=100,
+            temperature=0.3,
+        ))
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        logger.error(f"[Describe] Error: {e}")
+        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
 
 
 # ============================================================
