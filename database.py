@@ -1387,11 +1387,21 @@ def _normalize_name(name: str) -> set:
 
 
 def _names_match(name1: str, name2: str) -> bool:
-    """ሁለት ስሞች ይዛመዳሉ ወይ? — ቢያንስ አንድ የጋራ ቃል ካላቸው True"""
     n1, n2 = _normalize_name(name1), _normalize_name(name2)
     if not n1 or not n2:
         return False
-    return bool(n1 & n2)
+    # Exact word match
+    if n1 & n2:
+        return True
+    # Fuzzy match — ቃላት 80% ቢመሳሰሉ
+    for w1 in n1:
+        for w2 in n2:
+            if len(w1) > 3 and len(w2) > 3:
+                shorter = min(len(w1), len(w2))
+                longer = max(len(w1), len(w2))
+                if shorter / longer >= 0.8 and w1[:3] == w2[:3]:
+                    return True
+    return False
 
 
 def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str) -> dict:
@@ -1922,4 +1932,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-        }
+    }
