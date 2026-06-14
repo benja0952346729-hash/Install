@@ -198,9 +198,9 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
     if not amount:
         return {"success": False, "reason": "no_amount"}
 
-    # Sender name URL ላይ ካለ ያወጣል
-    if not sender_name and url:
-        logger.info(f"[SMS] No sender name — fetching from URL: {url}")
+    # Sender name አጭር ወይም null ከሆነ URL ላይ ያወጣል
+    if url and (not sender_name or len(sender_name.split()) < 2):
+        logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
         sender_name = await fetch_sender_name_from_url(url)
 
     logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref}")
@@ -225,7 +225,6 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
         "ref": ref,
         "type": sms_type,
     }
-
 
 # ============================================================
 # PAYMENT PHOTO HANDLER
