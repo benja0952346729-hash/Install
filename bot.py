@@ -308,6 +308,7 @@ def _build_nekay_from_snap(snap: dict) -> list:
 # COUNTDOWN TASK
 # ============================================================
 
+, None)
 async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 120):
     countdown_mins = warn_seconds / 60
 
@@ -333,11 +334,10 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
     await asyncio.sleep(warn_seconds)
 
-    # Balance check — ✅ ወይስ delete
+    # Balance check — ብር ይበቃል → ✅, አይበቃም → ምንም አታድርግ
     settings = get_active_settings(group_id=group_id)
     if settings:
         price_half = float(settings.get("price_half") or 0)
-        from database import get_conn
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
@@ -360,9 +360,7 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
                     UPDATE user_balance SET balance=balance-%s, updated_at=NOW()
                     WHERE game_id=%s AND telegram_id=%s
                 """, (price_half, game_id, user_id))
-            else:
-                cur.execute("DELETE FROM registrations WHERE id=%s", (reg_id,))
-            conn.commit()
+                conn.commit()
         cur.close()
         conn.close()
 
@@ -392,7 +390,6 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         pass
 
     active_countdowns.pop(game_id, None)
-
 # ============================================================
 # /start
 # ============================================================
