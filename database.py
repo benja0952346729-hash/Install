@@ -1417,7 +1417,8 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
         VALUES (%s, %s, %s, %s, %s, FALSE)
         ON CONFLICT (ref_no) DO UPDATE
             SET amount=EXCLUDED.amount, sender_name=EXCLUDED.sender_name,
-                pay_type=EXCLUDED.pay_type, raw_sms=EXCLUDED.raw_sms, matched=FALSE
+                pay_type=EXCLUDED.pay_type, raw_sms=EXCLUDED.raw_sms
+            WHERE sms_payments.matched=FALSE
         RETURNING id
     """, (ref, amount, sender_name, sms_type, raw_sms))
     sms_id = cur.fetchone()[0]
