@@ -1510,27 +1510,38 @@ def mark_sms_as_used(sms_id: int):
     conn.commit()
     cur.close()
     conn.close()
-
+    
+def is_sms_already_used(sms_id: int) -> bool:
+    """SMS id already matched ነው?"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT matched FROM sms_payments WHERE id=%s", (sms_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return bool(row and row[0])
 
 def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
                              ref: str, pay_type: str, description: str) -> dict:
-    """SMS ገና ካልደረሰ — screenshot pending ሆኖ ይቀመጣል"""
+    """አዲስ screenshot ሲልክ — የቀደሙ pending ይሰረዛሉ፣ 1 pending ብቻ ይቀመጣል"""
     import uuid
     conn = get_conn()
     cur = conn.cursor()
 
-    # Telebirr ብቻ ref ይጠቀማል — ሌሎች random unique value
+    # የቀደሙ pending ይሰረዛሉ — 1 user = 1 pending ብቻ
+    cur.execute("""
+        DELETE FROM screenshot_payments
+        WHERE telegram_id=%s AND matched=FALSE
+    """, (telegram_id,))
+
     safe_ref = ref if (pay_type == "Telebirr" and ref) else str(uuid.uuid4())
 
     cur.execute("""
         INSERT INTO screenshot_payments
         (telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
         VALUES (%s, %s, %s, %s, %s, %s, FALSE)
-        ON CONFLICT (ref_no) DO UPDATE
-            SET telegram_id=EXCLUDED.telegram_id, amount=EXCLUDED.amount,
-                sender_name=EXCLUDED.sender_name, pay_type=EXCLUDED.pay_type,
-                description=EXCLUDED.description, matched=FALSE
     """, (telegram_id, safe_ref, amount, sender_name, pay_type, description))
+
     conn.commit()
     cur.close()
     conn.close()
