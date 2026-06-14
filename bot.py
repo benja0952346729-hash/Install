@@ -333,41 +333,6 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
     await asyncio.sleep(warn_seconds)
 
-    # Balance check — half unpaid ብቻ ይፈትሻል
-    settings = get_active_settings(group_id=group_id)
-    if settings:
-        price_half = float(settings.get("price_half") or 0)
-        if price_half > 0:
-            from database import get_conn
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT id, user_id, is_half, slot, number
-                FROM registrations
-                WHERE game_id=%s AND is_paid=FALSE AND is_half=TRUE AND user_id != 0
-                ORDER BY number, slot
-            """, (game_id,))
-            regs = cur.fetchall()
-            for reg_id, user_id, is_half, slot, number in regs:
-                # ቀጣዩ loop ላይ fresh balance ያንብባል
-                cur2 = conn.cursor()
-                cur2.execute("""
-                    SELECT balance FROM user_balance
-                    WHERE game_id=%s AND telegram_id=%s
-                """, (game_id, user_id))
-                bal_row = cur2.fetchone()
-                balance = float(bal_row[0]) if bal_row else 0.0
-                cur2.close()
-                if balance >= price_half:
-                    cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
-                    cur.execute("""
-                        UPDATE user_balance SET balance=balance-%s, updated_at=NOW()
-                        WHERE game_id=%s AND telegram_id=%s
-                    """, (price_half, game_id, user_id))
-                    conn.commit()
-            cur.close()
-            conn.close()
-
     unpaid = get_unpaid_numbers(game_id)
     if unpaid:
         snap = {}
