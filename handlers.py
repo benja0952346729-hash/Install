@@ -322,20 +322,41 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
 async def analyze_screenshot(image_base64: str) -> dict:
     prompt = """You are a payment receipt analyzer for Ethiopian banks.
 
-Supported: CBE, Telebirr, Awash, BOA (Bank of Abyssinia), and other Ethiopian banks.
+You must recognize ALL Ethiopian bank receipts including but not limited to:
+- CBE (Commercial Bank of Ethiopia)
+- Telebirr
+- Awash Bank / AwashPay
+- BOA (Bank of Abyssinia)
+- Dashen Bank
+- Abay Bank
+- Nib Bank
+- Wegagen Bank
+- United Bank
+- Lion Bank
+- Oromia Bank
+- Bunna Bank
+- Berhan Bank
+- Cooperative Bank of Oromia (Coopbank)
+- Enat Bank
+- Amhara Bank
+- ZemenBank
+- Any other Ethiopian bank
 
-Extract:
-- photoType: "CBE", "Telebirr", "Awash", "BOA", "Other", or "other" (if not a receipt)
-- amount: the transferred/received amount (number only, no currency)
-- sender_name: name of the person who SENT the money (Payer field). null if not found.
-- ref: transaction reference. Only for Telebirr. null for others.
-- description: brief description in English
+RULES:
+- If image is ANY Ethiopian bank receipt → extract info, never return "other"
+- photoType: use bank name like "CBE", "Telebirr", "Awash", "BOA", "Dashen", etc.
+- amount: transferred amount (number only)
+- sender_name: name of sender/payer. null if not found.
+- ref: transaction ref (Telebirr only). null for others.
+- description: brief English description
 
-CRITICAL: Read numbers carefully — check 0/O, 1/I, 5/S confusion.
+CRITICAL:
+- ONLY return photoType = "other" if image is clearly NOT a bank receipt
+- Always try your best even if image quality is low
 
-Respond ONLY in this exact JSON format:
+Respond ONLY in JSON:
 {
-  "photoType": "CBE" or "Telebirr" or "Awash" or "BOA" or "Other" or "other",
+  "photoType": "<bank name or other>",
   "amount": <number or null>,
   "sender_name": "<name or null>",
   "ref": "<ref or null>",
