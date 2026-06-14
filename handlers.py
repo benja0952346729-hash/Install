@@ -21,8 +21,9 @@ from database import (
     add_winner_balance,
     save_winner,
     log_activity,
-    find_matching_sms,        # አዲስ — amount range + sender name ይፈልጋል
-    mark_sms_as_used,         # አዲስ — match ሲሆን used ያደርጋል
+    find_matching_sms,
+    mark_sms_as_used,
+    is_sms_already_used, 
 )
 
 logger = logging.getLogger(__name__)
@@ -266,7 +267,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
 
         amount = analysis.get("amount")
         sender_name = analysis.get("sender_name")
-        ref = analysis.get("ref")  # Telebirr ብቻ
+        ref = analysis.get("ref")
 
         if not amount:
             await msg.reply_text("⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
@@ -289,7 +290,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
                 f"💰 ETB {amount}"
                 + (f"\n👤 {sender_name}" if sender_name else "")
             )
-            # Pending ሆኖ ይቀምጣል — SMS ሲደርስ match ያደርጋል
+            # የቀደሙ pending ይሰረዛሉ — አዲሱ ብቻ ይቀመጣል
             save_screenshot_payment(
                 telegram_id=telegram_id,
                 amount=amount,
@@ -298,6 +299,11 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
                 pay_type=photo_type,
                 description=analysis.get("description", ""),
             )
+            return
+
+        # SMS already used ነው?
+        if is_sms_already_used(match["id"]):
+            await msg.reply_text("⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።")
             return
 
         # Match ተገኘ!
