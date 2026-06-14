@@ -1650,13 +1650,38 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
     price_half = float(price_row[1] or 0)
     refund = sum(price_half if r[1] else price_full for r in rows if r[3])
     cur.execute("DELETE FROM registrations WHERE game_id=%s AND user_id=%s AND number=%s", (game_id, user_id, number))
+    
     if refund > 0:
         cur.execute("""
             INSERT INTO user_balance (game_id, telegram_id, balance)
             VALUES (%s, %s, %s)
             ON CONFLICT (game_id, telegram_id)
             DO UPDATE SET balance = user_balance.balance + %s, updated_at = NOW()
+            RETURNING balance
         """, (game_id, user_id, refund, refund))
+        total_balance = float(cur.fetchone()[0])
+
+        # Unpaid registrations ላይ ይተገብር
+        cur.execute("""
+            SELECT id, number, is_half, slot
+            FROM registrations
+            WHERE game_id=%s AND user_id=%s AND is_paid=FALSE
+            ORDER BY registered_at, slot
+        """, (game_id, user_id))
+        unpaid = cur.fetchall()
+
+        remaining = total_balance
+        for reg_id, reg_number, reg_is_half, reg_slot in unpaid:
+            cost = price_half if reg_is_half else price_full
+            if remaining >= cost:
+                cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
+                remaining -= cost
+
+        cur.execute("""
+            UPDATE user_balance SET balance=%s, updated_at=NOW()
+            WHERE game_id=%s AND telegram_id=%s
+        """, (remaining, game_id, user_id))
+
     conn.commit()
     cur.close()
     conn.close()
@@ -1946,4 +1971,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-            }
+    }
