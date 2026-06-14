@@ -333,78 +333,63 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
     await asyncio.sleep(warn_seconds)
 
+    # Balance check — ✅ ወይስ delete
+    settings = get_active_settings(group_id=group_id)
+    if settings:
+        price_half = float(settings.get("price_half") or 0)
+        from database import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT id, user_id, is_half, slot, number
+            FROM registrations
+            WHERE game_id=%s AND is_paid=FALSE
+            ORDER BY number, slot
+        """, (game_id,))
+        regs = cur.fetchall()
+        for reg_id, user_id, is_half, slot, number in regs:
+            cur.execute("""
+                SELECT balance FROM user_balance
+                WHERE game_id=%s AND telegram_id=%s
+            """, (game_id, user_id))
+            bal_row = cur.fetchone()
+            balance = float(bal_row[0]) if bal_row else 0.0
+            if balance >= price_half:
+                cur.execute("UPDATE registrations SET is_paid=TRUE, is_half=TRUE WHERE id=%s", (reg_id,))
+                cur.execute("""
+                    UPDATE user_balance SET balance=balance-%s, updated_at=NOW()
+                    WHERE game_id=%s AND telegram_id=%s
+                """, (price_half, game_id, user_id))
+            else:
+                cur.execute("DELETE FROM registrations WHERE id=%s", (reg_id,))
+            conn.commit()
+        cur.close()
+        conn.close()
+
     unpaid = get_unpaid_numbers(game_id)
     if unpaid:
-        settings = get_active_settings(group_id=group_id)
-        price_full = float(settings["price_full"] or 0) if settings else 0
-        price_half = float(settings.get("price_half") or 0) if settings else 0
-
         snap = {}
-
         for number, slots in unpaid:
-            # User ይፈልጋል
-            from database import get_conn
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("""
-                SELECT id, user_id, is_half, slot, is_paid
-                FROM registrations
-                WHERE game_id=%s AND number=%s AND is_paid=FALSE
-                ORDER BY slot
-            """, (game_id, number))
-            unpaid_regs = cur.fetchall()
-
-            for reg_id, user_id, is_half, slot, is_paid in unpaid_regs:
-                # Balance ይፈትሽ
-                cur.execute("""
-                    SELECT balance FROM user_balance
-                    WHERE game_id=%s AND telegram_id=%s
-                """, (game_id, user_id))
-                bal_row = cur.fetchone()
-                balance = float(bal_row[0]) if bal_row else 0.0
-
-                cost = price_half  # ነቃይ ሁሌ ግማሽ ነው
-                if balance >= cost:
-                    # ✅ ያድርግ
-                    cur.execute("UPDATE registrations SET is_paid=TRUE, is_half=TRUE WHERE id=%s", (reg_id,))
-                    cur.execute("""
-                        UPDATE user_balance SET balance=%s, updated_at=NOW()
-                        WHERE game_id=%s AND telegram_id=%s
-                    """, (balance - cost, game_id, user_id))
-                    conn.commit()
-                else:
-                    # ይነቀል
-                    cur.execute("DELETE FROM registrations WHERE id=%s", (reg_id,))
-                    conn.commit()
-
-            cur.close()
-            conn.close()
-
-        # ከ balance check በኋላ ቀሪ unpaid ይፈልጋል
-        remaining_unpaid = get_unpaid_numbers(game_id)
-        for number, slots in remaining_unpaid:
             if slots == {1} or slots == {1, 2} or len(slots) == 0:
                 snap[number] = 0
             elif slots == {2}:
                 snap[number] = 2
             else:
                 snap[number] = 0
+        nekay_numbers[game_id] = snap
 
-        if snap:
-            nekay_numbers[game_id] = snap
+        for number, slots in unpaid:
+            mark_nekay(game_id, number)
 
-            for number, slots in remaining_unpaid:
-                mark_nekay(game_id, number)
+        nekay_list = _build_nekay_from_snap(snap)
+        nekay_text = build_nekay(nekay_list)
 
-            nekay_list = _build_nekay_from_snap(snap)
-            nekay_text = build_nekay(nekay_list)
+        nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
 
-            nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
-
-            nekay_active.add(game_id)
-            update_remaining_message_id(game_id, nekay_sent.message_id if nekay_sent else None)
-        else:
-            pass
+        nekay_active.add(game_id)
+        update_remaining_message_id(game_id, nekay_sent.message_id if nekay_sent else None)
+    else:
+        pass
 
     active_countdowns.pop(game_id, None)
 
