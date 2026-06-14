@@ -1510,13 +1510,22 @@ def mark_sms_as_used(sms_id: int):
 def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
                              ref: str, pay_type: str, description: str) -> dict:
     """SMS ገና ካልደረሰ — screenshot pending ሆኖ ይቀመጣል"""
+    import uuid
     conn = get_conn()
     cur = conn.cursor()
+
+    # Telebirr ብቻ ref ይጠቀማል — ሌሎች random unique value
+    safe_ref = ref if (pay_type == "Telebirr" and ref) else str(uuid.uuid4())
+
     cur.execute("""
         INSERT INTO screenshot_payments
-        (telegram_id, amount, sender_name, pay_type, description, matched)
-        VALUES (%s, %s, %s, %s, %s, FALSE)
-    """, (telegram_id, amount, sender_name, pay_type, description))
+        (telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
+        VALUES (%s, %s, %s, %s, %s, %s, FALSE)
+        ON CONFLICT (ref_no) DO UPDATE
+            SET telegram_id=EXCLUDED.telegram_id, amount=EXCLUDED.amount,
+                sender_name=EXCLUDED.sender_name, pay_type=EXCLUDED.pay_type,
+                description=EXCLUDED.description, matched=FALSE
+    """, (telegram_id, safe_ref, amount, sender_name, pay_type, description))
     conn.commit()
     cur.close()
     conn.close()
@@ -1913,4 +1922,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-                    }
+        }
