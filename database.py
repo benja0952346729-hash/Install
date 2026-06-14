@@ -583,7 +583,7 @@ def clear_db_data(db_index: int):
     cur.execute("DELETE FROM user_balance")
     cur.execute("DELETE FROM winners")
     cur.execute("DELETE FROM sms_payments")
-    cur.execute("DELETE FROM screenshot_payments")
+    cur.execute("DELETE FROM screenshot_payments")  # ← ይህን ጨምር
     cur.execute("DELETE FROM failed_attempts")
     cur.execute("DELETE FROM group_activity")
     cur.execute("UPDATE game_settings SET is_active=FALSE")
