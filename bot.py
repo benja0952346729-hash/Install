@@ -349,12 +349,15 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
             """, (game_id,))
             regs = cur.fetchall()
             for reg_id, user_id, is_half, slot, number in regs:
-                cur.execute("""
+                # ቀጣዩ loop ላይ fresh balance ያንብባል
+                cur2 = conn.cursor()
+                cur2.execute("""
                     SELECT balance FROM user_balance
                     WHERE game_id=%s AND telegram_id=%s
                 """, (game_id, user_id))
-                bal_row = cur.fetchone()
+                bal_row = cur2.fetchone()
                 balance = float(bal_row[0]) if bal_row else 0.0
+                cur2.close()
                 if balance >= price_half:
                     cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
                     cur.execute("""
