@@ -23,7 +23,7 @@ from database import (
     log_activity,
     find_matching_sms,
     mark_sms_as_used,
-    is_sms_already_used, 
+    is_sms_already_used,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,11 +73,11 @@ async def parse_sms(sms: str) -> Optional[dict]:
       {
         "is_incoming": bool,
         "type": "Telebirr" | "CBE" | "Awash" | "BOA" | "Other",
-        "amount": float,          # እኔጋ የደረሰው ብር
-        "sender_name": str|None,  # የላኪ ስም (ካለ)
-        "ref": str|None,          # transaction ref (Telebirr ብቻ)
-        "has_url": bool,          # URL አለ?
-        "url": str|None,          # URL (ካለ)
+        "amount": float,
+        "sender_name": str|None,
+        "ref": str|None,
+        "has_url": bool,
+        "url": str|None,
       }
     """
     prompt = """You are an Ethiopian bank SMS parser.
@@ -118,7 +118,6 @@ Respond ONLY in this exact JSON format with no extra text:
         text = re.sub(r"\s*```$", "", text)
         parsed = json.loads(text.strip())
 
-        # Normalize
         if parsed.get("sender_name") in ("null", "None", "", "N/A"):
             parsed["sender_name"] = None
         if parsed.get("ref") in ("null", "None", "", "N/A"):
@@ -140,9 +139,6 @@ Respond ONLY in this exact JSON format with no extra text:
 async def fetch_sender_name_from_url(url: str) -> Optional[str]:
     """
     URL ከፍቶ Payer/Sender name ያወጣል።
-    CBE receipt: Payer field
-    BOA receipt: Payer field
-    Awash receipt: Payer/Sender field
     """
     try:
         jina_url = f"https://r.jina.ai/{url}"
@@ -178,7 +174,7 @@ async def fetch_sender_name_from_url(url: str) -> Optional[str]:
 # SMS WEBHOOK
 # ============================================================
 
-async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
+async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: int = None) -> dict:
     logger.info(f"[SMS] Received: {raw_sms}")
 
     parsed = await parse_sms(raw_sms)
@@ -204,19 +200,23 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
         logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
         sender_name = await fetch_sender_name_from_url(url)
 
-    logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref}")
+    logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref} | group={group_id}")
 
-    # DB ይቀምጣል
+    # DB ይቀምጣል — group_id ጋር
     result = save_sms_payment(
         amount=amount,
         sender_name=sender_name,
         ref=ref,
         sms_type=sms_type,
         raw_sms=raw_sms,
+        group_id=group_id,
     )
 
     if result.get("matched") and bot:
-        await notify_match(bot, result["matched"], chat_id=GROUP_CHAT_ID, nekay_cb=nekay_cb)
+        matched = result["matched"]
+        # group_id ካለ matched ውስጥ ይጠቀም
+        target_chat = matched.get("group_id") or group_id or GROUP_CHAT_ID
+        await notify_match(bot, matched, chat_id=target_chat, nekay_cb=nekay_cb)
 
     return {
         "success": True,
@@ -227,19 +227,18 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None) -> dict:
         "type": sms_type,
     }
 
+
 # ============================================================
 # PAYMENT PHOTO HANDLER
 # ============================================================
 
-async def handle_payment_photo(bot, msg, nekay_cb=None):
+async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
     chat_id = msg.chat.id
     telegram_id = msg.from_user.id
     username = msg.from_user.username or msg.from_user.first_name or "Unknown"
 
-    if str(chat_id) != str(GROUP_CHAT_ID):
-        from database import is_group_enabled
-        if not is_group_enabled(chat_id):
-            return
+    # group_id — caller ካስተላለፈ ይጠቀም፣ ካልሆነ chat_id
+    _group_id = group_id or chat_id
 
     try:
         photo = msg.photo[-1]
@@ -273,15 +272,16 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
             await msg.reply_text("⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
-        logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username}")
+        logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
 
-        # Match ይፈልጋል
+        # Match ይፈልጋል — group_id ጋር
         match = find_matching_sms(
             telegram_id=telegram_id,
             amount=amount,
             sender_name=sender_name,
             ref=ref,
             pay_type=photo_type,
+            group_id=_group_id,
         )
 
         if not match:
@@ -290,7 +290,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
                 f"💰 ETB {amount}"
                 + (f"\n👤 {sender_name}" if sender_name else "")
             )
-            # የቀደሙ pending ይሰረዛሉ — አዲሱ ብቻ ይቀመጣል
+            # የቀደሙ pending ይሰረዛሉ — አዲሱ ብቻ ይቀመጣል — group_id ጋር
             save_screenshot_payment(
                 telegram_id=telegram_id,
                 amount=amount,
@@ -298,6 +298,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
                 ref=ref,
                 pay_type=photo_type,
                 description=analysis.get("description", ""),
+                group_id=_group_id,
             )
             return
 
@@ -308,10 +309,16 @@ async def handle_payment_photo(bot, msg, nekay_cb=None):
 
         # Match ተገኘ!
         mark_sms_as_used(match["id"])
-        await notify_match(bot, {**match, "telegram_id": telegram_id}, msg.message_id, chat_id, nekay_cb=nekay_cb)
+        await notify_match(
+            bot,
+            {**match, "telegram_id": telegram_id, "group_id": _group_id},
+            msg.message_id,
+            _group_id,
+            nekay_cb=nekay_cb,
+        )
 
         try:
-            log_activity(chat_id, payments=1)
+            log_activity(_group_id, payments=1)
         except Exception:
             pass
 
@@ -516,7 +523,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
             telegram_id = user["telegram_id"]
             user_name = user["user_name"]
 
-            add_winner_balance(settings["id"], telegram_id, prize)
+            add_winner_balance(settings["id"], telegram_id, prize, group_id=_group_id)
             save_winner(settings["id"], place, telegram_id, user_name, number, prize, group_id=_group_id)
             lines.append(f"{medal} {place}ኛ: #{number} — {user_name} → ETB {prize} ✅")
 
@@ -545,8 +552,10 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     amount = match_data["amount"]
     pay_type = match_data.get("type", "Unknown")
     sender_name = match_data.get("sender_name", "")
+    _group_id = match_data.get("group_id") or chat_id or GROUP_CHAT_ID
 
-    result = confirm_payment(telegram_id, amount)
+    # group_id ጋር confirm_payment ይጠራል
+    result = confirm_payment(telegram_id, amount, group_id=_group_id)
     confirmed = result["confirmed"]
     remaining_balance = result["remaining_balance"]
 
@@ -574,7 +583,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
     logger.info(f"[Match] ✅ TelegramID: {telegram_id} | ETB {amount} | confirmed: {len(confirmed)}")
 
-    target_chat = chat_id or GROUP_CHAT_ID
+    target_chat = _group_id
     if target_chat:
         if reply_msg_id:
             await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
@@ -585,7 +594,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
         await nekay_cb(confirmed)
 
     if confirmed and target_chat:
-        settings = get_active_settings()
+        settings = get_active_settings(group_id=_group_id)
         if settings:
             game_id = settings["id"]
             taken = get_taken_numbers(game_id)
