@@ -1,17 +1,8 @@
 import re
-import regex  # pip install regex — emoji support ለማስቻል
+import difflib
 
-HALF_WORDS = [
-    "begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ", "begmas", "ግማ", "half",
-    # አዲስ variants
-    "begimash", "begimashi", "begmashi", "begimash",
-    "gimash", "gimashi", "gmashi",
-    "bgmash", "bgimash", "bgimashi",
-    "begmsh", "bgmsh",
-]
-
+HALF_WORDS = ["begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ", "begmas", "ግማ", "half"]
 FULL_WORDS = ["bemulu", "mulu", "በሙሉ", "ሙሉ"]
-
 GLOBAL_HALF_WORDS = ["ሁሉንም በግማሽ", "ሁሉንም ግማሽ", "ሁሉም በግማሽ", "hulunm begmash", "hulunm gmash"]
 GLOBAL_FULL_WORDS = ["ሁሉንም በሙሉ", "ሁሉንም ሙሉ", "ሁሉም ሙሉ", "hulunm bemulu", "hulunm mulu"]
 
@@ -29,21 +20,57 @@ NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
     "እና", "ena", "and", "ና", "na",
     "በል", "ብለህ", "ብለሽ", "ብለው",
     "bel", "bleh", "blesh", "blew",
-    # አዲስ — action words name እንዳይሆኑ
-    "argew", "areg", "adrig", "adrgew",
-    "yihun", "qeyir", "keyir", "qeyirew", "keyirew",
-    "lewet", "lewetew", "azawir", "azawrew",
-    "arig", "adrg",
-]})
+    "አርግ", "አርገው", "አድርግ", "አድርገው",
+    "arig", "arigew", "argew", "adrg", "adrgew", "adrig", "adrigew",
+    "yihun", "ይሁን",
+]])
 
 NEBER_WORDS = {"ነበር", "ነበረ", "nebere", "neber"}
 
 
+# ================================================================
+# FUZZY MATCHING HELPERS
+# ================================================================
+# rapidfuzz.fuzz.ratio ምትክ difflib.SequenceMatcher.ratio() (built-in, install
+# አያስፈልገውም) ጥቅም ላይ ይውላል — ሁለቱም 0-100 scale ላይ ተመጣጣኝ ውጤት ይሰጣሉ።
+# Amharic እና Latin ፊደላት ላይ እኩል ይሰራል (Unicode strings ናቸው)።
+
+FUZZY_THRESHOLD = 65
+FUZZY_MIN_LEN = 3  # ከዚህ በታች ያሉ tokens fuzzy matching ውስጥ አይገቡም (false positive ለመቀነስ)
+
+
+def _fuzzy_ratio(a: str, b: str) -> float:
+    return difflib.SequenceMatcher(None, a, b).ratio() * 100
+
+
+def _fuzzy_match(token: str, candidates) -> bool:
+    """token ከ candidates ዝርዝር ውስጥ ካለ ቃል ጋር exact ወይም fuzzy (>=FUZZY_THRESHOLD) ይመስል ይሁን አይሁን ይመልሳል።
+    Amharic እና Latin ሁለቱም ላይ ይሰራል። አጭር tokens (< FUZZY_MIN_LEN) exact match ብቻ ይፈቀዳል።
+    """
+    tok_lower = token.lower()
+    for cand in candidates:
+        cand_lower = cand.lower()
+        if tok_lower == cand_lower:
+            return True
+    if len(tok_lower) < FUZZY_MIN_LEN:
+        return False
+    for cand in candidates:
+        cand_lower = cand.lower()
+        if len(cand_lower) < FUZZY_MIN_LEN:
+            continue
+        if _fuzzy_ratio(tok_lower, cand_lower) >= FUZZY_THRESHOLD:
+            return True
+    return False
+
+
 def _is_half_word(w):
-    return w.lower() in [h.lower() for h in HALF_WORDS]
+    return _fuzzy_match(w, HALF_WORDS)
 
 def _is_full_word(w):
-    return w.lower() in [f.lower() for f in FULL_WORDS]
+    return _fuzzy_match(w, FULL_WORDS)
+
+def _is_non_name_word(w):
+    return _fuzzy_match(w, NON_NAME_WORDS)
 
 
 SEPARATOR_CHARS = set('+-/.,|*= \t\n')
@@ -57,13 +84,13 @@ def _is_symbol_name(s: str) -> bool:
 def _is_valid_name(s: str) -> bool:
     if not s:
         return False
-    emoji_pattern = regex.compile(
+    emoji_pattern = re.compile(
         r'[\U0001F300-\U0001F9FF'
         r'\U00002600-\U000027BF'
         r'\U0001FA00-\U0001FA9F'
         r'\U00002700-\U000027BF'
         r'\U0001F000-\U0001F02F]+',
-        regex.UNICODE
+        re.UNICODE
     )
     if emoji_pattern.search(s):
         return True
@@ -88,7 +115,7 @@ def _collect_name(tokens: list, start: int, skip_indices: set) -> tuple:
         tok_lower = tok.lower()
         if tok_lower in NEBER_WORDS:
             break
-        if tok_lower in NON_NAME_WORDS:
+        if _is_non_name_word(tok):
             break
         if _is_half_word(tok) or _is_full_word(tok):
             break
@@ -196,7 +223,7 @@ def _parse_token(tok: str):
             is_half = True
             rest = m.group(2).strip()
             tok = m.group(1)
-            if rest and rest.lower() not in NON_NAME_WORDS and rest.lower() not in NEBER_WORDS and _is_valid_name(rest):
+            if rest and not _is_non_name_word(rest) and rest.lower() not in NEBER_WORDS and _is_valid_name(rest):
                 name = rest
             break
         m2 = re.match(r'^' + re.escape(hw) + r'(\d+)(.*)$', tok, re.IGNORECASE)
@@ -204,7 +231,7 @@ def _parse_token(tok: str):
             is_half = True
             tok = m2.group(1)
             rest = m2.group(2).strip()
-            if rest and rest.lower() not in NON_NAME_WORDS and rest.lower() not in NEBER_WORDS and _is_valid_name(rest):
+            if rest and not _is_non_name_word(rest) and rest.lower() not in NEBER_WORDS and _is_valid_name(rest):
                 name = rest
             break
 
@@ -215,7 +242,7 @@ def _parse_token(tok: str):
                 is_full = True
                 name_part = m.group(2).strip()
                 tok = m.group(1)
-                if name_part and name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
+                if name_part and not _is_non_name_word(name_part) and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
                     name = name_part
                 break
 
@@ -228,7 +255,7 @@ def _parse_token(tok: str):
         if m:
             is_half = True
             name_part = m.group(2).strip()
-            if name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
+            if not _is_non_name_word(name_part) and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
                 name = name_part
             tok = m.group(1)
 
@@ -246,7 +273,7 @@ def _parse_token(tok: str):
                     name_part = name_part.lower().replace(hw.lower(), '').strip()
                     is_half = True
                     break
-            if name_part and name_part.lower() not in NON_NAME_WORDS and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
+            if name_part and not _is_non_name_word(name_part) and name_part.lower() not in NEBER_WORDS and _is_valid_name(name_part):
                 name = name_part
             tok = m.group(1)
 
@@ -260,6 +287,7 @@ def _parse_token(tok: str):
 
 
 def _scan_for_half_full(tokens: list, start: int, skip_indices: set):
+    """start index ጀምሮ remaining tokens ውስጥ half/full word ይፈልጋል"""
     j = start
     while j < len(tokens):
         if j in skip_indices:
@@ -272,7 +300,7 @@ def _scan_for_half_full(tokens: list, start: int, skip_indices: set):
             return "half", j
         elif _is_full_word(jtok):
             return "full", j
-        elif jtok in NON_NAME_WORDS or jtok in NEBER_WORDS:
+        elif _is_non_name_word(jtok) or jtok in NEBER_WORDS:
             j += 1
             continue
         else:
@@ -315,6 +343,7 @@ def parse_numbers(text: str):
             continue
 
         num, is_half, is_full, name = parsed
+        name_from_token = name is not None
 
         if i + 1 < len(tokens):
             nxt = tokens[i + 1].strip()
@@ -338,10 +367,14 @@ def parse_numbers(text: str):
                             name = collected
                             for idx in range(i + 2, last_idx + 1):
                                 skip_indices.add(idx)
+                    elif name_from_token:
+                        name = None
                 elif _is_full_word(nxt):
                     is_full = True
                     skip_indices.add(i + 1)
-                elif nxt_lower not in NON_NAME_WORDS and nxt_lower not in NEBER_WORDS and name is None:
+                    if name_from_token:
+                        name = None
+                elif not _is_non_name_word(nxt_lower) and nxt_lower not in NEBER_WORDS and name is None:
                     collected, last_idx = _collect_name(tokens, i + 1, skip_indices)
                     if collected and _is_valid_name(collected):
                         name = collected
@@ -354,6 +387,7 @@ def parse_numbers(text: str):
                         elif modifier == "full":
                             is_full = True
                             skip_indices.add(mod_idx)
+                            name = None
 
         numbers.append((num, is_half, is_full, name))
         i += 1
@@ -368,7 +402,7 @@ def parse_numbers(text: str):
     ]
     if len(numbers) == 1:
         _, _, _, nm = numbers[0]
-        has_query = any(w.lower() in [t.lower() for t in tokens] for w in QUERY_WORDS)
+        has_query = any(_fuzzy_match(t, [w]) for t in tokens for w in QUERY_WORDS)
         if has_query and nm is None:
             return None
 
@@ -386,7 +420,7 @@ def parse_numbers(text: str):
             is_half = False
         result.append((num, is_half, name))
 
-    # ስም propagation
+    # ስም propagation — መጨረሻ ላይ 1 ስም ብቻ ሲሆን ለሁሉም ይሰጥ
     all_named = [(i, nm) for i, (_, _, nm) in enumerate(result) if nm]
     if len(all_named) == 1:
         only_idx, only_name = all_named[0]
@@ -441,6 +475,7 @@ if __name__ == "__main__":
         ("12አበበ begmash",           [(12, True,  None)]),
         ("11 አበበ በሙሉ",              [(11, False, None)]),
         ("11 አበበ ብለህ በሙሉ ያዝ",      [(11, False, None)]),
+        # OLDER FIXES
         ("11 አበበ begmash",          [(11, True,  "አበበ")]),
         ("11 አበበ ግማሽ",             [(11, True,  "አበበ")]),
         ("11 አበበ ግ",               [(11, True,  "አበበ")]),
@@ -449,21 +484,29 @@ if __name__ == "__main__":
         ("03 አበበ ብለህ begmash ያዝ",  [(3,  True,  "አበበ")]),
         ("01 አበበ +",               [(1,  True,  "አበበ")]),
         ("05 ሰለሞን +",              [(5,  True,  "ሰለሞን")]),
-        # አዲስ tests
-        ("09 begimashi argew",      [(9,  True,  None)]),
-        ("09 begmashi areg",        [(9,  True,  None)]),
-        ("09 gimashi argew",        [(9,  True,  None)]),
-        ("11 bgimash yihun",        [(11, True,  None)]),
-        ("05 begimash qeyir",       [(5,  True,  None)]),
+        # FUZZY KEYWORD TESTS (typo variants)
+        ("09 begmashi argew",       [(9,  True,  None)]),
+        ("11 አበበ begmashi",         [(11, True,  "አበበ")]),
+        ("12 gimash",               [(12, True,  None)]),
+        ("12 በግምሽ",                [(12, True,  None)]),
+        ("12 mulu adrig",           [(12, False, None)]),
     ]
 
     print("=" * 50)
+    passed = 0
+    failed = 0
     for text, expected in tests:
         result = parse_numbers(text)
         nums = result["numbers"] if result else None
-        ok = "✅" if nums == expected else "❌"
-        print(f"{ok} '{text}'")
-        if nums != expected:
+        ok = nums == expected
+        if ok:
+            passed += 1
+        else:
+            failed += 1
+        mark = "✅" if ok else "❌"
+        print(f"{mark} '{text}'")
+        if not ok:
             print(f"   expected: {expected}")
             print(f"   got:      {nums}")
     print("=" * 50)
+    print(f"PASSED: {passed}  FAILED: {failed}")
