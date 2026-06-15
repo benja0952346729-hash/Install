@@ -35,7 +35,7 @@ NEBER_WORDS = {"ነበር", "ነበረ", "nebere", "neber"}
 # አያስፈልገውም) ጥቅም ላይ ይውላል — ሁለቱም 0-100 scale ላይ ተመጣጣኝ ውጤት ይሰጣሉ።
 # Amharic እና Latin ፊደላት ላይ እኩል ይሰራል (Unicode strings ናቸው)።
 
-FUZZY_THRESHOLD = 65
+FUZZY_THRESHOLD = 70
 FUZZY_MIN_LEN = 3  # ከዚህ በታች ያሉ tokens fuzzy matching ውስጥ አይገቡም (false positive ለመቀነስ)
 
 
@@ -402,7 +402,7 @@ def parse_numbers(text: str):
     ]
     if len(numbers) == 1:
         _, _, _, nm = numbers[0]
-        has_query = any(_fuzzy_match(t, [w]) for t in tokens for w in QUERY_WORDS)
+        has_query = any(w.lower() in [t.lower() for t in tokens] for w in QUERY_WORDS)
         if has_query and nm is None:
             return None
 
@@ -490,6 +490,13 @@ if __name__ == "__main__":
         ("12 gimash",               [(12, True,  None)]),
         ("12 በግምሽ",                [(12, True,  None)]),
         ("12 mulu adrig",           [(12, False, None)]),
+        # FALSE POSITIVE GUARDS — these are names, not half/full keywords
+        ("11 ግማዶ",                 [(11, False, "ግማዶ")]),
+        ("11 ግማሳ",                 [(11, False, "ግማሳ")]),
+        # YAZ/COMMAND WORD REGRESSION GUARD
+        ("01 begmash yaz",          [(1,  True,  None)]),
+        ("01+ yaz",                 [(1,  True,  None)]),
+        ("01 አበበ ሰለሞን ብለህ ያዝ",    [(1,  False, "አበበ ሰለሞን")]),
     ]
 
     print("=" * 50)
