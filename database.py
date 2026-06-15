@@ -300,6 +300,33 @@ def init_db():
             cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
 
+            # user_balance — old unique constraint ያስወግዳል፣ አዲስ group_id ጋር ይጨምራል
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'user_balance_game_id_telegram_id_key'
+                    ) THEN
+                        ALTER TABLE user_balance DROP CONSTRAINT user_balance_game_id_telegram_id_key;
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'user_balance_group_id_telegram_id_key'
+                    ) THEN
+                        ALTER TABLE user_balance ADD CONSTRAINT user_balance_group_id_telegram_id_key 
+                        UNIQUE (group_id, telegram_id);
+                    END IF;
+                END
+                $$;
+            """)
+
             # Old unique constraints ያስወግዳል
             cur.execute("""
                 DO $$
