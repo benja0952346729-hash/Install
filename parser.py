@@ -22,7 +22,7 @@ NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
     "bel", "bleh", "blesh", "blew",
     "አርግ", "አርገው", "አድርግ", "አድርገው",
     "arig", "arigew", "argew", "adrg", "adrgew", "adrig", "adrigew",
-    "yihun", "ይሁን",
+    "yihun", "ይሁን", "ble", "ብለ",
 ]])
 
 NEBER_WORDS = {"ነበር", "ነበረ", "nebere", "neber"}
