@@ -2272,17 +2272,15 @@ def _make_nekay_cb(group_id: int = None):
 
 async def start_server():
     web_app = web.Application()
-    # Per-group SMS endpoint — /sms/{group_id}
+    # Per-group SMS endpoint ብቻ — /sms/{group_id}
     web_app.router.add_post("/sms/{group_id}", sms_endpoint)
-    # Fallback — /sms (group_id ከሌለ)
-    web_app.router.add_post("/sms", sms_endpoint)
     web_app.router.add_get("/", health_check)
     runner = web.AppRunner(web_app)
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     print("🌐 SMS Server started on port 8080")
-    print("📱 SMS endpoints: /sms/{group_id} ወይም /sms")
+    print("📱 SMS endpoint: /sms/{group_id}")
 
 
 # ============================================================
