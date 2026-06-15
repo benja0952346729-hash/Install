@@ -52,9 +52,13 @@ LATIN_TO_AMHARIC = {
     "yaz": "ያዝ", "yazat": "ያዛት", "yazachew": "ያዛቸው",
     "tsafligni": "ፃፍልኝ", "tsaf": "ፃፍ", "yazligni": "ያዝልኝ",
     "mezgib": "መዝግብ", "mezgibat": "መዝግባት", "mezgibligni": "መዝግብልኝ",
-    "qeri": "ቀሪ", "qitr": "ቁጥር", "min ale": "ምን አለ",
-    "sint qere": "ስንት ቀረ", "sint ale": "ስንት አለ",
-    "qeri ale": "ቀሪ አለ", "qitr ale": "ቁጥር አለ",
+    "qeri": "ቀሪ", "keri": "ቀሪ",
+    "qitr": "ቁጥር", "kitr": "ቁጥር",
+    "min ale": "ምን አለ",
+    "sint qere": "ስንት ቀረ", "sint kere": "ስንት ቀረ",
+    "sint ale": "ስንት አለ",
+    "qeri ale": "ቀሪ አለ", "keri ale": "ቀሪ አለ",
+    "qitr ale": "ቁጥር አለ", "kitr ale": "ቁጥር አለ",
     "yalteyaze": "ያልተያዘ", "yalteyazun": "ያልተያዙ",
     "nekay": "ነቃይ", "tenekay": "ተነቃይ", "nkay": "ነቃይ",
     "nekay ale": "ነቃይ አለ", "nekay zerzir": "ነቃይ ዘርዝር",
@@ -62,7 +66,7 @@ LATIN_TO_AMHARIC = {
     "nekayoch": "ነቃዮች", "mishit ale": "ሚሸጥ አለ",
     "nekay zerzirligni": "ነቃይ ዘርዝርልኝ",
     "nekay negerign": "ነቃይ ንገረኝ",
-    "nekay qitroch": "ነቃይ ቁጥሮች",
+    "nekay qitroch": "ነቃይ ቁጥሮች", "nekay kitroch": "ነቃይ ቁጥሮች",
     "tenekay ale": "ተነቃይ አለ",
     "nekay asayen": "ነቃይ አሳየኝ",
     "nekay asay": "ነቃይ አሳይ",
@@ -72,12 +76,13 @@ LATIN_TO_AMHARIC = {
     "hulunm teyazuwal": "ሁሉም ተይዘዋል",
     "hulunm teyaze": "ሁሉም ተያዘ",
     "hulunm alteyazum": "ሁሉም አልተያዙም",
-    "qeri lak": "ቀሪ ላክ", "qitr lak": "ቁጥር ላክ",
+    "qeri lak": "ቀሪ ላክ", "keri lak": "ቀሪ ላክ",
+    "qitr lak": "ቁጥር ላክ", "kitr lak": "ቁጥር ላክ",
     "kutr lak": "ቁጥር ላክ", "cutr lak": "ቁጥር ላክ",
     "kutr ale": "ቁጥር አለ", "cutr ale": "ቁጥር አለ",
     "kutr": "ቁጥር", "cutr": "ቁጥር",
-    "qeri asayen": "ቀሪ አሳየኝ",
-    "tolo tolo qeri lak": "ቶሎ ቶሎ ቀሪ ላክ",
+    "qeri asayen": "ቀሪ አሳየኝ", "keri asayen": "ቀሪ አሳየኝ",
+    "tolo tolo qeri lak": "ቶሎ ቶሎ ቀሪ ላክ", "tolo tolo keri lak": "ቶሎ ቶሎ ቀሪ ላክ",
     "teyaze": "ተያዘ", "teyazo": "ተይዞ", "teyazuwal": "ተይዙዋል",
     "awo": "አዎ", "aydelem": "አይደለም",
     "tnx": "አመሰግናለሁ", "thanks": "አመሰግናለሁ",
@@ -88,9 +93,10 @@ LATIN_TO_AMHARIC = {
     "awta": "አውጣ", "awuta": "አውጣ",
     "alfeligm": "አልፈልግም", "alfelegim": "አልፈልግም", "alfelegm": "አልፈልግም",
     "tenekelku": "ተነቀልኩ", "teneklku": "ተነቀልኩ", "nekelku": "ተነቀልኩ",
-    "qitr tenekelk": "ቁጥር ተነቀለ", "number tenekelk": "ቁጥር ተነቀለ",
+    "qitr tenekelk": "ቁጥር ተነቀለ", "kitr tenekelk": "ቁጥር ተነቀለ",
+    "number tenekelk": "ቁጥር ተነቀለ",
     "lmin shitkhew": "ለምን ሸጥከው", "lmin shitkh": "ለምን ሸጥከው",
-    "lmin shetek": "ለምን ሸጥህ", "lemin shetek": "ለምን ሸጥህ",
+    "lmin shetek": "ለምን ሸጥከው", "lemin shetek": "ለምን ሸጥከው",
     "lmin tenklaleh": "ለምን ትነቅላለህ", "lmin tinklaleh": "ለምን ትነቅላለህ",
     "why shetek": "ለምን ሸጥህ", "why teneklaleh": "ለምን ትነቅላለህ",
     "kefye nekelk": "ከፍዬ ነቀልክ", "kefye neklek": "ከፍዬ ነቀልክ",
@@ -114,7 +120,9 @@ LATIN_TO_AMHARIC = {
     "tena yistilign": "ጤና ይስጥልኝ", "tena yistligni": "ጤና ይስጥልኝ",
     "endemen nachuh": "እንደምን ናችሁ", "endemen nacuh": "እንደምን ናችሁ",
     "wede": "ወደ",
-    "qeyir": "ቀይር", "qeyirew": "ቀይረው", "qeyirligni": "ቀይርልኝ",
+    "qeyir": "ቀይር", "keyir": "ቀይር",
+    "qeyirew": "ቀይረው", "keyirew": "ቀይረው",
+    "qeyirligni": "ቀይርልኝ", "keyirligni": "ቀይርልኝ",
     "lewet": "ለወጥ", "lewetew": "ለወጠው", "lewetligni": "ለወጥልኝ",
     "azawir": "አዛውር", "azawrew": "አዛውረው",
     "yihun": "ይሁን",
@@ -188,11 +196,14 @@ LATIN_TO_AMHARIC = {
     "lmin altsafkilgnim": "ለምን አልፃፍክልኝም",
     "lmin almezegbkegnim": "ለምን አልመዘገብከኝም",
     "lmin qitire alteyazem": "ለምን ቁጥሬ አልተያዘም",
+    "lmin kitire alteyazem": "ለምን ቁጥሬ አልተያዘም",
     "lmin algeba": "ለምን አልገባም",
     "lmin sayiyaz qere": "ለምን ሳይያዝ ቀረ",
+    "lmin sayiyaz kere": "ለምን ሳይያዝ ቀረ",
     "lmin alteyazelign": "ለምን አልተያዘልኝም",
     "lmin altemezegebem": "ለምን አልተመዘገበም",
     "qitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
+    "kitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
     "lmin alasgegabhegnim": "ለምን አላስገባኸኝም",
 }
 
@@ -344,6 +355,11 @@ INTENT_EXAMPLES = {
         "እንደምን ናችሁ", "እንደምን አላችሁ", "እንዴት ናችሁ",
         "ሰላም እንዴት ነህ", "ሰላም ወዳጄ", "ሰላምታ",
         "hi", "hello", "hey", "ሰላም ነህ",
+        "selam", "salam", "selem", "selaam",
+        "endet neh", "indet neh",
+        "dena aderk", "dena walk",
+        "tena yistilign", "tena yistligni",
+        "endemen nachuh",
     ],
     "cancel_number": [
         "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
@@ -354,18 +370,63 @@ INTENT_EXAMPLES = {
         "ትቼዋለሁ", "አልፈልገውም ቁጥሩን",
         "አልፈልገውም", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
         "ቁጥሩን አልፈልግም", "ቁጥሩን ሰርዝልኝ",
+        # Latin
+        "alfeligm", "alfelegim", "alfelegm",
+        "serzew", "srez", "serz",
+        "atfaw", "atfa", "yitfa",
+        "awta", "awuta",
+        "cancel", "drop",
     ],
     "complaint_removed": [
+        # Amharic
         "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
         "ለምን ተነቀልኩ", "ተነቀልኩ እኮ",
         "ቁጥሬ የለም", "ቁጥሬ ጠፋ ለምን", "ቁጥሬ ሄደ ለምን",
         "ቁጥሬ ተቀነሰ", "ቁጥሬ ተወሰደ ለምን",
+        "ቁጥሬ ለምን ተነቀለ", "ቁጥሬ ለምን ጠፋ",
+        "ቁጥሬ ለምን ሄደ", "ቁጥሬ ለምን ተወሰደ",
+        "ቁጥሬ ተነቅሏል", "ቁጥሬ ጠፍቷል",
+        # Latin — ቀ=q/k, ጠ=x/t(ጠ ብቻ)
+        # tenekelku = ተነቀልኩ (ተ=t ብቻ, ቀ=q/k)
+        "tenekelku", "teneklku", "nekelku",
+        "qitire tenekelke", "kitire tenekelke",
+        "qitire lmin tenekelke", "kitire lmin tenekelke",
+        "qitire lmin xefa", "kitire lmin xefa",       # ጠፋ = xefa
+        "qitire lmin xefal", "kitire lmin xefal",
+        "qitire lmin hede", "kitire lmin hede",
+        "qitire xefa", "kitire xefa",                 # ጠፋ = xefa
+        "qitire xefal", "kitire xefal",
+        "qitire hede", "kitire hede",
+        "qitire yellem", "kitire yellem",
+        "qitire teqenese", "kitire teqenese",
+        "qitire keqenese", "kitire keqenese",
+        "qitire lmin tewesede", "kitire lmin tewesede",
+        "lmin tenekelku",
+        "tenekelku eko",
+        "qitire tenekelal lmin", "kitire tenekelal lmin",
+        "qitire xefal lmin", "kitire xefal lmin",
+        "number tenekelk",
+        "number xefa",                                # ጠፋ = xefa
+        "number hede", "number yellem",
+        "qitre lmin nekele", "kitre lmin nekele",
+        "qitre tenekelal", "kitre tenekelal",
+        "qitre xefal", "kitre xefal",
+        "lmin nekelku", "lmin tenekelk",
+        "qitre xefa", "kitre xefa",
     ],
     "complaint_why_sold": [
         "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
         "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
         "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥከው",
         "ለምን ቁጥሬን ነቀልክ", "ቁጥሬ ለምን ሄደ",
+        # Latin
+        "lmin shitkhew", "lmin shitkh",
+        "lmin shetek", "lemin shetek",
+        "lmin tenklaleh", "lmin tinklaleh",
+        "why shetek", "why teneklaleh",
+        "lmin neklek", "lmin nekelk",
+        "qitire lmin shetkew", "kitire lmin shetkew",
+        "qitire lmin nekelk", "kitire lmin nekelk",
     ],
     "complaint_paid_removed": [
         "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
@@ -376,12 +437,33 @@ INTENT_EXAMPLES = {
         "ልኬ ሸጥክ", "ተልኩዋል እኮ",
         "payment ላኩ ለምን ሸጥክ", "ከፍዬ ቁጥሬ ሄደ",
         "ብር ልኬ ቁጥሬ ጠፋ",
+        # Latin
+        "kefye nekelk", "kefye neklek",
+        "tekeflo nekelk", "tekefilo neklek",
+        "kefye shetk", "kefye shetkh",
+        "likeyalew lmin", "likyalew lemin",
+        "telkuwal lmin nekelk", "telkual lmin",
+        "like tineklaleh", "lke tinklaleh",
+        "lkuwal lmin", "selkuwal lemin",
+        "payment ale lmin", "lefkuwal lmin",
+        "lke shetk", "lkuwal shetkh",
+        "payment laku lmin shetk", "payment laku lmin nekelk",
+        "kefye qitire hede", "kefye kitire hede",
+        "br lke qitire xefa", "br lke kitire xefa",
     ],
     "change_number": [
         "ወደ ቀይር", "ቀይር", "ቀይረው", "ቀይርልኝ",
         "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
         "ቁጥሩን ቀይር", "ቁጥሩን ለወጥ", "ቁጥሬን ቀይርልኝ",
         "change አርግ", "ቁጥሩን change አርግ",
+        # Latin
+        "qeyir", "keyir",
+        "qeyirew", "keyirew",
+        "qeyirligni", "keyirligni",
+        "lewet", "lewetew", "lewetligni",
+        "azawir", "azawrew",
+        "change arig", "change adrig", "change arigew",
+        "wede qeyir", "wede keyir",
     ],
     "account_query": [
         "አካውንት", "አካውንት ላክ", "አካውንት ምንድን ነው",
@@ -391,17 +473,33 @@ INTENT_EXAMPLES = {
         "ላኩ ወዴት", "ገንዘብ ወዴት ልላክ", "payment info",
         "ቴሌብር አካውንት ስጠኝ", "ቴሌብር ቁጥርህን ላክ",
         "አዋሽ አካውንት ስጠኝ", "ወዴት ልከፍል",
+        # Latin
+        "account lak", "acount lak",
+        "account info", "acount info",
+        "account negeregn", "acount negeregn",
+        "account asayen", "acount asayen",
+        "telebirr", "telebr",
+        "awash", "cbe",
+        "nigid bank", "commercial bank",
+        "payment number", "payment info",
+        "yemikefelbew number",
+        "wedeit lkefil", "wedeit lalak",
     ],
     "type_change": [
         "በሙሉ አርግ", "በሙሉ አድርግ", "በሙሉ ይሁን", "በሙሉ ቀይረው",
         "በሙሉ አርጋት", "ሙሉ አርግ", "ሙሉ ይሁን",
         "በግማሽ አርግ", "በግማሽ አድርግ", "በግማሽ ይሁን", "በግማሽ ቀይረው",
         "በግማሽ አርጋት", "ግማሽ አርግ", "ግማሽ ይሁን",
+        # Latin
         "gmash areg", "bemulu areg", "begmash areg",
+        "bemulu adrig", "begmash adrig",
+        "bemulu yihun", "begmash yihun",
         "06 bemulu", "11 begmash", "09 11 begmash",
-        "11 21 bemulu qeyirew",
-        "gmash +argewo", "06+ argewo",
+        "11 21 bemulu qeyirew", "11 21 bemulu keyirew",
+        "gmash argewo", "06 argewo",
         "11በሙሉ", "05በሙሉ", "11በግማሽ", "05በግማሽ",
+        "mulu areg", "mulu yihun",
+        "mulu adrig", "gmash adrig",
     ],
     "why_not_registered": [
         "ለምን አልያዝክልኝም", "ለምን አልፃፍክልኝም", "ለምን አልመዘገብከኝም",
@@ -411,15 +509,20 @@ INTENT_EXAMPLES = {
         "ቁጥሬ ለምን አልተያዘም", "ለምን አልተያዘልኝም",
         "ቁጥሩ ሳይያዝ ቀረ ለምን", "ለምን አላስገባኸኝም",
         "ለምን ቁጥሬን አልያዝህልኝም",
+        # Latin
         "lmin alyazkilgnim", "lmin altsafkilgnim",
-        "lmin almezegbkegnim", "lmin qitire alteyazem",
-        "lmin algeba", "lmin sayiyaz qere",
+        "lmin almezegbkegnim",
+        "lmin qitire alteyazem", "lmin kitire alteyazem",
+        "lmin algeba",
+        "lmin sayiyaz qere", "lmin sayiyaz kere",
         "lmin alteyazelign", "lmin altemezegebem",
-        "qitire lmin alteyazem", "lmin alasgegabhegnim",
+        "qitire lmin alteyazem", "kitire lmin alteyazem",
+        "lmin alasgegabhegnim",
         "why aliyazkilign", "why alteyaze",
         "why did you not register", "not registered lmin",
         "lmin register aladergehlign",
-        "qitre lmin sayiyaz qere",
+        "qitre lmin sayiyaz qere", "kitre lmin sayiyaz kere",
+        "lmin qitre alteyaze", "lmin kitre alteyaze",
     ],
 }
 
@@ -550,6 +653,7 @@ def detect_intent(text: str) -> tuple:
         TYPE_ACTION_WORDS = [
             "አርግ", "አድርግ", "ይሁን", "ቀይር", "ቀይረው",
             "areg", "adrig", "yihun", "qeyir", "qeyirew",
+            "keyir", "keyirew",
         ]
         has_action = any(
             normalize_amharic(w) in normalized_lower
@@ -560,7 +664,9 @@ def detect_intent(text: str) -> tuple:
 
     WHY_NOT_REG_WORDS = [
         "ለምን አልያዝ", "ለምን አልፃፍ", "ለምን አልመዘገብ",
-        "ለምን አልተያዘ", "ለምን አልገባ", "lmin alyaz", "lmin altsaf",
+        "ለምን አልተያዘ", "ለምን አልገባ",
+        "lmin alyaz", "lmin altsaf",
+        "lmin alteyaz", "lmin algeba",
     ]
     if any(normalize_amharic(w) in normalized_lower for w in WHY_NOT_REG_WORDS):
         return "why_not_registered", 1.0
@@ -810,10 +916,9 @@ def get_response(
         type_result = detect_type_change(text)
         if type_result:
             nums, target = type_result
-            # ቁጥሩ taken ካልሆነ booking ይሆናል
             num = nums[0]
             if num not in taken:
-                return result  # parse_numbers ይሠራዋል → booking
+                return result
             result["type_change"] = {"numbers": nums, "target": target}
             result["reply"] = random.choice(RESPONSES["type_change_ack"])
         return result
