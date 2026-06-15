@@ -34,6 +34,7 @@ from database import (
     get_report, save_game_report, cleanup_old_reports,
     calculate_game_profit,
     set_warning_media, get_warning_media, get_all_warning_media, delete_warning_media,
+    get_conn,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -206,7 +207,6 @@ def _reset_inactivity_tracker(bot, game_id: int, group_id: int):
         existing["task"].cancel()
     task = asyncio.create_task(_inactivity_notify_task(bot, game_id, group_id))
     low_remaining_trackers[game_id] = {"task": task, "group_id": group_id}
-
 
 
 def _stop_inactivity_tracker(game_id: int):
@@ -1197,6 +1197,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         check_and_rotate_db()
     except Exception:
         pass
+
+
 # ============================================================
 # HELPERS
 # ============================================================
@@ -1906,7 +1908,8 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await nekay_payment_cb(ctx.bot, game_id, update.effective_user.id, confirmed)
 
     try:
-        await handle_payment_photo(ctx.bot, update.message, nekay_cb=_nekay_cb)
+        # group_id ጋር handle_payment_photo ይጠራል
+        await handle_payment_photo(ctx.bot, update.message, nekay_cb=_nekay_cb, group_id=group_id)
     finally:
         photo_processing[group_id] = False
         queued = pending_registrations.pop(group_id, [])
@@ -2105,7 +2108,7 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     game_id = ctx.user_data["send_game_id"]
     group_id = ctx.user_data.get("send_group_id")
 
-    result = deduct_winner_balance(game_id, telegram_id, amount)
+    result = deduct_winner_balance(game_id, telegram_id, amount, group_id=group_id)
     new_balance = result["new_balance"]
 
     mark_winner_sent(game_id, telegram_id, amount)
@@ -2216,11 +2219,19 @@ async def handle_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# SMS ENDPOINT
+# SMS ENDPOINT — per group_id
 # ============================================================
 
 async def sms_endpoint(request):
     try:
+        # group_id ከ URL ያውጣ — /sms/{group_id}
+        group_id = request.match_info.get("group_id")
+        if group_id:
+            try:
+                group_id = int(group_id)
+            except ValueError:
+                group_id = None
+
         raw = await request.text()
         try:
             parsed = json.loads(raw)
@@ -2231,7 +2242,12 @@ async def sms_endpoint(request):
         if not sms_text:
             return web.json_response({"success": False, "reason": "empty_body"})
 
-        result = await handle_sms_webhook(sms_text, bot=_bot_instance, nekay_cb=_make_nekay_cb())
+        result = await handle_sms_webhook(
+            sms_text,
+            bot=_bot_instance,
+            nekay_cb=_make_nekay_cb(group_id),
+            group_id=group_id,
+        )
         return web.json_response(result)
     except Exception as e:
         logging.error(f"[SMS Endpoint] Error: {e}", exc_info=True)
@@ -2246,9 +2262,9 @@ async def health_check(request):
 _bot_instance = None
 
 
-def _make_nekay_cb():
+def _make_nekay_cb(group_id: int = None):
     async def _nekay_cb(confirmed):
-        settings = get_active_settings()
+        settings = get_active_settings(group_id=group_id)
         if settings and _bot_instance:
             await nekay_payment_cb(_bot_instance, settings["id"], 0, confirmed)
     return _nekay_cb
@@ -2256,6 +2272,9 @@ def _make_nekay_cb():
 
 async def start_server():
     web_app = web.Application()
+    # Per-group SMS endpoint — /sms/{group_id}
+    web_app.router.add_post("/sms/{group_id}", sms_endpoint)
+    # Fallback — /sms (group_id ከሌለ)
     web_app.router.add_post("/sms", sms_endpoint)
     web_app.router.add_get("/", health_check)
     runner = web.AppRunner(web_app)
@@ -2263,6 +2282,7 @@ async def start_server():
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
     print("🌐 SMS Server started on port 8080")
+    print("📱 SMS endpoints: /sms/{group_id} ወይም /sms")
 
 
 # ============================================================
