@@ -134,7 +134,7 @@ def _pre_tokenize(text: str) -> list:
     text = re.sub(r'\bእና\b|\bና\b|\band\b', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'(?<!#)#(?!#)', ' ', text)
     text = re.sub(r'(\d+\+)(\d)', r'\1 \2', text)
-    parts = re.sub(r'[,=/&?*]', ' ', text).split()
+    parts = re.sub(r'[,.=/&?*]', ' ', text).split()
 
     for part in parts:
         if re.match(r'^[\d\+]+$', part):
