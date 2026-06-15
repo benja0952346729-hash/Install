@@ -300,6 +300,32 @@ def init_db():
             cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
 
+            # Old unique constraints ያስወግዳል
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'sms_payments_ref_no_key'
+                    ) THEN
+                        ALTER TABLE sms_payments DROP CONSTRAINT sms_payments_ref_no_key;
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'screenshot_payments_ref_no_key'
+                    ) THEN
+                        ALTER TABLE screenshot_payments DROP CONSTRAINT screenshot_payments_ref_no_key;
+                    END IF;
+                END
+                $$;
+            """)
+
             # --- Payment matching: amount range + sender_name (አዲስ) ---
             cur.execute("ALTER TABLE sms_payments ALTER COLUMN ref_no DROP NOT NULL;") 
             cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
