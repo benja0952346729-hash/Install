@@ -1,8 +1,17 @@
 import re
 import regex  # pip install regex — emoji support ለማስቻል
 
-HALF_WORDS = ["begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ", "begmas", "ግማ", "half"]
+HALF_WORDS = [
+    "begmash", "gmash", "ግማሽ", "በግማሽ", "g", "ግ", "begmas", "ግማ", "half",
+    # አዲስ variants
+    "begimash", "begimashi", "begmashi", "begimash",
+    "gimash", "gimashi", "gmashi",
+    "bgmash", "bgimash", "bgimashi",
+    "begmsh", "bgmsh",
+]
+
 FULL_WORDS = ["bemulu", "mulu", "በሙሉ", "ሙሉ"]
+
 GLOBAL_HALF_WORDS = ["ሁሉንም በግማሽ", "ሁሉንም ግማሽ", "ሁሉም በግማሽ", "hulunm begmash", "hulunm gmash"]
 GLOBAL_FULL_WORDS = ["ሁሉንም በሙሉ", "ሁሉንም ሙሉ", "ሁሉም ሙሉ", "hulunm bemulu", "hulunm mulu"]
 
@@ -20,7 +29,12 @@ NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
     "እና", "ena", "and", "ና", "na",
     "በል", "ብለህ", "ብለሽ", "ብለው",
     "bel", "bleh", "blesh", "blew",
-]])
+    # አዲስ — action words name እንዳይሆኑ
+    "argew", "areg", "adrig", "adrgew",
+    "yihun", "qeyir", "keyir", "qeyirew", "keyirew",
+    "lewet", "lewetew", "azawir", "azawrew",
+    "arig", "adrg",
+]})
 
 NEBER_WORDS = {"ነበር", "ነበረ", "nebere", "neber"}
 
@@ -246,7 +260,6 @@ def _parse_token(tok: str):
 
 
 def _scan_for_half_full(tokens: list, start: int, skip_indices: set):
-    """start index ጀምሮ remaining tokens ውስጥ half/full word ይፈልጋል"""
     j = start
     while j < len(tokens):
         if j in skip_indices:
@@ -373,7 +386,7 @@ def parse_numbers(text: str):
             is_half = False
         result.append((num, is_half, name))
 
-    # ስም propagation — መጨረሻ ላይ 1 ስም ብቻ ሲሆን ለሁሉም ይሰጥ
+    # ስም propagation
     all_named = [(i, nm) for i, (_, _, nm) in enumerate(result) if nm]
     if len(all_named) == 1:
         only_idx, only_name = all_named[0]
@@ -428,7 +441,6 @@ if __name__ == "__main__":
         ("12አበበ begmash",           [(12, True,  None)]),
         ("11 አበበ በሙሉ",              [(11, False, None)]),
         ("11 አበበ ብለህ በሙሉ ያዝ",      [(11, False, None)]),
-        # NEW FIXES
         ("11 አበበ begmash",          [(11, True,  "አበበ")]),
         ("11 አበበ ግማሽ",             [(11, True,  "አበበ")]),
         ("11 አበበ ግ",               [(11, True,  "አበበ")]),
@@ -437,6 +449,12 @@ if __name__ == "__main__":
         ("03 አበበ ብለህ begmash ያዝ",  [(3,  True,  "አበበ")]),
         ("01 አበበ +",               [(1,  True,  "አበበ")]),
         ("05 ሰለሞን +",              [(5,  True,  "ሰለሞን")]),
+        # አዲስ tests
+        ("09 begimashi argew",      [(9,  True,  None)]),
+        ("09 begmashi areg",        [(9,  True,  None)]),
+        ("09 gimashi argew",        [(9,  True,  None)]),
+        ("11 bgimash yihun",        [(11, True,  None)]),
+        ("05 begimash qeyir",       [(5,  True,  None)]),
     ]
 
     print("=" * 50)
