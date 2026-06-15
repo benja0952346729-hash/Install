@@ -1477,7 +1477,7 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     sms_id = cur.fetchone()[0]
     conn.commit()
 
-    # Pending screenshot ካለ ይፈልጋል — group_id ጋር
+    # Pending screenshot ካለ ይፈልጋል — group_id ጋር ብቻ
     if group_id:
         cur.execute("""
             SELECT id, telegram_id, ref_no, amount, sender_name
