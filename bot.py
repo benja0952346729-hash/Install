@@ -1447,6 +1447,11 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
         if data is None:
             admin_remove_player(game_id, number, slot=None)
+            # nekay ውስጥ ካለ አውጣ
+            if game_id in nekay_numbers:
+                snap = nekay_numbers.get(game_id, {})
+                snap.pop(number, None)
+                nekay_numbers[game_id] = snap
         else:
             name1 = data.get("name1")
             paid1 = data.get("paid1", False)
@@ -1454,25 +1459,40 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             name2 = data.get("name2")
             paid2 = data.get("paid2", False)
 
+            # ከ DB የነበረውን እናምጣ (paid ነበር?)
+            taken_before = get_taken_numbers(game_id)
+            slots_before = taken_before.get(number, [])
+            was_paid1 = any(s[3] for s in slots_before if s[2] == 1)  # slot1 paid ነበር?
+
             admin_remove_player(game_id, number, slot=None)
 
             if name1:
                 register_number(game_id, 0, name1, number, is_half1, force=True)
-                # paid1 ✅ ካለ paid፣ ከሌለ unpaid
                 admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
 
             if name2:
                 register_number(game_id, 0, name2, number, is_half=False, force=True)
-                # paid2 ✅ ካለ paid፣ ከሌለ unpaid
                 admin_mark_paid(game_id, number, slot=2, is_paid=paid2)
 
+            # nekay snap update
             if game_id in nekay_numbers:
                 snap = nekay_numbers.get(game_id, {})
+
                 if number in snap:
-                    if name1 and not is_half1:
+                    if paid1 and not was_paid1:
+                        # paid ✅ አደረገ → snap ይቀራል (payment handler ይሰርዘዋል)
+                        pass
+                    elif not paid1 and was_paid1:
+                        # paid ✅ አጠፋ → snap ላይ መልስ
+                        snap[number] = 2 if is_half1 else 0
+                    elif name1:
+                        # ስም replace አረገ → snap ከ አውጣ
                         del snap[number]
-                    elif name2:
-                        del snap[number]
+                else:
+                    if not paid1 and was_paid1:
+                        # paid ✅ አጠፋ → snap ላይ መልስ
+                        snap[number] = 2 if is_half1 else 0
+
                 nekay_numbers[game_id] = snap
 
     try:
@@ -2234,6 +2254,7 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
             pass
 
     clear_game(game_id)
+    clear_prize_balance(_group_id)  # ← prize_balance ይጸዳል፣ carry_balance ይቀራል
     board_text = build_board(settings, {}, {})
     new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
     update_board_message_id(game_id, new_msg.message_id)
