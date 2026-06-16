@@ -526,6 +526,18 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
             add_winner_balance(settings["id"], telegram_id, prize, group_id=_group_id)
             save_winner(settings["id"], place, telegram_id, user_name, number, prize, group_id=_group_id)
             lines.append(f"{medal} {place}ኛ: #{number} — {user_name} → ETB {prize} ✅")
+            # Transaction log — winner prize
+            try:
+                from ai_fallback import log_transaction
+                if _group_id:
+                    log_transaction(
+                        group_id=_group_id, game_id=settings["id"],
+                        telegram_id=telegram_id, amount=prize,
+                        reason="winner_prize", number=number,
+                        done_by="system", balance_after=prize,
+                    )
+            except Exception as _log_err:
+                logger.warning(f"[log_transaction] Error: {_log_err}")
 
         announcement = "\n".join(lines)
         await msg.reply_text(announcement)
@@ -592,6 +604,33 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
     if nekay_cb and confirmed:
         await nekay_cb(confirmed)
+
+    # Transaction logging
+    try:
+        from ai_fallback import log_transaction
+        if confirmed and _group_id:
+            settings_log = get_active_settings(group_id=_group_id)
+            if settings_log:
+                game_id_log = settings_log["id"]
+                price_full_log = float(settings_log.get("price_full") or 0)
+                price_half_log = float(settings_log.get("price_half") or 0)
+                log_transaction(
+                    group_id=_group_id, game_id=game_id_log,
+                    telegram_id=telegram_id, amount=amount,
+                    reason="payment_confirmed", done_by="user",
+                    balance_after=remaining_balance,
+                )
+                for c in confirmed:
+                    cost = price_half_log if c["is_half"] else price_full_log
+                    reason = f"number_registered_{'half' if c['is_half'] else 'full'}"
+                    log_transaction(
+                        group_id=_group_id, game_id=game_id_log,
+                        telegram_id=telegram_id, amount=-cost,
+                        reason=reason, number=c["number"],
+                        done_by="user", balance_after=remaining_balance,
+                    )
+    except Exception as _log_err:
+        logger.warning(f"[log_transaction] Error: {_log_err}")'
 
     if confirmed and target_chat:
         settings = get_active_settings(group_id=_group_id)
