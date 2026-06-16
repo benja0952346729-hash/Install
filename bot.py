@@ -1721,17 +1721,11 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                         time_str = w["created_at"].strftime("%H:%M") if w["created_at"] else "?"
                         line = f"{medal} {w['place']}ኛ: {w['user_name']} — ETB {w['prize']} {sent_mark}"
                         if balance > 0:
-                            line += f"
-   💳 ቀሪ balance: ETB {balance}"
-                        line += f"
-   🕐 {time_str}"
+                            line += f"\n   💳 ቀሪ balance: ETB {balance}"
+                        line += f"\n   🕐 {time_str}"
                         all_lines.append(line)
             if all_lines:
-                await update.message.reply_text("🏆 Last 24hr Winners:
-
-" + "
-
-".join(all_lines))
+                await update.message.reply_text("🏆 Last 24hr Winners:\n\n" + "\n\n".join(all_lines))
             else:
                 await update.message.reply_text("🏆 Last 24hr winners የሉም።")
             try:
