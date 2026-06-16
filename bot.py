@@ -43,6 +43,7 @@ from board import (
     build_warning, build_nekay
 )
 from handlers import handle_payment_photo, handle_sms_webhook, handle_winner_photo
+from ai_fallback import get_ai_fallback, log_transaction
 
 logging.basicConfig(
     level=logging.INFO,
@@ -666,6 +667,18 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         if removed:
             if resp["reply"]:
                 await msg.reply_text(resp["reply"])
+            # Transaction log — remove refund
+            try:
+                price_full_r = float(settings.get("price_full") or 0)
+                price_half_r = float(settings.get("price_half") or 0)
+                log_transaction(
+                    group_id=group_id, game_id=game_id,
+                    telegram_id=user_id, amount=price_full_r,
+                    reason="number_removed_refund", number=num,
+                    done_by="user",
+                )
+            except Exception as _log_err:
+                logging.warning(f"[log_transaction] Error: {_log_err}")
             if game_id in nekay_numbers and num in nekay_numbers.get(game_id, {}):
                 del nekay_numbers[game_id][num]
             fresh = get_active_settings(group_id=group_id)
@@ -912,6 +925,24 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     if not parse_result:
         if resp["reply"]:
             await msg.reply_text(resp["reply"])
+        elif not resp["resend_remaining"] and not resp["resend_nekay"]:
+            # AI Fallback — responder reply ካላገኘ
+            try:
+                ai_reply = await get_ai_fallback(
+                    text=text,
+                    settings=settings,
+                    taken=taken,
+                    paid=paid,
+                    nekay_list=nekay_list,
+                    remaining_count=remaining,
+                    countdown_seconds=countdown_seconds,
+                    user_id=user_id,
+                    game_id=game_id,
+                )
+                if ai_reply:
+                    await msg.reply_text(ai_reply)
+            except Exception as _ai_err:
+                logging.warning(f"[AI Fallback] Error: {_ai_err}")
         if resp["resend_remaining"]:
             if game_id in nekay_active:
                 rem_msg_id = settings.get("remaining_message_id")
@@ -1657,13 +1688,57 @@ def get_all_db_urls():
 
 
 async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
-    if not is_admin(update.effective_user.id, group_id):
-        return
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
 
-    if not group_id:
-        await update.message.reply_text("❌ Group ውስጥ ብቻ ይሰራል!")
-        return
+    if chat_type != "private":
+        group_id = update.effective_chat.id
+        if not is_admin(user_id, group_id):
+            return
+    else:
+        # Private chat — admin የሆነባቸው groups ይፈልጋል
+        enabled = get_enabled_groups()
+        admin_groups = [g for g in enabled if is_admin(user_id, g["group_id"])]
+        if not admin_groups:
+            await update.message.reply_text("❌ Admin የሆንክባቸው groups የሉም!")
+            return
+        if len(admin_groups) == 1:
+            group_id = admin_groups[0]["group_id"]
+        else:
+            # ብዙ groups ካለ ሁሉንም ያሳያል
+            all_lines = []
+            for g in admin_groups:
+                gid = g["group_id"]
+                winners_g = get_recent_winners(gid, hours=24)
+                if winners_g:
+                    gname = g.get("group_name") or str(gid)
+                    all_lines.append(f"📌 {gname}:")
+                    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+                    for w in winners_g:
+                        medal = medals.get(w["place"], "🎖️")
+                        balance = w["balance"]
+                        sent_mark = "✅" if w["sent"] else "⚠️ ያልተላከ"
+                        time_str = w["created_at"].strftime("%H:%M") if w["created_at"] else "?"
+                        line = f"{medal} {w['place']}ኛ: {w['user_name']} — ETB {w['prize']} {sent_mark}"
+                        if balance > 0:
+                            line += f"
+   💳 ቀሪ balance: ETB {balance}"
+                        line += f"
+   🕐 {time_str}"
+                        all_lines.append(line)
+            if all_lines:
+                await update.message.reply_text("🏆 Last 24hr Winners:
+
+" + "
+
+".join(all_lines))
+            else:
+                await update.message.reply_text("🏆 Last 24hr winners የሉም።")
+            try:
+                cleanup_old_winners()
+            except Exception:
+                pass
+            return
 
     winners = get_recent_winners(group_id, hours=24)
 
@@ -2009,13 +2084,22 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(admin_groups) == 1:
             group_id = admin_groups[0]["group_id"]
         else:
-            lines = ["📋 የትኛው group? ID ጻፍ:\n"]
+            # ብዙ groups — active game ያለው ብቻ ይፈልግ
+            active_groups = []
             for g in admin_groups:
-                lines.append(f"• {g['group_name'] or g['group_id']}: {g['group_id']}")
-            await update.message.reply_text("\n".join(lines))
-            ctx.user_data["awaiting_group_id"] = True
-            ctx.user_data["admin_groups"] = admin_groups
-            return ASK_SEND_PLACE
+                s = get_active_settings(group_id=g["group_id"])
+                if s:
+                    active_groups.append(g)
+            if len(active_groups) == 1:
+                group_id = active_groups[0]["group_id"]
+            else:
+                lines = ["📋 የትኛው group? ID ጻፍ:\n"]
+                for g in (active_groups if active_groups else admin_groups):
+                    lines.append(f"• {g['group_name'] or g['group_id']}: {g['group_id']}")
+                await update.message.reply_text("\n".join(lines))
+                ctx.user_data["awaiting_group_id"] = True
+                ctx.user_data["admin_groups"] = admin_groups
+                return ASK_SEND_PLACE
 
     ctx.user_data["send_group_id"] = group_id
     return await _send_show_places(update, ctx, group_id)
@@ -2112,6 +2196,18 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     new_balance = result["new_balance"]
 
     mark_winner_sent(game_id, telegram_id, amount)
+
+    # Transaction log — winner sent
+    try:
+        if group_id:
+            log_transaction(
+                group_id=group_id, game_id=game_id,
+                telegram_id=telegram_id, amount=-amount,
+                reason="winner_sent", done_by="admin",
+                balance_after=new_balance,
+            )
+    except Exception as _log_err:
+        logging.warning(f"[log_transaction] Error: {_log_err}")
 
     place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(place, f"{place}ኛ")
 
