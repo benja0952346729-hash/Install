@@ -55,7 +55,7 @@ FIDEL_TO_LATIN = {
     "ጠ": "te", "ጡ": "tu", "ጢ": "ti", "ጣ": "ta", "ጤ": "te", "ጥ": "t", "ጦ": "to",
     # ጰ family
     "ጰ": "pe", "ጱ": "pu", "ጲ": "pi", "ጳ": "pa", "ጴ": "pe", "ጵ": "p", "ጶ": "po",
-    # ጸ/ፀ family (same sound)
+    # ጸ/ፀ family
     "ጸ": "tse", "ጹ": "tsu", "ጺ": "tsi", "ጻ": "tsa", "ጼ": "tse", "ጽ": "ts", "ጾ": "tso",
     "ፀ": "tse", "ፁ": "tsu", "ፂ": "tsi", "ፃ": "tsa", "ፄ": "tse", "ፅ": "ts", "ፆ": "tso",
     # ፈ family
@@ -67,7 +67,6 @@ FIDEL_TO_LATIN = {
 }
 
 def to_latin(text: str) -> str:
-    """Convert any mix of Amharic + Latin text to unified Latin."""
     result = []
     for ch in text:
         if ch in FIDEL_TO_LATIN:
@@ -78,7 +77,7 @@ def to_latin(text: str) -> str:
 
 
 # ================================================================
-# LATIN → AMHARIC KEYWORD MAP (kept for backward compat / display)
+# LATIN → AMHARIC KEYWORD MAP
 # ================================================================
 
 LATIN_TO_AMHARIC = {
@@ -238,22 +237,27 @@ LATIN_TO_AMHARIC = {
     "qitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
     "kitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
     "lmin alasgegabhegnim": "ለምን አላስገባኸኝም",
+    # ── NEW ──
+    "sint new": "ስንት ነው",
+    "bale sint new": "ባለ ስንት ነው",
+    "sint lilaк": "ስንት ልላክ",
+    "sint br lilaк": "ስንት ብር ልላክ",
+    "derashn sint new": "ደራሽ ስንት ነው",
+    "sint derash new": "ስንት ደራሽ ነው",
+    "sint sew new": "ስንት ሰው ነው",
+    "sint sew qere": "ስንት ሰው ቀረ",
+    "wetset": "ውጤት",
+    "wetset asawqen": "ውጤት አሳውቀን",
+    "br alderesegnim": "ብር አልደረሰኝም",
+    "br algeba": "ብር አልገባም",
 }
 
 
 # ================================================================
-# UNIFIED NORMALIZER  (Amharic OR Latin → Latin)
+# UNIFIED NORMALIZER
 # ================================================================
 
 def normalize_to_latin(text: str) -> str:
-    """
-    Converts any text (pure Amharic, pure Latin, or mixed) → unified Latin.
-    Steps:
-      1. Character-by-character: Ethiopic char → Latin via FIDEL_TO_LATIN
-      2. Lowercase everything
-      3. Collapse multiple spaces
-    This replaces the old normalize_amharic() + translate_latin() pipeline.
-    """
     result = []
     for ch in text:
         if ch in FIDEL_TO_LATIN:
@@ -332,26 +336,21 @@ def detect_change_number(text: str):
 
 def detect_type_change(text: str):
     latin = normalize_to_latin(text)
-
     TYPE_FULL_WORDS_LAT = ["bemulu", "mulu"]
     TYPE_HALF_WORDS_LAT = ["begmash", "gmash"]
-
     is_full = any(w in latin for w in TYPE_FULL_WORDS_LAT)
     is_half = any(w in latin for w in TYPE_HALF_WORDS_LAT)
-
     if not is_full and not is_half:
         return None
-
     nums = [int(n) for n in re.findall(r"\d+", text)]
     if not nums:
         return None
-
     target = "full" if is_full else "half"
     return (nums, target)
 
 
 # ================================================================
-# INTENT EXAMPLES  (stored as Amharic — converted at build time)
+# INTENT EXAMPLES
 # ================================================================
 
 INTENT_EXAMPLES = {
@@ -505,15 +504,70 @@ INTENT_EXAMPLES = {
         "lmin alteyazelign", "lmin altemezegebem",
         "lmin alasgegabhegnim",
     ],
+    # ── NEW INTENTS ──────────────────────────────────────────────
+    "price_query": [
+        "ስንት ነው", "በ ስንት ነው", "ስንት ብር ነው",
+        "ባለ ስንት ነው", "መደብ ስንት ነው", "ባለ ስንት ብር ነው",
+        "ዋጋ ስንት ነው", "ዋጋው ስንት ነው", "ምን ያህል ነው",
+        "ምን ያህል ብር ነው", "ስንት ያስከፍላል",
+        "sint new", "bale sint new", "sint br new",
+        "wagaw sint new", "min yahil new",
+    ],
+    "prize_query": [
+        "ደራሽ ስንት ነው", "ስንት ደራሽ ነው", "ባለ ስንት ደራሽ ነው",
+        "ሽልማቱ ስንት ነው", "1ኛ ሽልማት ስንት ነው", "prize ስንት ነው",
+        "ምን ያህል ደራሽ ነው", "ስንት ብር ደራሽ ነው",
+        "derash sint new", "sint derash new",
+        "shilmat sint new", "prize sint new",
+        "bale sint derash new",
+    ],
+    "players_query": [
+        "ስንት ሰው ነው", "ከስንት ሰው ጋር ነው", "ለ ስንት ሰው ነው",
+        "ምን ያህል ሰው ነው", "ስንት ሰዎች ናቸው",
+        "ጨዋታው ለስንት ሰው ነው", "ስንት ተጫዋቾች ናቸው",
+        "sint sew new", "kesint sew gar new",
+        "le sint sew new", "min yahil sew new",
+    ],
+    "players_remaining_query": [
+        "ስንት ሰው ቀረ", "ስንት ሰው ነው የቀረው", "ስንት ሰዎች ቀሩ",
+        "ምን ያህል ሰው ቀረ", "ስንት ሰው ይቀራል",
+        "ቀሪ ሰው ስንት ነው", "ስንት ሰው ይቀረዋል",
+        "sint sew qere", "sint sew new yekerehu",
+        "qeri sew sint new",
+    ],
+    "payment_not_received": [
+        "ብር አልደረሰኝም", "አልገባልኝም", "ብር አልገባም",
+        "ብር ላክልኝ", "ቀሪ ብር ላክልኝ", "ለምን አትልክም",
+        "ብሬን ለምን አላክም", "ብር ለምን አልስገባህም",
+        "ገንዘቤ አልደረሰኝም", "ብሬ አልደረሰም", "ብር አልተላከም",
+        "ለምን ብሬን አልላክም", "ብሬ የለም",
+        "br alderesegnim", "br algeba", "br lak lign",
+        "lemin atlikm", "br lemin allakim",
+    ],
+    "result_query": [
+        "ውጤት", "ውጤት አሳውቀን", "ስንት ቁጥር ወጣ",
+        "ስንት ወጣ", "ምን ቁጥር ወጣ", "ውጤት ስንት ነው",
+        "የወጣው ስንት ቁጥር ነው", "የወጣው ምንድነው",
+        "ውጤቱ ምንድን ነው", "ውጤቱ ምን ነው",
+        "wetset", "wetset asawqen", "sint qitr weta",
+        "min qitr weta", "yewetaw sint new",
+    ],
+    "balance_query": [
+        "ስንት ብር ልላክ", "ስንት ነው ምቀርብኝ", "ስንት ነው የምልከው",
+        "ስንት ልላክ", "ስንት ብር ልጨምር", "ምን ያህል ልጨምር",
+        "ቀሪ ብሬ ስንት ነው", "ምን ያህል ብር ይቀረኛል",
+        "ስንት ይቀረኛል", "ምን ያህል ይቀረኛል",
+        "sint br lilaк", "sint lilaк", "sint br lijemer",
+        "min yahil lijemer", "qeri bre sint new",
+    ],
 }
 
 
 # ================================================================
-# N-GRAM ENGINE  (now operates on Latin)
+# N-GRAM ENGINE
 # ================================================================
 
 def get_ngrams(text: str, n: int = 2) -> list:
-    """text is already Latin-normalized before calling this."""
     tokens = text.split()
     ngrams = []
     for token in tokens:
@@ -528,7 +582,7 @@ def build_tfidf(intent_examples: dict):
     for intent, examples in intent_examples.items():
         all_ngrams = []
         for ex in examples:
-            latin = normalize_to_latin(ex)   # ← unified normalizer
+            latin = normalize_to_latin(ex)
             all_ngrams.extend(get_ngrams(latin))
         intent_ngrams[intent] = all_ngrams
 
@@ -565,7 +619,7 @@ def build_tfidf(intent_examples: dict):
 
 
 def text_to_vector(text: str, idf: dict) -> dict:
-    latin = normalize_to_latin(text)    # ← unified normalizer
+    latin = normalize_to_latin(text)
     ngrams = get_ngrams(latin)
     vec = defaultdict(float)
     total = len(ngrams)
@@ -601,7 +655,7 @@ print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
 
 
 # ================================================================
-# DETECT INTENT  (keyword guards also use normalize_to_latin)
+# DETECT INTENT
 # ================================================================
 
 def detect_intent(text: str) -> tuple:
@@ -615,7 +669,6 @@ def detect_intent(text: str) -> tuple:
         "nigid bank", "bank akawnt",
         "yemikefelbew qitr", "yebank qitr",
     ]
-    # Also check raw Amharic keywords that to_latin covers:
     ACCOUNT_KW_AMH_LAT = [
         normalize_to_latin("አካውንት"),
         normalize_to_latin("ቴሌብር"),
@@ -661,6 +714,92 @@ def detect_intent(text: str) -> tuple:
     if any(w in latin for w in WHY_NOT_LAT):
         return "why_not_registered", 1.0
 
+    # ── result query ──────────────────────────────────────────────
+    RESULT_KW_LAT = [
+        normalize_to_latin("ውጤት"),
+        normalize_to_latin("ስንት ቁጥር ወጣ"),
+        normalize_to_latin("ምን ቁጥር ወጣ"),
+        normalize_to_latin("የወጣው"),
+        "wetset", "wetset asawqen",
+        "sint qitr weta", "min qitr weta", "yewetaw",
+    ]
+    if any(kw in latin for kw in RESULT_KW_LAT):
+        return "result_query", 1.0
+
+    # ── prize query ───────────────────────────────────────────────
+    PRIZE_KW_LAT = [
+        normalize_to_latin("ደራሽ"),
+        normalize_to_latin("ሽልማት"),
+        "derash", "shilmat", "prize",
+    ]
+    if any(kw in latin for kw in PRIZE_KW_LAT):
+        return "prize_query", 1.0
+
+    # ── payment not received ──────────────────────────────────────
+    PAYMENT_NOT_RECV_LAT = [
+        normalize_to_latin("ብር አልደረሰኝም"),
+        normalize_to_latin("አልገባልኝም"),
+        normalize_to_latin("ብር አልገባም"),
+        normalize_to_latin("ብር ላክልኝ"),
+        normalize_to_latin("ለምን አትልክም"),
+        normalize_to_latin("ብሬን ለምን አላክም"),
+        "br alderesegnim", "br algeba", "lemin atlikm",
+        "br laklign", "br lemin allakim",
+    ]
+    if any(kw in latin for kw in PAYMENT_NOT_RECV_LAT):
+        return "payment_not_received", 1.0
+
+    # ── balance query ─────────────────────────────────────────────
+    BALANCE_KW_LAT = [
+        normalize_to_latin("ስንት ብር ልላክ"),
+        normalize_to_latin("ስንት ልላክ"),
+        normalize_to_latin("ስንት ብር ልጨምር"),
+        normalize_to_latin("ምን ያህል ልጨምር"),
+        normalize_to_latin("ምን ያህል ይቀረኛል"),
+        normalize_to_latin("ስንት ይቀረኛል"),
+        "sint br lilaк", "sint lilaк", "min yahil lijemer",
+        "qeri bre sint new", "sint br lijemer",
+    ]
+    if any(kw in latin for kw in BALANCE_KW_LAT):
+        return "balance_query", 1.0
+
+    # ── players remaining query ───────────────────────────────────
+    PLAYERS_REM_LAT = [
+        normalize_to_latin("ስንት ሰው ቀረ"),
+        normalize_to_latin("ስንት ሰዎች ቀሩ"),
+        normalize_to_latin("ቀሪ ሰው"),
+        "sint sew qere", "qeri sew",
+    ]
+    if any(kw in latin for kw in PLAYERS_REM_LAT):
+        return "players_remaining_query", 1.0
+
+    # ── players query ─────────────────────────────────────────────
+    PLAYERS_KW_LAT = [
+        normalize_to_latin("ስንት ሰው ነው"),
+        normalize_to_latin("ከስንት ሰው ጋር ነው"),
+        normalize_to_latin("ለ ስንት ሰው ነው"),
+        "sint sew new", "kesint sew gar new", "le sint sew new",
+    ]
+    if any(kw in latin for kw in PLAYERS_KW_LAT):
+        return "players_query", 1.0
+
+    # ── price query — ቁጥር ከሌለ ብቻ ────────────────────────────────
+    PRICE_KW_LAT = [
+        normalize_to_latin("ዋጋ ስንት"),
+        normalize_to_latin("ዋጋው ስንት"),
+        normalize_to_latin("ምን ያህል ብር"),
+        normalize_to_latin("ስንት ያስከፍላል"),
+        "wagaw sint", "min yahil br", "sint yasikeflal",
+    ]
+    # "ስንት ነው" ቁጥር ሲኖር specific_number_query ሊሆን ይችላል
+    # ቁጥር ከሌለ price_query
+    PRICE_SINT_NEW_LAT = normalize_to_latin("ስንት ነው")
+    has_sint_new = PRICE_SINT_NEW_LAT in latin
+    if not numbers_in_text and has_sint_new:
+        return "price_query", 1.0
+    if any(kw in latin for kw in PRICE_KW_LAT):
+        return "price_query", 1.0
+
     # ── specific number query ─────────────────────────────────────
     ALE_LAT    = normalize_to_latin("አለ")
     TEYAZE_LAT = [normalize_to_latin(w) for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"]]
@@ -690,7 +829,10 @@ def detect_intent(text: str) -> tuple:
             if intent in ("booking", "specific_number_query", "cancel_number",
                           "change_number", "type_change"):
                 bonus += 0.08
-            elif intent != "account_query":
+            elif intent not in ("account_query", "price_query", "prize_query",
+                                "players_query", "players_remaining_query",
+                                "result_query", "balance_query",
+                                "payment_not_received"):
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
@@ -707,7 +849,7 @@ def detect_intent(text: str) -> tuple:
 
 
 # ================================================================
-# RESPONSES  (unchanged)
+# RESPONSES
 # ================================================================
 
 RESPONSES = {
@@ -827,11 +969,53 @@ RESPONSES = {
     "nekay_countdown_wait": [
         "ቤተሰብ ትንሽ ይጠብቁ ነቃይ ላወጣ ነው 🙏",
     ],
+    # ── NEW RESPONSES ────────────────────────────────────────────
+    "price_query_full_only": [
+        "{price_full} ብር ነው 🙏",
+        "ቤቱ {price_full} ብር ነው 🙏",
+        "{price_full} ብር ነው ቤተሰብ 🙏",
+    ],
+    "price_query_full_and_half": [
+        "ሙሉ {price_full} ብር፣ ግማሽ {price_half} ብር ነው 🙏",
+        "{price_full} ብር ሙሉ / {price_half} ብር ግማሽ ነው 🙏",
+    ],
+    "prize_query": [
+        "{prize_1st} ደራሽ ነው ቤተሰብ 🙏",
+        "1ኛ {prize_1st} ብር ደራሽ ነው 🙏",
+    ],
+    "players_query": [
+        "{players_count} ሰው ነው ቤተሰብ 🙏",
+        "ጨዋታው ለ{players_count} ሰው ነው 🙏",
+    ],
+    "players_remaining_query": [
+        "{players_remaining} ሰው ቀረ ቤተሰብ 🙏",
+        "ቀሪ {players_remaining} ሰው አለ 🙏",
+    ],
+    "payment_not_received": [
+        "ችግር ካለ አጫዋቹን በውስጥ አውራው 🙏",
+        "ባለቤቱን በውስጥ አናግር ይፈታዋል 🙏",
+    ],
+    "result_query_waiting": [
+        "ውጤት እየተላከ ነው ትንሽ ይጠብቁ 🙏",
+        "ትንሽ ይጠብቁ ውጤት ይላካል 🙏",
+    ],
+    "result_query_show": [
+        "🥇 1ኛ: {first}\n🥈 2ኛ: {second}\n🥉 3ኛ: {third}",
+        "ውጤት 🏆\n1ኛ: {first}\n2ኛ: {second}\n3ኛ: {third}",
+    ],
+    "result_query_none": [
+        "ገና ውጤት የለም ቤተሰብ 🙏",
+        "ውጤት አልተላከም ቤተሰብ 🙏",
+    ],
+    "balance_query": [
+        "{balance} ብር ነው ቤተሰብ 🙏",
+        "ቀሪ {balance} ብር ነው 🙏",
+    ],
 }
 
 
 # ================================================================
-# MAIN RESPONDER  (logic unchanged — only normalizer calls updated)
+# MAIN RESPONDER
 # ================================================================
 
 def get_response(
@@ -847,6 +1031,9 @@ def get_response(
     registration_result: str = None,
     registered_numbers: list = None,
     failed_numbers: list = None,
+    # ── NEW params ─────────────────────────────────────────────
+    recent_winners: list = None,
+    user_unpaid_balance: float = None,
 ) -> dict:
 
     THRESHOLD_RESPOND  = 0.25
@@ -883,12 +1070,14 @@ def get_response(
     if score < THRESHOLD_RESPOND:
         return result
 
+    # ── account_query ─────────────────────────────────────────────
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
         if payment_info:
             result["reply"] = _extract_account_lines(payment_info)
         return result
 
+    # ── change_number ─────────────────────────────────────────────
     if intent == "change_number":
         change_result = detect_change_number(text)
         if change_result:
@@ -904,6 +1093,7 @@ def get_response(
             )
         return result
 
+    # ── type_change ───────────────────────────────────────────────
     if intent == "type_change":
         type_result = detect_type_change(text)
         if type_result:
@@ -915,12 +1105,14 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["type_change_ack"])
         return result
 
+    # ── why_not_registered ────────────────────────────────────────
     if intent == "why_not_registered":
         numbers_found = re.findall(r"\d+", text)
         target_num = int(numbers_found[0]) if numbers_found else None
         result["why_not_registered"] = {"number": target_num}
         return result
 
+    # ── booking ───────────────────────────────────────────────────
     if intent == "booking":
         if countdown_seconds > 0:
             mins = countdown_seconds // 60
@@ -931,6 +1123,7 @@ def get_response(
                 result["reply"] = f"{secs} ሴኮንድ ቀርቱዋል ቲንሽ ይጠብቁ ነቃይ ካለ አሳውቃለው 🙏"
         return result
 
+    # ── specific_number_query ─────────────────────────────────────
     if intent == "specific_number_query":
         numbers_found = re.findall(r"\d+", text)
         if numbers_found:
@@ -948,6 +1141,7 @@ def get_response(
             result["resend_remaining"] = True
         return result
 
+    # ── cancel_number ─────────────────────────────────────────────
     if intent == "cancel_number":
         numbers_found = re.findall(r"\d+", text)
         if numbers_found:
@@ -956,6 +1150,7 @@ def get_response(
             result["cancel_number"] = num
         return result
 
+    # ── complaint_removed ─────────────────────────────────────────
     if intent == "complaint_removed":
         numbers_found = re.findall(r"\d+", text)
         num = int(numbers_found[0]) if numbers_found else None
@@ -967,14 +1162,17 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
         return result
 
+    # ── complaint_why_sold ────────────────────────────────────────
     if intent == "complaint_why_sold":
         result["reply"] = random.choice(RESPONSES["complaint_why_sold"])
         return result
 
+    # ── complaint_paid_removed ────────────────────────────────────
     if intent == "complaint_paid_removed":
         result["reply"] = random.choice(RESPONSES["complaint_paid_removed"])
         return result
 
+    # ── nekay_query ───────────────────────────────────────────────
     if intent == "nekay_query":
         if nekay_list:
             result["reply"] = random.choice(RESPONSES["nekay_exists"])
@@ -986,15 +1184,18 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["nekay_all_done"])
         return result
 
+    # ── remaining_send ────────────────────────────────────────────
     if intent == "remaining_send":
         result["reply"] = random.choice(RESPONSES["remaining_send_ack"])
         result["resend_remaining"] = True
         return result
 
+    # ── remaining_query ───────────────────────────────────────────
     if intent == "remaining_query":
         result["resend_remaining"] = True
         return result
 
+    # ── all_taken_query ───────────────────────────────────────────
     if intent == "all_taken_query":
         if remaining_count == 0 and not nekay_list:
             return result
@@ -1004,11 +1205,86 @@ def get_response(
             result["resend_remaining"] = True
         return result
 
+    # ── greeting ──────────────────────────────────────────────────
     if intent == "greeting":
         msg = random.choice(RESPONSES["greeting"])
         if random.random() < 0.20:
             msg += " " + random.choice(RESPONSES["greeting_help"])
         result["reply"] = msg
+        return result
+
+    # ── price_query ───────────────────────────────────────────────
+    if intent == "price_query":
+        price_full = settings.get("price_full", 0)
+        price_half = settings.get("price_half")
+        if price_half:
+            result["reply"] = random.choice(RESPONSES["price_query_full_and_half"]).format(
+                price_full=price_full, price_half=price_half
+            )
+        else:
+            result["reply"] = random.choice(RESPONSES["price_query_full_only"]).format(
+                price_full=price_full
+            )
+        return result
+
+    # ── prize_query ───────────────────────────────────────────────
+    if intent == "prize_query":
+        prize_1st = settings.get("prize_1st", 0)
+        result["reply"] = random.choice(RESPONSES["prize_query"]).format(
+            prize_1st=prize_1st
+        )
+        return result
+
+    # ── players_query ─────────────────────────────────────────────
+    if intent == "players_query":
+        total_numbers = settings.get("total_numbers", 0)
+        numbers_per_person = settings.get("numbers_per_person", 1)
+        players_count = total_numbers // numbers_per_person if numbers_per_person else total_numbers
+        result["reply"] = random.choice(RESPONSES["players_query"]).format(
+            players_count=players_count
+        )
+        return result
+
+    # ── players_remaining_query ───────────────────────────────────
+    if intent == "players_remaining_query":
+        numbers_per_person = settings.get("numbers_per_person", 1)
+        players_remaining = remaining_count // numbers_per_person if numbers_per_person else remaining_count
+        result["reply"] = random.choice(RESPONSES["players_remaining_query"]).format(
+            players_remaining=players_remaining
+        )
+        return result
+
+    # ── payment_not_received ──────────────────────────────────────
+    if intent == "payment_not_received":
+        result["reply"] = random.choice(RESPONSES["payment_not_received"])
+        return result
+
+    # ── result_query ──────────────────────────────────────────────
+    if intent == "result_query":
+        total_numbers = settings.get("total_numbers", 0)
+        paid_count = len(paid)
+        # ✅ paid ቁጥሮች 3 ወይም ከዛ ያነሰ ቀርቷቸዋል ወይም countdown active
+        nearly_done = (paid_count >= total_numbers - 3) or (countdown_seconds > 0)
+        if nearly_done:
+            result["reply"] = random.choice(RESPONSES["result_query_waiting"])
+        elif recent_winners:
+            w = recent_winners
+            first  = f"{w[0]['number']:02d}" if len(w) > 0 and w[0].get("number") else "—"
+            second = f"{w[1]['number']:02d}" if len(w) > 1 and w[1].get("number") else "—"
+            third  = f"{w[2]['number']:02d}" if len(w) > 2 and w[2].get("number") else "—"
+            result["reply"] = random.choice(RESPONSES["result_query_show"]).format(
+                first=first, second=second, third=third
+            )
+        else:
+            result["reply"] = random.choice(RESPONSES["result_query_none"])
+        return result
+
+    # ── balance_query ─────────────────────────────────────────────
+    if intent == "balance_query":
+        if user_unpaid_balance is not None:
+            result["reply"] = random.choice(RESPONSES["balance_query"]).format(
+                balance=int(user_unpaid_balance)
+            )
         return result
 
     return result
