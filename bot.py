@@ -62,7 +62,7 @@ import random
 ) = range(14)
 
 pending_ambiguous = {}
-active_countdowns = {}  # {game_id: {"task": Task, "start": float, "warn_secs": int}}
+active_countdowns = {}
 countdown_done = set()
 nekay_active = set()
 nekay_numbers = {}
@@ -130,17 +130,14 @@ async def _inactivity_notify_task(bot, game_id: int, group_id: int):
             if remaining_count == 0 and not is_nekay:
                 return
 
-            # ሰዓት check — ከምሽቱ 4 (10 PM) እስከ ጠዋቱ 2 (8 AM) አይላክም
             now_et = datetime.now(et_tz)
             hour = now_et.hour
             if hour >= 22 or hour < 8:
                 continue
 
-            # 4 ጊዜ ከላከ በኋላ ማንም ካልወሰደ ይሞታል
             if urgency_count >= MAX_COUNT:
                 return
 
-            # የቀደመውን urgency message ሰርዝ
             if last_urgency_msg_id:
                 try:
                     await bot.delete_message(chat_id=group_id, message_id=last_urgency_msg_id)
@@ -352,13 +349,11 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         nekay_list = _build_nekay_from_snap(snap)
         nekay_text = build_nekay(nekay_list)
 
-        # FIX 4: warning message አይጠፋም — ነቃይ list አዲስ message ከታች ይላካል
         nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
 
         nekay_active.add(game_id)
         update_remaining_message_id(game_id, nekay_sent.message_id if nekay_sent else None)
     else:
-        # unpaid የለም — warning message ይቀራል (አይጠፋም)
         pass
 
     active_countdowns.pop(game_id, None)
@@ -657,7 +652,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         user_id=user_id,
     )
 
-    # Cancel number
     if resp.get("cancel_number"):
         num = resp["cancel_number"]
         if not user_owns_number(game_id, user_id, num):
@@ -667,10 +661,8 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         if removed:
             if resp["reply"]:
                 await msg.reply_text(resp["reply"])
-            # Transaction log — remove refund
             try:
                 price_full_r = float(settings.get("price_full") or 0)
-                price_half_r = float(settings.get("price_half") or 0)
                 log_transaction(
                     group_id=group_id, game_id=game_id,
                     telegram_id=user_id, amount=price_full_r,
@@ -703,13 +695,11 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         nekay_numbers.pop(game_id, None)
         return
 
-    # Type change
     if resp.get("type_change"):
         tc = resp["type_change"]
         target = tc["target"]
         numbers = tc["numbers"]
 
-        # parsed_name ከ parse_numbers ይወስድ
         parse_result = parse_numbers(text)
         parsed_name = None
         if parse_result and parse_result["numbers"]:
@@ -730,7 +720,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             elif not user_owns_number(game_id, user_id, actual_num):
                 await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
             else:
-                # parsed_name ካለ ስም update አርግ
                 if parsed_name:
                     conn = get_conn()
                     cur = conn.cursor()
@@ -852,7 +841,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         countdown_done.add(game_id)
         return
 
-    # Change number
     if resp.get("change_number"):
         ch = resp["change_number"]
         from_num = ch["from"]
@@ -887,7 +875,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 await msg.reply_text(f"{to_num:02d} አልተቻለም 🙏")
         return
 
-    # Why not registered
     if resp.get("why_not_registered") is not None:
         target_num = resp["why_not_registered"]["number"]
         attempts = get_failed_attempts(game_id, user_id, target_num)
@@ -919,14 +906,12 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         await msg.reply_text("\n".join(lines))
         return
 
-    # Parse numbers
     parse_result = parse_numbers(text)
 
     if not parse_result:
         if resp["reply"]:
             await msg.reply_text(resp["reply"])
         elif not resp["resend_remaining"] and not resp["resend_nekay"]:
-            # AI Fallback — responder reply ካላገኘ
             try:
                 ai_reply = await get_ai_fallback(
                     text=text,
@@ -1058,7 +1043,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         elif actual_num in taken_before:
             existing_slots = taken_before[actual_num]
             slot1 = next((s for s in existing_slots if s[2] == 1), None)
-            if slot1 and slot1[0] != user_name and slot1[1]:  # ሌላ user + half
+            if slot1 and slot1[0] != user_name and slot1[1]:
                 actual_name = user_name
             else:
                 actual_name = slot1[0] if slot1 else user_name
@@ -1184,7 +1169,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             nekay_numbers.pop(game_id, None)
             _stop_inactivity_tracker(game_id)
 
-        # ነቃይ ጊዜ ሰው ቁጥር ሲወስድ tracker reset
         _reset_inactivity_tracker(ctx.bot, game_id, group_id)
 
     elif remaining_count <= 7:
@@ -1270,6 +1254,182 @@ async def _refresh_board(ctx, settings, group_id=None):
     else:
         new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
         update_board_message_id(game_id, new_msg.message_id)
+
+
+# ============================================================
+# BOARD REPLY PARSE — አዲስ
+# ============================================================
+
+def _parse_board_text(text: str, symbol: str = "#") -> dict:
+    import re
+    changes = {}
+
+    for line in text.split("\n"):
+        line = line.strip()
+        escaped = re.escape(symbol)
+        pattern = rf"^(\d{{2}}){escaped}\s*(.*)$"
+        match = re.match(pattern, line)
+        if not match:
+            continue
+
+        number = int(match.group(1))
+        rest = match.group(2).strip()
+
+        if not rest:
+            changes[number] = None
+            continue
+
+        data = {}
+
+        # slot1+slot2 check
+        if "+" in rest:
+            parts = rest.split("+", 1)
+            slot1_raw = parts[0].strip()
+            slot2_raw = parts[1].strip()
+
+            # slot1
+            paid1 = "✅" in slot1_raw
+            name1 = slot1_raw.replace("✅", "").strip()
+            data["name1"] = name1 if name1 else None
+            data["paid1"] = paid1
+            data["is_half1"] = True
+
+            # slot2
+            paid2 = "✅" in slot2_raw
+            name2 = slot2_raw.replace("✅", "").strip()
+            data["name2"] = name2 if name2 else None
+            data["paid2"] = paid2
+        else:
+            # slot1 ብቻ
+            paid1 = "✅" in rest
+            is_half1 = rest.endswith("+") or (paid1 and "+" in rest)
+            name1 = rest.replace("✅", "").replace("+", "").strip()
+            data["name1"] = name1 if name1 else None
+            data["paid1"] = paid1
+            data["is_half1"] = False
+            data["name2"] = None
+            data["paid2"] = False
+
+        changes[number] = data
+
+    return changes
+
+
+async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    group_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    # Admin ብቻ
+    if not is_admin(user_id, group_id):
+        return
+
+    # Group enabled/active check
+    if not is_group_enabled(group_id):
+        return
+
+    if not is_group_active(group_id):
+        return
+
+    # Reply መሆን አለበት
+    if not msg.reply_to_message:
+        return
+
+    # Bot message ላይ reply መሆን አለበት
+    if not msg.reply_to_message.from_user:
+        return
+
+    if msg.reply_to_message.from_user.id != ctx.bot.id:
+        return
+
+    # Board line አለ? (ቢያንስ አንድ ## pattern)
+    settings = get_active_settings(group_id=group_id)
+    if not settings:
+        return
+
+    symbol = settings.get("slot_symbol") or "#"
+    import re
+    escaped = re.escape(symbol)
+    if not re.search(rf"\d{{2}}{escaped}", msg.text):
+        return
+
+    game_id = settings["id"]
+    text = msg.text.strip()
+
+    changes = _parse_board_text(text, symbol)
+    if not changes:
+        return
+
+    for number, data in changes.items():
+        if number < 1 or number > settings["total_numbers"]:
+            continue
+
+        if data is None:
+            # Empty line — remove
+            admin_remove_player(game_id, number, slot=None)
+        else:
+            name1 = data.get("name1")
+            paid1 = data.get("paid1", False)
+            is_half1 = data.get("is_half1", False)
+            name2 = data.get("name2")
+            paid2 = data.get("paid2", False)
+
+            # አስቀድሞ ያለውን አጥፋ
+            admin_remove_player(game_id, number, slot=None)
+
+            if name1:
+                register_number(game_id, 0, name1, number, is_half1, force=True)
+                if paid1:
+                    admin_mark_paid(game_id, number, slot=1, is_paid=True)
+
+            if name2:
+                register_number(game_id, 0, name2, number, is_half=False, force=True)
+                if paid2:
+                    admin_mark_paid(game_id, number, slot=2, is_paid=True)
+
+            # nekay update
+            if game_id in nekay_numbers:
+                snap = nekay_numbers.get(game_id, {})
+                if number in snap:
+                    if name1 and not is_half1:
+                        del snap[number]
+                    elif name2:
+                        del snap[number]
+                nekay_numbers[game_id] = snap
+
+    # Admin የላከውን message ሰርዝ
+    try:
+        await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+    except Exception as e:
+        logging.warning(f"[BoardReply] Delete admin msg error: {e}")
+
+    # Board refresh
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _refresh_board(ctx, fresh, group_id)
+
+        # nekay active ከሆነ refresh
+        if game_id in nekay_active:
+            snap = nekay_numbers.get(game_id, {})
+            rem_msg_id = fresh.get("remaining_message_id")
+            if rem_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                except Exception:
+                    pass
+            if snap:
+                nekay_list = _build_nekay_from_snap(snap)
+                nekay_text = build_nekay(nekay_list)
+                new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+                update_remaining_message_id(game_id, new_nekay.message_id)
+            else:
+                update_remaining_message_id(game_id, None)
+                nekay_active.discard(game_id)
+                nekay_numbers.pop(game_id, None)
+                _stop_inactivity_tracker(game_id)
 
 
 # ============================================================
@@ -1696,7 +1856,6 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user_id, group_id):
             return
     else:
-        # Private chat — admin የሆነባቸው groups ይፈልጋል
         enabled = get_enabled_groups()
         admin_groups = [g for g in enabled if is_admin(user_id, g["group_id"])]
         if not admin_groups:
@@ -1705,7 +1864,6 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(admin_groups) == 1:
             group_id = admin_groups[0]["group_id"]
         else:
-            # ብዙ groups ካለ ሁሉንም ያሳያል
             all_lines = []
             for g in admin_groups:
                 gid = g["group_id"]
@@ -1977,7 +2135,6 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await nekay_payment_cb(ctx.bot, game_id, update.effective_user.id, confirmed)
 
     try:
-        # group_id ጋር handle_payment_photo ይጠራል
         await handle_payment_photo(ctx.bot, update.message, nekay_cb=_nekay_cb, group_id=group_id)
     finally:
         photo_processing[group_id] = False
@@ -2078,7 +2235,6 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if len(admin_groups) == 1:
             group_id = admin_groups[0]["group_id"]
         else:
-            # ብዙ groups — active game ያለው ብቻ ይፈልግ
             active_groups = []
             for g in admin_groups:
                 s = get_active_settings(group_id=g["group_id"])
@@ -2191,7 +2347,6 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     mark_winner_sent(game_id, telegram_id, amount)
 
-    # Transaction log — winner sent
     try:
         if group_id:
             log_transaction(
@@ -2273,7 +2428,10 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/report — real-time profit + games (last 24hr)\n\n"
         "🏆 *Winner*\n"
         "/winners — last 24hr winners\n"
-        "/send — winner ብር ይላካል (private chat ብቻ)\n"
+        "/send — winner ብር ይላካል (private chat ብቻ)\n\n"
+        "✏️ *Manual Board Edit*\n"
+        "Board copy አርጎ edit አርጎ bot message ላይ reply አርግ\n"
+        "Bot automatically ይቀይረዋል!\n"
     )
 
     if is_main:
@@ -2309,12 +2467,11 @@ async def handle_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# SMS ENDPOINT — per group_id
+# SMS ENDPOINT
 # ============================================================
 
 async def sms_endpoint(request):
     try:
-        # group_id ከ URL ያውጣ — /sms/{group_id}
         group_id = request.match_info.get("group_id")
         if group_id:
             try:
@@ -2362,7 +2519,6 @@ def _make_nekay_cb(group_id: int = None):
 
 async def start_server():
     web_app = web.Application()
-    # Per-group SMS endpoint ብቻ — /sms/{group_id}
     web_app.router.add_post("/sms/{group_id}", sms_endpoint)
     web_app.router.add_get("/", health_check)
     runner = web.AppRunner(web_app)
@@ -2461,10 +2617,17 @@ def main():
         filters.PHOTO & filters.ChatType.GROUPS,
         handle_group_photo
     ))
+
+    # አዲስ — admin board reply handler (group messages ከመጀመሪያ)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+        handle_admin_board_reply
+    ), group=0)
+
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_group_message
-    ))
+    ), group=1)
 
     from telegram.ext import ChatMemberHandler
     app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
