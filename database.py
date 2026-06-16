@@ -369,6 +369,26 @@ def init_db():
                     added_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            # balance_transactions table
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS balance_transactions (
+                    id SERIAL PRIMARY KEY,
+                    group_id BIGINT NOT NULL,
+                    game_id INT NOT NULL,
+                    telegram_id BIGINT NOT NULL,
+                    amount NUMERIC NOT NULL,
+                    reason TEXT NOT NULL,
+                    number INT,
+                    done_by TEXT DEFAULT 'system',
+                    balance_after NUMERIC,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bal_tx_user
+                ON balance_transactions(group_id, telegram_id, game_id)
+            """)
+
             conn.commit()
             cur.close()
             conn.close()
