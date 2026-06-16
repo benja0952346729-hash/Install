@@ -237,7 +237,6 @@ LATIN_TO_AMHARIC = {
     "qitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
     "kitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
     "lmin alasgegabhegnim": "ለምን አላስገባኸኝም",
-    # ── NEW ──
     "sint new": "ስንት ነው",
     "bale sint new": "ባለ ስንት ነው",
     "sint lilaк": "ስንት ልላክ",
@@ -250,6 +249,19 @@ LATIN_TO_AMHARIC = {
     "wetset asawqen": "ውጤት አሳውቀን",
     "br alderesegnim": "ብር አልደረሰኝም",
     "br algeba": "ብር አልገባም",
+    # ── NEW ──
+    "min qitr yazk": "ምን ቁጥር ያዝክ",
+    "sint qitr yazk": "ስንት ቁጥር ያዝክ",
+    "min qitroch yazk": "ምን ቁጥሮች ያዝክ",
+    "yaze qitroch": "ያዘ ቁጥሮች",
+    "yaze qitr": "ያዘ ቁጥር",
+    "le man yaze": "ለማን ያዘ",
+    "le man mezegbk": "ለማን መዘገብክ",
+    "link laklign": "ሊንክ ላክልኝ",
+    "link lak": "ሊንክ ላክ",
+    "chewataw yiftsen": "ጫወታው ይፍጠን",
+    "fetsen fetsen": "ፈጠን ፈጠን",
+    "tolo tolo achawten": "ቶሎ ቶሎ አጫውተን",
 }
 
 
@@ -504,7 +516,6 @@ INTENT_EXAMPLES = {
         "lmin alteyazelign", "lmin altemezegebem",
         "lmin alasgegabhegnim",
     ],
-    # ── NEW INTENTS ──────────────────────────────────────────────
     "price_query": [
         "ስንት ነው", "በ ስንት ነው", "ስንት ብር ነው",
         "ባለ ስንት ነው", "መደብ ስንት ነው", "ባለ ስንት ብር ነው",
@@ -559,6 +570,36 @@ INTENT_EXAMPLES = {
         "ስንት ይቀረኛል", "ምን ያህል ይቀረኛል",
         "sint br lilaк", "sint lilaк", "sint br lijemer",
         "min yahil lijemer", "qeri bre sint new",
+    ],
+    # ── NEW INTENTS ──
+    "my_numbers_query": [
+        "ምን ቁጥር ያዝክልኝ", "ስንት ቁጥሮችን ነው የያዝኩት",
+        "ምን ቁጥሮች ያዝኩ", "ስንት ቁጥር ያዝኩ",
+        "ስንት ቁጥሮች መዘገብክልኝ", "ምን ቁጥሮች ናቸው ያዘዝኩት",
+        "የያዝኩት ቁጥሮች ምን ምን ናቸው", "ቁጥሬ ምን ምን ነው",
+        "ያዘዝኩት ቁጥር ምን ነው", "ምን ቁጥሮች ጻፍክልኝ",
+        "ቁጥሮቼ ምን ምን ናቸው", "ምን ቁጥሮች ነው ያዘዝኩት",
+        "min qitr yazk", "sint qitr yazk",
+        "min qitroch yazk", "yaze qitroch",
+    ],
+    "number_owner_query": [
+        "01 የማነው", "06 ለማን ያዘ", "ለማን ያዘ", "ለማን መዘገብክ",
+        "ለማን ያዝከው", "ይህ ቁጥር ለማን ተያዘ",
+        "ቁጥሩ ለማን ነው", "ቁጥሩ የማነው",
+        "le man yaze", "le man mezegbk",
+        "qitru le man new", "qitru ye man new",
+    ],
+    "link_request": [
+        "ሊንክ ላክልኝ", "ሊንክ ላክ", "link ላክልኝ", "link ላክ",
+        "link laklign", "link lak",
+        "ሊንኩን ላክ", "ሊንክ ስጠኝ", "group link ላክልኝ",
+    ],
+    "speed_request": [
+        "ጫወታው ይፍጠን", "ፈጠን ፈጠን አርገው", "ፈጣን ይሁን",
+        "ቶሎ ቶሎ አጫውተን", "speed", "ፈጠን",
+        "ቶሎ ቶሎ", "ይፍጠን", "ፍጠን",
+        "chewataw yiftsen", "fetsen fetsen",
+        "tolo tolo achawten",
     ],
 }
 
@@ -682,6 +723,57 @@ def detect_intent(text: str) -> tuple:
     if any(kw in latin for kw in all_account_kw):
         return "account_query", 1.0
 
+    # ── link request ──────────────────────────────────────────────
+    LINK_KW_LAT = [
+        normalize_to_latin("ሊንክ"),
+        "link",
+    ]
+    if any(kw in latin for kw in LINK_KW_LAT):
+        return "link_request", 1.0
+
+    # ── speed request ─────────────────────────────────────────────
+    SPEED_KW_LAT = [
+        normalize_to_latin("ይፍጠን"),
+        normalize_to_latin("ፈጠን ፈጠን"),
+        normalize_to_latin("ፈጣን ይሁን"),
+        normalize_to_latin("ቶሎ ቶሎ አጫውተን"),
+        normalize_to_latin("ፍጠን"),
+        "speed", "yiftsen", "fetsen",
+    ]
+    if any(kw in latin for kw in SPEED_KW_LAT):
+        return "speed_request", 1.0
+
+    # ── my numbers query ──────────────────────────────────────────
+    MY_NUM_KW_LAT = [
+        normalize_to_latin("ምን ቁጥር ያዝክልኝ"),
+        normalize_to_latin("ስንት ቁጥሮችን ነው የያዝኩት"),
+        normalize_to_latin("ምን ቁጥሮች ያዝኩ"),
+        normalize_to_latin("ስንት ቁጥር ያዝኩ"),
+        normalize_to_latin("ቁጥሮቼ"),
+        normalize_to_latin("ያዘዝኩት ቁጥር"),
+        normalize_to_latin("ምን ቁጥሮች ጻፍክልኝ"),
+        normalize_to_latin("ቁጥሬ ምን ምን"),
+        "min qitr yazk", "sint qitr yazk",
+        "yaze qitroch", "min qitroch yazk",
+    ]
+    if any(kw in latin for kw in MY_NUM_KW_LAT):
+        return "my_numbers_query", 1.0
+
+    # ── number owner query — ቁጥር ሲኖር ብቻ ─────────────────────────
+    if numbers_in_text:
+        OWNER_KW_LAT = [
+            normalize_to_latin("ለማን ያዘ"),
+            normalize_to_latin("ለማን ነው"),
+            normalize_to_latin("የማነው"),
+            normalize_to_latin("ለማን ተያዘ"),
+            normalize_to_latin("ለማን መዘገብክ"),
+            normalize_to_latin("ለማን ያዝከው"),
+            "le man yaze", "le man mezegbk",
+            "ye man new", "le man new",
+        ]
+        if any(kw in latin for kw in OWNER_KW_LAT):
+            return "number_owner_query", 1.0
+
     # ── change number ─────────────────────────────────────────────
     if len(numbers_in_text) >= 2:
         change_result = detect_change_number(text)
@@ -783,7 +875,7 @@ def detect_intent(text: str) -> tuple:
     if any(kw in latin for kw in PLAYERS_KW_LAT):
         return "players_query", 1.0
 
-    # ── price query — ቁጥር ከሌለ ብቻ ────────────────────────────────
+    # ── price query ───────────────────────────────────────────────
     PRICE_KW_LAT = [
         normalize_to_latin("ዋጋ ስንት"),
         normalize_to_latin("ዋጋው ስንት"),
@@ -791,8 +883,6 @@ def detect_intent(text: str) -> tuple:
         normalize_to_latin("ስንት ያስከፍላል"),
         "wagaw sint", "min yahil br", "sint yasikeflal",
     ]
-    # "ስንት ነው" ቁጥር ሲኖር specific_number_query ሊሆን ይችላል
-    # ቁጥር ከሌለ price_query
     PRICE_SINT_NEW_LAT = normalize_to_latin("ስንት ነው")
     has_sint_new = PRICE_SINT_NEW_LAT in latin
     if not numbers_in_text and has_sint_new:
@@ -832,7 +922,8 @@ def detect_intent(text: str) -> tuple:
             elif intent not in ("account_query", "price_query", "prize_query",
                                 "players_query", "players_remaining_query",
                                 "result_query", "balance_query",
-                                "payment_not_received"):
+                                "payment_not_received", "number_owner_query",
+                                "my_numbers_query"):
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
@@ -969,7 +1060,6 @@ RESPONSES = {
     "nekay_countdown_wait": [
         "ቤተሰብ ትንሽ ይጠብቁ ነቃይ ላወጣ ነው 🙏",
     ],
-    # ── NEW RESPONSES ────────────────────────────────────────────
     "price_query_full_only": [
         "{price_full} ብር ነው 🙏",
         "ቤቱ {price_full} ብር ነው 🙏",
@@ -1011,7 +1101,98 @@ RESPONSES = {
         "{balance} ብር ነው ቤተሰብ 🙏",
         "ቀሪ {balance} ብር ነው 🙏",
     ],
+    # ── NEW RESPONSES ──
+    "my_numbers_none": [
+        "ቁጥር አልያዝክም ቤተሰብ 🙏",
+        "ምንም ቁጥር አልተመዘገበም 🙏",
+    ],
+    "my_numbers_show": [
+        "{numbers_text} ቤተሰብ 🙏",
+        "የያዝካቸው: {numbers_text} ቤተሰብ 🙏",
+    ],
+    "number_owner_show": [
+        "ለ {name} ተያዘ ቤተሰብ 🙏",
+        "{name} ያዘዋል ቤተሰብ 🙏",
+    ],
+    "number_owner_yours": [
+        "ቤተሰብ 🙏 ይዝሄልሃለው ያንተ ነው",
+        "ያንተ ነው ቤተሰብ 🙏",
+    ],
+    "number_owner_multi": [
+        "{owners_text} ቤተሰብ 🙏",
+    ],
+    "number_owner_free": [
+        "ክፍት ነው ያዝ 🙏",
+        "ምንም ሰው አልያዘውም ያዝ 🙏",
+    ],
+    "link_request": [
+        "እሺ በውስጥ እልክልሃለሁ 🙏",
+        "እሺ ቤተሰብ በውስጥ እልካለሁ 🙏",
+    ],
+    "speed_request": [
+        "እሺ 🙏 እየሞከርኩ ነው",
+        "እሺ ቤተሰብ 🙏 እየሞከርኩ ነው",
+    ],
 }
+
+
+# ================================================================
+# MY NUMBERS FORMAT HELPER
+# ================================================================
+
+def _format_my_numbers(user_numbers: list) -> str:
+    """
+    user_numbers = [(number, is_half, slot, is_paid), ...]
+    ቁጥሮች format አርጎ string ይመልሳል
+    """
+    # slot=1 ብቻ ይውሰድ — ቁጥሮቹን ያሳያል
+    seen = {}
+    for number, is_half, slot, is_paid in user_numbers:
+        if slot == 1:
+            seen[number] = is_half
+        elif number not in seen:
+            # slot=2 ብቻ ካለ (half) ያሳያል
+            seen[number] = True
+
+    if not seen:
+        return ""
+
+    parts = []
+    nums_sorted = sorted(seen.keys())
+
+    if len(nums_sorted) == 1:
+        num = nums_sorted[0]
+        is_half = seen[num]
+        if is_half:
+            parts.append(f"{num:02d} በግማሽ")
+        else:
+            parts.append(f"{num:02d}")
+        return parts[0]
+
+    # ብዙ ቁጥሮች
+    for i, num in enumerate(nums_sorted):
+        is_half = seen[num]
+        label = f"{num:02d}"
+        if is_half:
+            label += "+"
+        parts.append(label)
+
+    # ሁሉም half ከሆኑ
+    all_half = all(seen[n] for n in nums_sorted)
+    all_full = all(not seen[n] for n in nums_sorted)
+
+    if all_half:
+        nums_str = " እና ".join(f"{n:02d}" for n in nums_sorted) if len(nums_sorted) == 2 \
+            else ", ".join(f"{n:02d}" for n in nums_sorted)
+        return f"{nums_str} ሁለቱንም በግማሽ" if len(nums_sorted) == 2 else f"{nums_str} ሁሉም በግማሽ"
+
+    if all_full:
+        if len(nums_sorted) == 2:
+            return f"{nums_sorted[0]:02d} እና {nums_sorted[1]:02d}"
+        return ", ".join(f"{n:02d}" for n in nums_sorted)
+
+    # Mixed — each labeled
+    return " እና ".join(parts) if len(parts) == 2 else ", ".join(parts)
 
 
 # ================================================================
@@ -1031,9 +1212,10 @@ def get_response(
     registration_result: str = None,
     registered_numbers: list = None,
     failed_numbers: list = None,
-    # ── NEW params ─────────────────────────────────────────────
     recent_winners: list = None,
     user_unpaid_balance: float = None,
+    # ── NEW params ──
+    user_numbers: list = None,
 ) -> dict:
 
     THRESHOLD_RESPOND  = 0.25
@@ -1048,6 +1230,8 @@ def get_response(
         "change_number": None,
         "type_change": None,
         "why_not_registered": None,
+        "my_numbers_query": False,
+        "number_owner_query": None,
     }
 
     if registration_result is not None:
@@ -1075,6 +1259,74 @@ def get_response(
         payment_info = settings.get("payment_info", "")
         if payment_info:
             result["reply"] = _extract_account_lines(payment_info)
+        return result
+
+    # ── link_request ──────────────────────────────────────────────
+    if intent == "link_request":
+        result["reply"] = random.choice(RESPONSES["link_request"])
+        return result
+
+    # ── speed_request ─────────────────────────────────────────────
+    if intent == "speed_request":
+        result["reply"] = random.choice(RESPONSES["speed_request"])
+        return result
+
+    # ── my_numbers_query ──────────────────────────────────────────
+    if intent == "my_numbers_query":
+        if user_numbers is not None:
+            if not user_numbers:
+                result["reply"] = random.choice(RESPONSES["my_numbers_none"])
+            else:
+                numbers_text = _format_my_numbers(user_numbers)
+                if numbers_text:
+                    result["reply"] = random.choice(RESPONSES["my_numbers_show"]).format(
+                        numbers_text=numbers_text
+                    )
+                else:
+                    result["reply"] = random.choice(RESPONSES["my_numbers_none"])
+        else:
+            # bot.py ያምጣ — flag set
+            result["my_numbers_query"] = True
+        return result
+
+    # ── number_owner_query ────────────────────────────────────────
+    if intent == "number_owner_query":
+        numbers_found = re.findall(r"\d+", text)
+        if numbers_found:
+            if len(numbers_found) == 1:
+                num = int(numbers_found[0])
+                entry = taken.get(num, [])
+                if not entry:
+                    result["reply"] = random.choice(RESPONSES["number_owner_free"])
+                else:
+                    owner_name = entry[0][0]
+                    if user_id and any(
+                        True for name, is_half, slot in entry
+                        if name == user_name
+                    ):
+                        result["reply"] = random.choice(RESPONSES["number_owner_yours"])
+                    else:
+                        result["reply"] = random.choice(RESPONSES["number_owner_show"]).format(
+                            name=owner_name
+                        )
+            else:
+                # Multiple numbers
+                lines = []
+                for n_str in numbers_found:
+                    num = int(n_str)
+                    entry = taken.get(num, [])
+                    if not entry:
+                        lines.append(f"{num:02d} — ክፍት ነው")
+                    else:
+                        owner_name = entry[0][0]
+                        if user_name and any(name == user_name for name, _, _ in entry):
+                            lines.append(f"{num:02d} — ያንተ ነው")
+                        else:
+                            lines.append(f"{num:02d} — ለ {owner_name}")
+                owners_text = "\n".join(lines)
+                result["reply"] = random.choice(RESPONSES["number_owner_multi"]).format(
+                    owners_text=owners_text
+                )
         return result
 
     # ── change_number ─────────────────────────────────────────────
@@ -1263,7 +1515,6 @@ def get_response(
     if intent == "result_query":
         total_numbers = settings.get("total_numbers", 0)
         paid_count = len(paid)
-        # ✅ paid ቁጥሮች 3 ወይም ከዛ ያነሰ ቀርቷቸዋል ወይም countdown active
         nearly_done = (paid_count >= total_numbers - 3) or (countdown_seconds > 0)
         if nearly_done:
             result["reply"] = random.choice(RESPONSES["result_query_waiting"])
