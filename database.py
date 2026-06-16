@@ -295,12 +295,10 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
 
-            # user_balance migration — game_id → group_id
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
 
-            # user_balance — old unique constraint ያስወግዳል፣ አዲስ group_id ጋር ይጨምራል
             cur.execute("""
                 DO $$
                 BEGIN
@@ -327,7 +325,6 @@ def init_db():
                 $$;
             """)
 
-            # Old unique constraints ያስወግዳል
             cur.execute("""
                 DO $$
                 BEGIN
@@ -353,13 +350,11 @@ def init_db():
                 $$;
             """)
 
-            # --- Payment matching: amount range + sender_name (አዲስ) ---
-            cur.execute("ALTER TABLE sms_payments ALTER COLUMN ref_no DROP NOT NULL;") 
+            cur.execute("ALTER TABLE sms_payments ALTER COLUMN ref_no DROP NOT NULL;")
             cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS amount NUMERIC;")
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
 
-            # Warning media table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS warning_media (
                     id SERIAL PRIMARY KEY,
@@ -369,7 +364,6 @@ def init_db():
                     added_at TIMESTAMP DEFAULT NOW()
                 )
             """)
-            # balance_transactions table
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS balance_transactions (
                     id SERIAL PRIMARY KEY,
@@ -451,7 +445,6 @@ def get_enabled_groups() -> list:
 
 
 def register_group(group_id: int, group_name: str = None):
-    """Bot group ውስጥ ሲጨመር ያስተዳድራል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -520,7 +513,6 @@ def get_group_admins(group_id: int) -> list:
 # ============================================================
 
 def track_username(group_id: int, username: str):
-    """Group member username ያስቀምጣል — newest first (is_read=FALSE)"""
     if not username or username.strip() == "":
         return
     conn = get_conn()
@@ -537,7 +529,6 @@ def track_username(group_id: int, username: str):
 
 
 def get_usernames(group_id: int) -> list:
-    """Usernames ያሳያል — newest first, unread ምልክት ጋር"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -553,7 +544,6 @@ def get_usernames(group_id: int) -> list:
 
 
 def mark_usernames_read(group_id: int):
-    """Username list ካዩ በኋላ read ምልክት ያደርጋል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE group_members SET is_read=TRUE WHERE group_id=%s", (group_id,))
@@ -563,7 +553,6 @@ def mark_usernames_read(group_id: int):
 
 
 def clear_usernames(group_id: int):
-    """Username list ያጸዳል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM group_members WHERE group_id=%s", (group_id,))
@@ -645,7 +634,6 @@ def get_db_status() -> list:
 
 
 def clear_db_data(db_index: int):
-    """Username ሳይነካ ሁሉንም game data ያጸዳል"""
     conn = get_conn(db_index - 1)
     cur = conn.cursor()
     cur.execute("DELETE FROM registrations")
@@ -724,11 +712,28 @@ def get_active_settings(group_id: int = None):
 
 
 # ============================================================
+# UPDATE COUNTDOWN SETTINGS — አዲስ
+# ============================================================
+
+def update_countdown_settings(game_id: int, enabled: bool, minutes: float):
+    """Active game countdown settings ይቀይራል"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE game_settings
+        SET countdown_enabled=%s, countdown_minutes=%s
+        WHERE id=%s
+    """, (enabled, minutes, game_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
 # WARNING MEDIA
 # ============================================================
 
 def set_warning_media(minutes: float, file_id: str, media_type: str, set_by: int):
-    """Main admin warning media ያስቀምጣል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -745,7 +750,6 @@ def set_warning_media(minutes: float, file_id: str, media_type: str, set_by: int
 
 
 def get_warning_media(minutes: float) -> dict:
-    """ለዚህ ደቂቃ warning media ያምጣል — exact ካልሆነ closest ይፈልጋል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1174,7 +1178,6 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
 
 
 def get_recent_winners(group_id: int, hours: int = 24) -> list:
-    """Last N ሰዓት winners — ያልተከፈለ balance ጋር"""
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=hours)
@@ -1196,7 +1199,6 @@ def get_recent_winners(group_id: int, hours: int = 24) -> list:
 
 
 def cleanup_old_winners():
-    """24 ሰዓት ያለፈ winners ያጸዳል — balance ያለው ግን አይጸዳም"""
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=24)
@@ -1214,7 +1216,6 @@ def cleanup_old_winners():
 
 
 def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
-    """Winner ብር ሲላክ ምልክት ያደርጋል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1313,13 +1314,13 @@ def admin_remove_player(game_id: int, number: int, slot: int = None):
     conn.close()
 
 
-def admin_mark_paid(game_id: int, number: int, slot: int, paid: bool = True):
+def admin_mark_paid(game_id: int, number: int, slot: int, is_paid: bool = True):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         UPDATE registrations SET is_paid=%s
         WHERE game_id=%s AND number=%s AND slot=%s
-    """, (paid, game_id, number, slot))
+    """, (is_paid, game_id, number, slot))
     conn.commit()
     cur.close()
     conn.close()
@@ -1369,7 +1370,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
         cur.execute("UPDATE registrations SET is_half=TRUE WHERE id=%s", (reg_id,))
 
         if is_paid:
-            # ✅ paid ነበር → refund ይሰጥ
             refund = price_full - price_half
             if refund > 0:
                 cur.execute("""
@@ -1380,7 +1380,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
                 """, (group_id, user_id, refund, refund))
                 balance += refund
         else:
-            # unpaid — balance ይፈትሽ
             if balance >= price_half:
                 cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
                 cur.execute("""
@@ -1479,14 +1478,13 @@ def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
 
 
 # ============================================================
-# PAYMENT MATCHING — amount range + sender_name (Telebirr: + ref)
+# PAYMENT MATCHING
 # ============================================================
 
-AMOUNT_TOLERANCE = 20  # ETB — amount ላይ የሚታገስ ልዩነት
+AMOUNT_TOLERANCE = 20
 
 
 def _normalize_name(name: str) -> set:
-    """ስም ወደ ቃላት ስብስብ ይቀየራል — fuzzy match ለማድረግ"""
     if not name:
         return set()
     cleaned = re.sub(r"[^a-zA-Z\u1200-\u137F\s]", "", name.lower())
@@ -1510,9 +1508,6 @@ def _names_match(name1: str, name2: str) -> bool:
 
 
 def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str, group_id: int = None) -> dict:
-    """
-    SMS ይቀመጣል። ቀደም ሲል pending ሆኖ የተቀመጠ screenshot ካለ ይዛመዳል።
-    """
     conn = get_conn()
     cur = conn.cursor()
 
@@ -1524,7 +1519,6 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     sms_id = cur.fetchone()[0]
     conn.commit()
 
-    # Pending screenshot ካለ ይፈልጋል — group_id ጋር ብቻ
     if group_id:
         cur.execute("""
             SELECT id, telegram_id, ref_no, amount, sender_name
@@ -1626,7 +1620,6 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
 
 
 def mark_sms_as_used(sms_id: int):
-    """Match ሲሆን SMS used (matched) ይደረግበታል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE sms_payments SET matched=TRUE WHERE id=%s", (sms_id,))
@@ -1636,7 +1629,6 @@ def mark_sms_as_used(sms_id: int):
 
 
 def is_sms_already_used(sms_id: int) -> bool:
-    """SMS id already matched ነው?"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("SELECT matched FROM sms_payments WHERE id=%s", (sms_id,))
@@ -1648,12 +1640,10 @@ def is_sms_already_used(sms_id: int) -> bool:
 
 def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
                              ref: str, pay_type: str, description: str, group_id: int = None) -> dict:
-    """አዲስ screenshot ሲልክ — የቀደሙ pending ይሰረዛሉ፣ 1 pending ብቻ ይቀመጣል"""
     import uuid
     conn = get_conn()
     cur = conn.cursor()
 
-    # የቀደሙ pending ይሰረዛሉ — 1 user per group = 1 pending ብቻ
     if group_id:
         cur.execute("""
             DELETE FROM screenshot_payments
@@ -1785,7 +1775,6 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
         """, (group_id, user_id, refund, refund))
         total_balance = float(cur.fetchone()[0])
 
-        # Unpaid registrations ላይ ይተገብር
         cur.execute("""
             SELECT id, number, is_half, slot
             FROM registrations
@@ -1844,7 +1833,6 @@ def mark_winner_greeted(telegram_id: int):
 # ============================================================
 
 def clear_balance_all(group_id: int):
-    """Group ውስጥ ሁሉም balance ያጸዳል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1857,7 +1845,6 @@ def clear_balance_all(group_id: int):
 
 
 def clear_balance_by_username(group_id: int, username: str) -> bool:
-    """አንድ user balance ያጸዳል — username ይፈልጋል"""
     conn = get_conn()
     cur = conn.cursor()
 
@@ -1892,7 +1879,6 @@ def clear_balance_by_username(group_id: int, username: str) -> bool:
 # ============================================================
 
 def set_group_active(group_id: int, is_active: bool):
-    """Group bot on/off"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1910,7 +1896,6 @@ def set_group_active(group_id: int, is_active: bool):
 
 
 def is_group_active(group_id: int) -> bool:
-    """Group bot on ነው ወይ?"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1930,7 +1915,6 @@ def is_group_active(group_id: int) -> bool:
 
 def save_game_report(group_id: int, game_id: int, total_bet: float,
                      prize_total: float, profit: float, registered_count: int):
-    """Game አልቆ report ያስቀምጣል"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1956,7 +1940,6 @@ def save_game_report(group_id: int, game_id: int, total_bet: float,
 
 
 def get_report(group_id: int) -> dict:
-    """Last 24 ሰዓት report — real-time"""
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=24)
@@ -2032,7 +2015,6 @@ def get_report(group_id: int) -> dict:
 
 
 def cleanup_old_reports():
-    """24 ሰዓት ያለፈ reports ያጸዳል"""
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=24)
@@ -2046,7 +2028,6 @@ def cleanup_old_reports():
 
 
 def calculate_game_profit(game_id: int) -> dict:
-    """Game አልቆ profit ያሰላል — filled groups × price_full"""
     conn = get_conn()
     cur = conn.cursor()
 
