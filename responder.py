@@ -5,47 +5,80 @@ from collections import defaultdict
 from rapidfuzz import fuzz
 
 # ================================================================
-# AMHARIC NORMALIZER — Fidel Family
+# AMHARIC → LATIN TRANSLITERATOR
 # ================================================================
 
-FIDEL_MAP = {
-    "ሀ": "ሀ", "ሁ": "ሀ", "ሂ": "ሀ", "ሃ": "ሀ", "ሄ": "ሀ", "ህ": "ሀ", "ሆ": "ሀ",
-    "ለ": "ለ", "ሉ": "ለ", "ሊ": "ለ", "ላ": "ለ", "ሌ": "ለ", "ል": "ለ", "ሎ": "ለ",
-    "ሐ": "ሀ", "ሑ": "ሀ", "ሒ": "ሀ", "ሓ": "ሀ", "ሔ": "ሀ", "ሕ": "ሀ", "ሖ": "ሀ",
-    "መ": "መ", "ሙ": "መ", "ሚ": "መ", "ማ": "መ", "ሜ": "መ", "ም": "መ", "ሞ": "መ",
-    "ሰ": "ሰ", "ሱ": "ሰ", "ሲ": "ሰ", "ሳ": "ሰ", "ሴ": "ሰ", "ስ": "ሰ", "ሶ": "ሰ",
-    "ሸ": "ሸ", "ሹ": "ሸ", "ሺ": "ሸ", "ሻ": "ሸ", "ሼ": "ሸ", "ሽ": "ሸ", "ሾ": "ሸ",
-    "ቀ": "ቀ", "ቁ": "ቀ", "ቂ": "ቀ", "ቃ": "ቀ", "ቄ": "ቀ", "ቅ": "ቀ", "ቆ": "ቀ",
-    "ቈ": "ቀ", "ቊ": "ቀ", "ቋ": "ቀ", "ቌ": "ቀ", "ቍ": "ቀ",
-    "በ": "በ", "ቡ": "በ", "ቢ": "በ", "ባ": "በ", "ቤ": "በ", "ብ": "በ", "ቦ": "በ",
-    "ተ": "ተ", "ቱ": "ተ", "ቲ": "ተ", "ታ": "ተ", "ቴ": "ተ", "ት": "ተ", "ቶ": "ተ",
-    "ቸ": "ቸ", "ቹ": "ቸ", "ቺ": "ቸ", "ቻ": "ቸ", "ቼ": "ቸ", "ች": "ቸ", "ቾ": "ቸ",
-    "ነ": "ነ", "ኑ": "ነ", "ኒ": "ነ", "ና": "ነ", "ኔ": "ነ", "ን": "ነ", "ኖ": "ነ",
-    "ኘ": "ነ", "ኙ": "ነ", "ኚ": "ነ", "ኛ": "ነ", "ኜ": "ነ", "ኝ": "ነ", "ኞ": "ነ",
-    "አ": "አ", "ኡ": "አ", "ኢ": "አ", "ኣ": "አ", "ኤ": "አ", "እ": "አ", "ኦ": "አ",
-    "ከ": "ከ", "ኩ": "ከ", "ኪ": "ከ", "ካ": "ከ", "ኬ": "ከ", "ክ": "ከ", "ኮ": "ከ",
-    "ወ": "ወ", "ዉ": "ወ", "ዊ": "ወ", "ዋ": "ወ", "ዌ": "ወ", "ው": "ወ", "ዎ": "ወ",
-    "የ": "የ", "ዩ": "የ", "ዪ": "የ", "ያ": "የ", "ዬ": "የ", "ይ": "የ", "ዮ": "የ",
-    "ደ": "ደ", "ዱ": "ደ", "ዲ": "ደ", "ዳ": "ደ", "ዴ": "ደ", "ድ": "ደ", "ዶ": "ደ",
-    "ጀ": "ጀ", "ጁ": "ጀ", "ጂ": "ጀ", "ጃ": "ጀ", "ጄ": "ጀ", "ጅ": "ጀ", "ጆ": "ጀ",
-    "ገ": "ገ", "ጉ": "ገ", "ጊ": "ገ", "ጋ": "ገ", "ጌ": "ገ", "ግ": "ገ", "ጎ": "ገ",
-    "ጠ": "ጠ", "ጡ": "ጠ", "ጢ": "ጠ", "ጣ": "ጠ", "ጤ": "ጠ", "ጥ": "ጠ", "ጦ": "ጠ",
-    "ጰ": "ጰ", "ጱ": "ጰ", "ጲ": "ጰ", "ጳ": "ጰ", "ጴ": "ጰ", "ጵ": "ጰ", "ጶ": "ጰ",
-    "ጸ": "ጸ", "ጹ": "ጸ", "ጺ": "ጸ", "ጻ": "ጸ", "ጼ": "ጸ", "ጽ": "ጸ", "ጾ": "ጸ",
-    "ፀ": "ጸ", "ፁ": "ጸ", "ፂ": "ጸ", "ፃ": "ጸ", "ፄ": "ጸ", "ፅ": "ጸ", "ፆ": "ጸ",
-    "ፈ": "ፈ", "ፉ": "ፈ", "ፊ": "ፈ", "ፋ": "ፈ", "ፌ": "ፈ", "ፍ": "ፈ", "ፎ": "ፈ",
-    "ፐ": "ፐ", "ፑ": "ፐ", "ፒ": "ፐ", "ፓ": "ፐ", "ፔ": "ፐ", "ፕ": "ፐ", "ፖ": "ፐ",
-    "ዘ": "ዘ", "ዙ": "ዘ", "ዚ": "ዘ", "ዛ": "ዘ", "ዜ": "ዘ", "ዝ": "ዘ", "ዞ": "ዘ",
-    "ዠ": "ዠ", "ዡ": "ዠ", "ዢ": "ዠ", "ዣ": "ዠ", "ዤ": "ዠ", "ዥ": "ዠ", "ዦ": "ዠ",
-    "ሠ": "ሰ", "ሡ": "ሰ", "ሢ": "ሰ", "ሣ": "ሰ", "ሤ": "ሰ", "ሥ": "ሰ", "ሦ": "ሰ",
+FIDEL_TO_LATIN = {
+    # ሀ family
+    "ሀ": "ha", "ሁ": "hu", "ሂ": "hi", "ሃ": "ha", "ሄ": "he", "ህ": "h", "ሆ": "ho",
+    "ሐ": "ha", "ሑ": "hu", "ሒ": "hi", "ሓ": "ha", "ሔ": "he", "ሕ": "h", "ሖ": "ho",
+    # ለ family
+    "ለ": "le", "ሉ": "lu", "ሊ": "li", "ላ": "la", "ሌ": "le", "ል": "l", "ሎ": "lo",
+    # መ family
+    "መ": "me", "ሙ": "mu", "ሚ": "mi", "ማ": "ma", "ሜ": "me", "ም": "m", "ሞ": "mo",
+    # ሰ family
+    "ሰ": "se", "ሱ": "su", "ሲ": "si", "ሳ": "sa", "ሴ": "se", "ስ": "s", "ሶ": "so",
+    "ሠ": "se", "ሡ": "su", "ሢ": "si", "ሣ": "sa", "ሤ": "se", "ሥ": "s", "ሦ": "so",
+    # ሸ family
+    "ሸ": "she", "ሹ": "shu", "ሺ": "shi", "ሻ": "sha", "ሼ": "she", "ሽ": "sh", "ሾ": "sho",
+    # ቀ family
+    "ቀ": "qe", "ቁ": "qu", "ቂ": "qi", "ቃ": "qa", "ቄ": "qe", "ቅ": "q", "ቆ": "qo",
+    "ቈ": "qo", "ቊ": "qu", "ቋ": "qua", "ቌ": "qe", "ቍ": "qu",
+    # በ family
+    "በ": "be", "ቡ": "bu", "ቢ": "bi", "ባ": "ba", "ቤ": "be", "ብ": "b", "ቦ": "bo",
+    # ተ family
+    "ተ": "te", "ቱ": "tu", "ቲ": "ti", "ታ": "ta", "ቴ": "te", "ት": "t", "ቶ": "to",
+    # ቸ family
+    "ቸ": "che", "ቹ": "chu", "ቺ": "chi", "ቻ": "cha", "ቼ": "che", "ች": "ch", "ቾ": "cho",
+    # ነ family
+    "ነ": "ne", "ኑ": "nu", "ኒ": "ni", "ና": "na", "ኔ": "ne", "ን": "n", "ኖ": "no",
+    "ኘ": "nye", "ኙ": "nyu", "ኚ": "nyi", "ኛ": "nya", "ኜ": "nye", "ኝ": "ny", "ኞ": "nyo",
+    # አ family
+    "አ": "a", "ኡ": "u", "ኢ": "i", "ኣ": "a", "ኤ": "e", "እ": "e", "ኦ": "o",
+    # ከ family
+    "ከ": "ke", "ኩ": "ku", "ኪ": "ki", "ካ": "ka", "ኬ": "ke", "ክ": "k", "ኮ": "ko",
+    # ወ family
+    "ወ": "we", "ዉ": "wu", "ዊ": "wi", "ዋ": "wa", "ዌ": "we", "ው": "w", "ዎ": "wo",
+    # የ family
+    "የ": "ye", "ዩ": "yu", "ዪ": "yi", "ያ": "ya", "ዬ": "ye", "ይ": "y", "ዮ": "yo",
+    # ደ family
+    "ደ": "de", "ዱ": "du", "ዲ": "di", "ዳ": "da", "ዴ": "de", "ድ": "d", "ዶ": "do",
+    # ዘ family
+    "ዘ": "ze", "ዙ": "zu", "ዚ": "zi", "ዛ": "za", "ዜ": "ze", "ዝ": "z", "ዞ": "zo",
+    # ዠ family
+    "ዠ": "zhe", "ዡ": "zhu", "ዢ": "zhi", "ዣ": "zha", "ዤ": "zhe", "ዥ": "zh", "ዦ": "zho",
+    # ጀ family
+    "ጀ": "je", "ጁ": "ju", "ጂ": "ji", "ጃ": "ja", "ጄ": "je", "ጅ": "j", "ጆ": "jo",
+    # ገ family
+    "ገ": "ge", "ጉ": "gu", "ጊ": "gi", "ጋ": "ga", "ጌ": "ge", "ግ": "g", "ጎ": "go",
+    # ጠ family
+    "ጠ": "te", "ጡ": "tu", "ጢ": "ti", "ጣ": "ta", "ጤ": "te", "ጥ": "t", "ጦ": "to",
+    # ጰ family
+    "ጰ": "pe", "ጱ": "pu", "ጲ": "pi", "ጳ": "pa", "ጴ": "pe", "ጵ": "p", "ጶ": "po",
+    # ጸ/ፀ family (same sound)
+    "ጸ": "tse", "ጹ": "tsu", "ጺ": "tsi", "ጻ": "tsa", "ጼ": "tse", "ጽ": "ts", "ጾ": "tso",
+    "ፀ": "tse", "ፁ": "tsu", "ፂ": "tsi", "ፃ": "tsa", "ፄ": "tse", "ፅ": "ts", "ፆ": "tso",
+    # ፈ family
+    "ፈ": "fe", "ፉ": "fu", "ፊ": "fi", "ፋ": "fa", "ፌ": "fe", "ፍ": "f", "ፎ": "fo",
+    # ፐ family
+    "ፐ": "pe", "ፑ": "pu", "ፒ": "pi", "ፓ": "pa", "ፔ": "pe", "ፕ": "p", "ፖ": "po",
+    # punctuation
+    "።": ".", "፣": ",", "፤": ";", "፥": ":", "፦": ":-", "፧": "?", "፨": "*",
 }
 
-def normalize_amharic(text: str) -> str:
-    return "".join(FIDEL_MAP.get(ch, ch) for ch in text)
+def to_latin(text: str) -> str:
+    """Convert any mix of Amharic + Latin text to unified Latin."""
+    result = []
+    for ch in text:
+        if ch in FIDEL_TO_LATIN:
+            result.append(FIDEL_TO_LATIN[ch])
+        else:
+            result.append(ch.lower())
+    return "".join(result)
 
 
 # ================================================================
-# LATIN → AMHARIC KEYWORD MAP
+# LATIN → AMHARIC KEYWORD MAP (kept for backward compat / display)
 # ================================================================
 
 LATIN_TO_AMHARIC = {
@@ -207,11 +240,29 @@ LATIN_TO_AMHARIC = {
     "lmin alasgegabhegnim": "ለምን አላስገባኸኝም",
 }
 
-def translate_latin(text: str) -> str:
-    result = text.lower()
-    for lat, amh in sorted(LATIN_TO_AMHARIC.items(), key=lambda x: -len(x[0])):
-        result = result.replace(lat, amh)
-    return result
+
+# ================================================================
+# UNIFIED NORMALIZER  (Amharic OR Latin → Latin)
+# ================================================================
+
+def normalize_to_latin(text: str) -> str:
+    """
+    Converts any text (pure Amharic, pure Latin, or mixed) → unified Latin.
+    Steps:
+      1. Character-by-character: Ethiopic char → Latin via FIDEL_TO_LATIN
+      2. Lowercase everything
+      3. Collapse multiple spaces
+    This replaces the old normalize_amharic() + translate_latin() pipeline.
+    """
+    result = []
+    for ch in text:
+        if ch in FIDEL_TO_LATIN:
+            result.append(FIDEL_TO_LATIN[ch])
+        else:
+            result.append(ch.lower())
+    normalized = "".join(result)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized
 
 
 # ================================================================
@@ -248,34 +299,30 @@ def _extract_account_lines(payment_info: str) -> str:
 # CHANGE NUMBER PATTERN DETECTOR
 # ================================================================
 
-CHANGE_CANCEL_WORDS = ["አልፈልግም", "ተው", "አጥፋ", "አጥፋው", "ሰርዝ", "ሰርዝልኝ"]
-CHANGE_CONFIRM_WORDS = [
-    "ቀይር", "ቀይረው", "ቀይርልኝ", "ይሁን",
-    "አርግ", "አርገው", "አድርግ", "አድርገው", "change",
-    "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
+CHANGE_CANCEL_WORDS_LAT = ["alfelegm", "alfeligm", "tew", "atfa", "atfaw", "serz", "serzew"]
+CHANGE_CONFIRM_WORDS_LAT = [
+    "qeyir", "qeyirew", "qeyirligni", "yihun",
+    "areg", "aregew", "adrig", "adrigew", "change",
+    "lewet", "lewetew", "lewetligni", "azawir", "azawrew",
 ]
-CHANGE_WEDE_WORDS = ["ወደ", "to"]
+CHANGE_WEDE_WORDS_LAT = ["wede", "to"]
 
 def detect_change_number(text: str):
-    translated = translate_latin(text)
-    normalized = normalize_amharic(translated)
-    lower = normalized.lower()
+    latin = normalize_to_latin(text)
     nums = re.findall(r"\d+", text)
     if len(nums) < 2:
         return None
     from_num = int(nums[0])
     to_num = int(nums[1])
-    for wede in CHANGE_WEDE_WORDS:
-        norm_wede = normalize_amharic(wede)
-        if norm_wede in lower:
+    for wede in CHANGE_WEDE_WORDS_LAT:
+        if wede in latin.split():
             return (from_num, to_num)
-    has_cancel = any(normalize_amharic(w) in lower for w in CHANGE_CANCEL_WORDS)
-    has_confirm = any(normalize_amharic(w) in lower for w in CHANGE_CONFIRM_WORDS)
+    has_cancel  = any(w in latin for w in CHANGE_CANCEL_WORDS_LAT)
+    has_confirm = any(w in latin for w in CHANGE_CONFIRM_WORDS_LAT)
     if has_cancel and has_confirm:
         return (from_num, to_num)
-    if has_cancel:
-        if "ነው" in lower or "new" in text.lower():
-            return (from_num, to_num)
+    if has_cancel and ("new" in latin or "ne" in latin.split()):
+        return (from_num, to_num)
     return None
 
 
@@ -284,15 +331,13 @@ def detect_change_number(text: str):
 # ================================================================
 
 def detect_type_change(text: str):
-    translated = translate_latin(text)
-    normalized = normalize_amharic(translated)
-    lower = normalized.lower()
+    latin = normalize_to_latin(text)
 
-    TYPE_FULL_WORDS = ["በሙሉ", "ሙሉ"]
-    TYPE_HALF_WORDS = ["በግማሽ", "ግማሽ"]
+    TYPE_FULL_WORDS_LAT = ["bemulu", "mulu"]
+    TYPE_HALF_WORDS_LAT = ["begmash", "gmash"]
 
-    is_full = any(normalize_amharic(w) in lower for w in TYPE_FULL_WORDS)
-    is_half = any(normalize_amharic(w) in lower for w in TYPE_HALF_WORDS)
+    is_full = any(w in latin for w in TYPE_FULL_WORDS_LAT)
+    is_half = any(w in latin for w in TYPE_HALF_WORDS_LAT)
 
     if not is_full and not is_half:
         return None
@@ -306,7 +351,7 @@ def detect_type_change(text: str):
 
 
 # ================================================================
-# INTENT EXAMPLES
+# INTENT EXAMPLES  (stored as Amharic — converted at build time)
 # ================================================================
 
 INTENT_EXAMPLES = {
@@ -354,11 +399,11 @@ INTENT_EXAMPLES = {
         "በሰላም አደርክ", "እንዴት አረፈድክ", "ጤና ይስጥልኝ",
         "እንደምን ናችሁ", "እንደምን አላችሁ", "እንዴት ናችሁ",
         "ሰላም እንዴት ነህ", "ሰላም ወዳጄ", "ሰላምታ",
-        "hi", "hello", "hey", "ሰላም ነህ",
-        "selam", "salam", "selem", "selaam",
+        "hi", "hello", "hey",
+        "selam", "salam", "selem",
         "endet neh", "indet neh",
         "dena aderk", "dena walk",
-        "tena yistilign", "tena yistligni",
+        "tena yistilign",
         "endemen nachuh",
     ],
     "cancel_number": [
@@ -367,10 +412,7 @@ INTENT_EXAMPLES = {
         "ቁጥሩን ሰርዝ", "ቁጥሩን አጥፋ", "ቁጥሩን አውጣ",
         "አልፈለኩም", "አልፈልገውም", "አልፈልጋቸውም",
         "አያስፈልገኝም", "cancel ነው", "drop አርግ",
-        "ትቼዋለሁ", "አልፈልገውም ቁጥሩን",
-        "አልፈልገውም", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
-        "ቁጥሩን አልፈልግም", "ቁጥሩን ሰርዝልኝ",
-        # Latin
+        "ትቼዋለሁ", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
         "alfeligm", "alfelegim", "alfelegm",
         "serzew", "srez", "serz",
         "atfaw", "atfa", "yitfa",
@@ -378,7 +420,6 @@ INTENT_EXAMPLES = {
         "cancel", "drop",
     ],
     "complaint_removed": [
-        # Amharic
         "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
         "ለምን ተነቀልኩ", "ተነቀልኩ እኮ",
         "ቁጥሬ የለም", "ቁጥሬ ጠፋ ለምን", "ቁጥሬ ሄደ ለምን",
@@ -386,47 +427,20 @@ INTENT_EXAMPLES = {
         "ቁጥሬ ለምን ተነቀለ", "ቁጥሬ ለምን ጠፋ",
         "ቁጥሬ ለምን ሄደ", "ቁጥሬ ለምን ተወሰደ",
         "ቁጥሬ ተነቅሏል", "ቁጥሬ ጠፍቷል",
-        # Latin — ቀ=q/k, ጠ=x/t(ጠ ብቻ)
-        # tenekelku = ተነቀልኩ (ተ=t ብቻ, ቀ=q/k)
         "tenekelku", "teneklku", "nekelku",
-        "qitire tenekelke", "kitire tenekelke",
-        "qitire lmin tenekelke", "kitire lmin tenekelke",
-        "qitire lmin xefa", "kitire lmin xefa",       # ጠፋ = xefa
-        "qitire lmin xefal", "kitire lmin xefal",
-        "qitire lmin hede", "kitire lmin hede",
-        "qitire xefa", "kitire xefa",                 # ጠፋ = xefa
-        "qitire xefal", "kitire xefal",
-        "qitire hede", "kitire hede",
-        "qitire yellem", "kitire yellem",
-        "qitire teqenese", "kitire teqenese",
-        "qitire keqenese", "kitire keqenese",
-        "qitire lmin tewesede", "kitire lmin tewesede",
-        "lmin tenekelku",
-        "tenekelku eko",
-        "qitire tenekelal lmin", "kitire tenekelal lmin",
-        "qitire xefal lmin", "kitire xefal lmin",
-        "number tenekelk",
-        "number xefa",                                # ጠፋ = xefa
-        "number hede", "number yellem",
-        "qitre lmin nekele", "kitre lmin nekele",
-        "qitre tenekelal", "kitre tenekelal",
-        "qitre xefal", "kitre xefal",
+        "number tenekelk", "number hede", "number yellem",
+        "lmin tenekelku", "tenekelku eko",
         "lmin nekelku", "lmin tenekelk",
-        "qitre xefa", "kitre xefa",
     ],
     "complaint_why_sold": [
         "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
         "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
         "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥከው",
         "ለምን ቁጥሬን ነቀልክ", "ቁጥሬ ለምን ሄደ",
-        # Latin
         "lmin shitkhew", "lmin shitkh",
         "lmin shetek", "lemin shetek",
         "lmin tenklaleh", "lmin tinklaleh",
         "why shetek", "why teneklaleh",
-        "lmin neklek", "lmin nekelk",
-        "qitire lmin shetkew", "kitire lmin shetkew",
-        "qitire lmin nekelk", "kitire lmin nekelk",
     ],
     "complaint_paid_removed": [
         "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
@@ -434,10 +448,7 @@ INTENT_EXAMPLES = {
         "ልክያለው ለምን", "ልኬ ትነቅላለህ",
         "ብሬ ተልኳል ለምን ነቀልክ", "ገንዘብ ልኬ ነቀልክ",
         "ከፈልኩ ለምን ሸጥክ", "ልኩዋል ለምን", "ተልኩዋል ሸጥክ",
-        "ልኬ ሸጥክ", "ተልኩዋል እኮ",
         "payment ላኩ ለምን ሸጥክ", "ከፍዬ ቁጥሬ ሄደ",
-        "ብር ልኬ ቁጥሬ ጠፋ",
-        # Latin
         "kefye nekelk", "kefye neklek",
         "tekeflo nekelk", "tekefilo neklek",
         "kefye shetk", "kefye shetkh",
@@ -446,23 +457,15 @@ INTENT_EXAMPLES = {
         "like tineklaleh", "lke tinklaleh",
         "lkuwal lmin", "selkuwal lemin",
         "payment ale lmin", "lefkuwal lmin",
-        "lke shetk", "lkuwal shetkh",
-        "payment laku lmin shetk", "payment laku lmin nekelk",
-        "kefye qitire hede", "kefye kitire hede",
-        "br lke qitire xefa", "br lke kitire xefa",
     ],
     "change_number": [
         "ወደ ቀይር", "ቀይር", "ቀይረው", "ቀይርልኝ",
         "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
         "ቁጥሩን ቀይር", "ቁጥሩን ለወጥ", "ቁጥሬን ቀይርልኝ",
         "change አርግ", "ቁጥሩን change አርግ",
-        # Latin
-        "qeyir", "keyir",
-        "qeyirew", "keyirew",
-        "qeyirligni", "keyirligni",
-        "lewet", "lewetew", "lewetligni",
-        "azawir", "azawrew",
-        "change arig", "change adrig", "change arigew",
+        "qeyir", "keyir", "qeyirew", "keyirew",
+        "lewet", "lewetew", "azawir", "azawrew",
+        "change arig", "change adrig",
         "wede qeyir", "wede keyir",
     ],
     "account_query": [
@@ -470,69 +473,47 @@ INTENT_EXAMPLES = {
         "ቴሌብር", "አዋሽ", "ሲቢኢ", "ንግድ ባንክ",
         "ቴሌብር ቁጥር", "አዋሽ ቁጥር", "ሲቢኢ ቁጥር",
         "የሚከፈልበት ቁጥር", "የባንክ ቁጥር", "ባንክ አካውንት",
-        "ላኩ ወዴት", "ገንዘብ ወዴት ልላክ", "payment info",
-        "ቴሌብር አካውንት ስጠኝ", "ቴሌብር ቁጥርህን ላክ",
-        "አዋሽ አካውንት ስጠኝ", "ወዴት ልከፍል",
-        # Latin
+        "ላኩ ወዴት", "ገንዘብ ወዴት ልላክ",
+        "ቴሌብር አካውንት ስጠኝ", "ወዴት ልከፍል",
         "account lak", "acount lak",
         "account info", "acount info",
-        "account negeregn", "acount negeregn",
-        "account asayen", "acount asayen",
         "telebirr", "telebr",
         "awash", "cbe",
         "nigid bank", "commercial bank",
         "payment number", "payment info",
-        "yemikefelbew number",
-        "wedeit lkefil", "wedeit lalak",
     ],
     "type_change": [
         "በሙሉ አርግ", "በሙሉ አድርግ", "በሙሉ ይሁን", "በሙሉ ቀይረው",
-        "በሙሉ አርጋት", "ሙሉ አርግ", "ሙሉ ይሁን",
+        "ሙሉ አርግ", "ሙሉ ይሁን",
         "በግማሽ አርግ", "በግማሽ አድርግ", "በግማሽ ይሁን", "በግማሽ ቀይረው",
-        "በግማሽ አርጋት", "ግማሽ አርግ", "ግማሽ ይሁን",
-        # Latin
+        "ግማሽ አርግ", "ግማሽ ይሁን",
         "gmash areg", "bemulu areg", "begmash areg",
         "bemulu adrig", "begmash adrig",
         "bemulu yihun", "begmash yihun",
-        "06 bemulu", "11 begmash", "09 11 begmash",
-        "11 21 bemulu qeyirew", "11 21 bemulu keyirew",
-        "gmash argewo", "06 argewo",
-        "11በሙሉ", "05በሙሉ", "11በግማሽ", "05በግማሽ",
         "mulu areg", "mulu yihun",
-        "mulu adrig", "gmash adrig",
     ],
     "why_not_registered": [
         "ለምን አልያዝክልኝም", "ለምን አልፃፍክልኝም", "ለምን አልመዘገብከኝም",
         "ለምን ቁጥሬ አልተያዘም", "ለምን ቁጥሩ አልተያዘም",
         "ቁጥሩ ለምን አልተያዘም", "ለምን አልገባም", "ለምን ሳይያዝ ቀረ",
         "ለምን አልያዘልኝም", "ለምን አልተመዘገበም",
-        "ቁጥሬ ለምን አልተያዘም", "ለምን አልተያዘልኝም",
-        "ቁጥሩ ሳይያዝ ቀረ ለምን", "ለምን አላስገባኸኝም",
-        "ለምን ቁጥሬን አልያዝህልኝም",
-        # Latin
+        "ለምን አልተያዘልኝም", "ለምን አላስገባኸኝም",
         "lmin alyazkilgnim", "lmin altsafkilgnim",
-        "lmin almezegbkegnim",
         "lmin qitire alteyazem", "lmin kitire alteyazem",
         "lmin algeba",
         "lmin sayiyaz qere", "lmin sayiyaz kere",
         "lmin alteyazelign", "lmin altemezegebem",
-        "qitire lmin alteyazem", "kitire lmin alteyazem",
         "lmin alasgegabhegnim",
-        "why aliyazkilign", "why alteyaze",
-        "why did you not register", "not registered lmin",
-        "lmin register aladergehlign",
-        "qitre lmin sayiyaz qere", "kitre lmin sayiyaz kere",
-        "lmin qitre alteyaze", "lmin kitre alteyaze",
     ],
 }
 
 
 # ================================================================
-# N-GRAM ENGINE
+# N-GRAM ENGINE  (now operates on Latin)
 # ================================================================
 
 def get_ngrams(text: str, n: int = 2) -> list:
-    text = normalize_amharic(text)
+    """text is already Latin-normalized before calling this."""
     tokens = text.split()
     ngrams = []
     for token in tokens:
@@ -547,9 +528,8 @@ def build_tfidf(intent_examples: dict):
     for intent, examples in intent_examples.items():
         all_ngrams = []
         for ex in examples:
-            translated = translate_latin(ex)
-            normalized = normalize_amharic(translated)
-            all_ngrams.extend(get_ngrams(normalized))
+            latin = normalize_to_latin(ex)   # ← unified normalizer
+            all_ngrams.extend(get_ngrams(latin))
         intent_ngrams[intent] = all_ngrams
 
     vocab = set()
@@ -585,10 +565,8 @@ def build_tfidf(intent_examples: dict):
 
 
 def text_to_vector(text: str, idf: dict) -> dict:
-    translated = translate_latin(text)
-    normalized = normalize_amharic(translated)
-    ngrams = get_ngrams(normalized)
-
+    latin = normalize_to_latin(text)    # ← unified normalizer
+    ngrams = get_ngrams(latin)
     vec = defaultdict(float)
     total = len(ngrams)
     if total == 0:
@@ -623,69 +601,88 @@ print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
 
 
 # ================================================================
-# DETECT INTENT
+# DETECT INTENT  (keyword guards also use normalize_to_latin)
 # ================================================================
 
 def detect_intent(text: str) -> tuple:
-    translated = translate_latin(text)
-    normalized = normalize_amharic(translated)
-    normalized_lower = normalized.lower()
+    latin = normalize_to_latin(text)
     numbers_in_text = re.findall(r"\d+", text)
 
-    account_keywords_direct = [
-        "አካውንት", "አካንት", "ቴሌብር", "አዋሽ", "ሲቢኢ",
-        "ንግድ ባንክ", "ባንክ አካውንት", "የሚከፈልበት ቁጥር", "የባንክ ቁጥር",
+    # ── account keywords ──────────────────────────────────────────
+    ACCOUNT_KW_LAT = [
+        "akawnt", "akaunt", "akount", "akawnt",
+        "telebirr", "telebr", "awash", "cbe",
+        "nigid bank", "bank akawnt",
+        "yemikefelbew qitr", "yebank qitr",
     ]
-    if any(normalize_amharic(kw) in normalized_lower for kw in account_keywords_direct):
+    # Also check raw Amharic keywords that to_latin covers:
+    ACCOUNT_KW_AMH_LAT = [
+        normalize_to_latin("አካውንት"),
+        normalize_to_latin("ቴሌብር"),
+        normalize_to_latin("አዋሽ"),
+        normalize_to_latin("ሲቢኢ"),
+        normalize_to_latin("ንግድ ባንክ"),
+        normalize_to_latin("የሚከፈልበት ቁጥር"),
+        normalize_to_latin("የባንክ ቁጥር"),
+    ]
+    all_account_kw = ACCOUNT_KW_LAT + ACCOUNT_KW_AMH_LAT
+    if any(kw in latin for kw in all_account_kw):
         return "account_query", 1.0
 
+    # ── change number ─────────────────────────────────────────────
     if len(numbers_in_text) >= 2:
         change_result = detect_change_number(text)
         if change_result:
             return "change_number", 1.0
 
-    TYPE_FULL_WORDS = ["በሙሉ", "ሙሉ", "bemulu", "mulu"]
-    TYPE_HALF_WORDS = ["በግማሽ", "ግማሽ", "begmash", "gmash"]
-    has_type_full = any(normalize_amharic(w) in normalized_lower for w in TYPE_FULL_WORDS)
-    has_type_half = any(normalize_amharic(w) in normalized_lower for w in TYPE_HALF_WORDS)
-
+    # ── type change ───────────────────────────────────────────────
+    TYPE_FULL_LAT = [normalize_to_latin("በሙሉ"), normalize_to_latin("ሙሉ"), "bemulu", "mulu"]
+    TYPE_HALF_LAT = [normalize_to_latin("በግማሽ"), normalize_to_latin("ግማሽ"), "begmash", "gmash"]
+    has_type_full = any(w in latin for w in TYPE_FULL_LAT)
+    has_type_half = any(w in latin for w in TYPE_HALF_LAT)
     if numbers_in_text and (has_type_full or has_type_half):
-        TYPE_ACTION_WORDS = [
-            "አርግ", "አድርግ", "ይሁን", "ቀይር", "ቀይረው",
-            "areg", "adrig", "yihun", "qeyir", "qeyirew",
-            "keyir", "keyirew",
+        TYPE_ACTION_LAT = [
+            normalize_to_latin("አርግ"), normalize_to_latin("አድርግ"),
+            normalize_to_latin("ይሁን"), normalize_to_latin("ቀይር"),
+            normalize_to_latin("ቀይረው"),
+            "areg", "adrig", "yihun", "qeyir", "qeyirew", "keyir", "keyirew",
         ]
-        has_action = any(
-            normalize_amharic(w) in normalized_lower
-            for w in TYPE_ACTION_WORDS
-        )
-        if has_action:
+        if any(w in latin for w in TYPE_ACTION_LAT):
             return "type_change", 1.0
 
-    WHY_NOT_REG_WORDS = [
-        "ለምን አልያዝ", "ለምን አልፃፍ", "ለምን አልመዘገብ",
-        "ለምን አልተያዘ", "ለምን አልገባ",
-        "lmin alyaz", "lmin altsaf",
-        "lmin alteyaz", "lmin algeba",
+    # ── why not registered ────────────────────────────────────────
+    WHY_NOT_LAT = [
+        normalize_to_latin("ለምን አልያዝ"),
+        normalize_to_latin("ለምን አልፃፍ"),
+        normalize_to_latin("ለምን አልተያዘ"),
+        normalize_to_latin("ለምን አልገባ"),
+        "lmin alyaz", "lmin altsaf", "lmin alteyaz", "lmin algeba",
     ]
-    if any(normalize_amharic(w) in normalized_lower for w in WHY_NOT_REG_WORDS):
+    if any(w in latin for w in WHY_NOT_LAT):
         return "why_not_registered", 1.0
 
-    has_ale = "አለ" in normalized_lower
-    has_teyaze = any(w in normalized_lower for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"])
+    # ── specific number query ─────────────────────────────────────
+    ALE_LAT    = normalize_to_latin("አለ")
+    TEYAZE_LAT = [normalize_to_latin(w) for w in ["ተያዘ", "ተይዞ", "ተይዙዋል"]]
+    has_ale    = ALE_LAT in latin.split()
+    has_teyaze = any(w in latin for w in TEYAZE_LAT)
     if numbers_in_text and (has_ale or has_teyaze):
         return "specific_number_query", 1.0
 
-    cancel_words = ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
-    has_cancel = any(normalize_amharic(w) in normalized_lower for w in cancel_words)
+    # ── cancel number ─────────────────────────────────────────────
+    CANCEL_LAT = [
+        normalize_to_latin(w) for w in
+        ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
+    ] + ["alfeligm", "alfelegim", "alfelegm", "serzew", "serz", "atfaw", "atfa", "awta"]
+    has_cancel = any(w in latin for w in CANCEL_LAT)
     if len(numbers_in_text) == 1 and has_cancel:
         return "cancel_number", 1.0
 
+    # ── TF-IDF cosine fallback ────────────────────────────────────
     query_vec = text_to_vector(text, GLOBAL_IDF)
     scores = {}
     for intent, intent_vec in TFIDF_VECTORS.items():
-        sim = cosine_similarity(query_vec, intent_vec)
-        scores[intent] = sim
+        scores[intent] = cosine_similarity(query_vec, intent_vec)
 
     for intent in list(scores.keys()):
         bonus = 0.0
@@ -693,26 +690,24 @@ def detect_intent(text: str) -> tuple:
             if intent in ("booking", "specific_number_query", "cancel_number",
                           "change_number", "type_change"):
                 bonus += 0.08
-            elif intent == "account_query":
-                pass
-            else:
+            elif intent != "account_query":
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
         if intent == "greeting" and not numbers_in_text:
             bonus += 0.05
-        if intent in ("complaint_removed", "complaint_why_sold", "complaint_paid_removed") and not numbers_in_text:
+        if intent in ("complaint_removed", "complaint_why_sold",
+                      "complaint_paid_removed") and not numbers_in_text:
             bonus += 0.05
         scores[intent] = max(0.0, scores[intent] + bonus)
 
     best_intent = max(scores, key=scores.get)
-    best_score = scores[best_intent]
-
+    best_score  = scores[best_intent]
     return best_intent, best_score
 
 
 # ================================================================
-# RESPONSES
+# RESPONSES  (unchanged)
 # ================================================================
 
 RESPONSES = {
@@ -797,9 +792,7 @@ RESPONSES = {
         "ቁጥሩ ትክክል አይደለም 🙏", "ያ ቁጥር የለም 🙏",
     ],
     "type_change_ack": [
-        "እሺ 🙏",
-        "እሺ ቤተሰብ 🙏",
-        "ተቀይሯል 🙏",
+        "እሺ 🙏", "እሺ ቤተሰብ 🙏", "ተቀይሯል 🙏",
     ],
     "type_change_conflict": [
         "ቁጥሩ {num} slot 2 ተይዟል መቀየር አይቻልም 🙏",
@@ -838,7 +831,7 @@ RESPONSES = {
 
 
 # ================================================================
-# MAIN RESPONDER
+# MAIN RESPONDER  (logic unchanged — only normalizer calls updated)
 # ================================================================
 
 def get_response(
@@ -888,7 +881,7 @@ def get_response(
     if score < THRESHOLD_CONFUSED:
         return result
     if score < THRESHOLD_RESPOND:
-        return result  # reply=None → AI ይሄዳል
+        return result
 
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
