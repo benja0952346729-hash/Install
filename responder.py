@@ -856,8 +856,8 @@ def get_response(
     failed_numbers: list = None,
 ) -> dict:
 
-    THRESHOLD_RESPOND  = 0.18
-    THRESHOLD_CONFUSED = 0.08
+    THRESHOLD_RESPOND  = 0.25
+    THRESHOLD_CONFUSED = 0.12
 
     result = {
         "reply": None,
@@ -888,8 +888,7 @@ def get_response(
     if score < THRESHOLD_CONFUSED:
         return result
     if score < THRESHOLD_RESPOND:
-        result["reply"] = "ምን ማለትህ ነው? 🙏"
-        return result
+        return result  # reply=None → AI ይሄዳል
 
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
