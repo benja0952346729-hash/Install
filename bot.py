@@ -35,6 +35,7 @@ from database import (
     calculate_game_profit,
     set_warning_media, get_warning_media, get_all_warning_media, delete_warning_media,
     get_conn,
+    update_countdown_settings,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -227,6 +228,19 @@ def is_admin(user_id: int, group_id: int = None) -> bool:
     if group_id:
         return is_group_admin(group_id, user_id)
     return False
+
+
+# ============================================================
+# GET ADMIN GROUP HELPER
+# ============================================================
+
+def get_admin_group_id(user_id: int):
+    """Admin የሆነበት group_id ይመልሳል። ለሁሉም private chat commands ይጠቀም።"""
+    enabled = get_enabled_groups()
+    admin_groups = [g for g in enabled if is_admin(user_id, g["group_id"])]
+    if not admin_groups:
+        return None
+    return admin_groups[0]["group_id"]
 
 
 # ============================================================
@@ -564,6 +578,55 @@ async def cancel_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# SETCOUNTDOWN COMMAND
+# ============================================================
+
+async def handle_setcountdown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type != "private":
+        if not is_admin(user_id, update.effective_chat.id):
+            return
+        group_id = update.effective_chat.id
+    else:
+        group_id = get_admin_group_id(user_id)
+        if not group_id:
+            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            return
+
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text(
+            "❌ ምሳሌ: /setcountdown 2\n"
+            "0 = countdown አጥፋ\n"
+            "0.5, 1, 2, 5, 10 = ደቂቃ"
+        )
+        return
+
+    try:
+        mins = float(parts[1])
+        if mins != 0 and (mins < 0.5 or mins > 10):
+            raise ValueError
+    except ValueError:
+        await update.message.reply_text("❌ 0 ወይም 0.5 እስከ 10 ብቻ ጻፍ!")
+        return
+
+    settings = get_active_settings(group_id=group_id)
+    if not settings:
+        await update.message.reply_text("❌ Active game የለም!")
+        return
+
+    enabled = mins > 0
+    update_countdown_settings(settings["id"], enabled, mins if enabled else 0)
+
+    if enabled:
+        await update.message.reply_text(f"✅ Countdown {mins} ደቂቃ ተቀምጧል!")
+    else:
+        await update.message.reply_text("✅ Countdown ጠፍቷል!")
+
+
+# ============================================================
 # GROUP MESSAGE HANDLER
 # ============================================================
 
@@ -640,6 +703,10 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     else:
         countdown_seconds = 0
 
+    # ── user numbers & balance ──
+    user_numbers = get_user_numbers(game_id, user_id)
+    recent_winners = get_recent_winners(group_id, hours=24)
+
     resp = get_response(
         text=text,
         settings=settings,
@@ -650,7 +717,28 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         countdown_seconds=countdown_seconds,
         user_name=user_name,
         user_id=user_id,
+        user_numbers=user_numbers,
+        recent_winners=recent_winners,
     )
+
+    # ── my_numbers_query ──
+    if resp.get("my_numbers_query"):
+        from responder import _format_my_numbers, RESPONSES as RESP
+        if not user_numbers:
+            await msg.reply_text(random.choice(RESP["my_numbers_none"]))
+        else:
+            numbers_text = _format_my_numbers(user_numbers)
+            if numbers_text:
+                await msg.reply_text(
+                    random.choice(RESP["my_numbers_show"]).format(numbers_text=numbers_text)
+                )
+            else:
+                await msg.reply_text(random.choice(RESP["my_numbers_none"]))
+        return
+
+    # ── number_owner_query ──
+    if resp.get("number_owner_query") is not None:
+        return
 
     if resp.get("cancel_number"):
         num = resp["cancel_number"]
@@ -1257,7 +1345,7 @@ async def _refresh_board(ctx, settings, group_id=None):
 
 
 # ============================================================
-# BOARD REPLY PARSE — አዲስ
+# BOARD REPLY PARSE
 # ============================================================
 
 def _parse_board_text(text: str, symbol: str = "#") -> dict:
@@ -1281,29 +1369,24 @@ def _parse_board_text(text: str, symbol: str = "#") -> dict:
 
         data = {}
 
-        # slot1+slot2 check
         if "+" in rest:
             parts = rest.split("+", 1)
             slot1_raw = parts[0].strip()
             slot2_raw = parts[1].strip()
 
-            # slot1
             paid1 = "✅" in slot1_raw
             name1 = slot1_raw.replace("✅", "").strip()
             data["name1"] = name1 if name1 else None
             data["paid1"] = paid1
             data["is_half1"] = True
 
-            # slot2
             paid2 = "✅" in slot2_raw
             name2 = slot2_raw.replace("✅", "").strip()
             data["name2"] = name2 if name2 else None
             data["paid2"] = paid2
         else:
-            # slot1 ብቻ
             paid1 = "✅" in rest
-            is_half1 = rest.endswith("+") or (paid1 and "+" in rest)
-            name1 = rest.replace("✅", "").replace("+", "").strip()
+            name1 = rest.replace("✅", "").strip()
             data["name1"] = name1 if name1 else None
             data["paid1"] = paid1
             data["is_half1"] = False
@@ -1323,29 +1406,24 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
     group_id = update.effective_chat.id
     user_id = update.effective_user.id
 
-    # Admin ብቻ
     if not is_admin(user_id, group_id):
         return
 
-    # Group enabled/active check
     if not is_group_enabled(group_id):
         return
 
     if not is_group_active(group_id):
         return
 
-    # Reply መሆን አለበት
     if not msg.reply_to_message:
         return
 
-    # Bot message ላይ reply መሆን አለበት
     if not msg.reply_to_message.from_user:
         return
 
     if msg.reply_to_message.from_user.id != ctx.bot.id:
         return
 
-    # Board line አለ? (ቢያንስ አንድ ## pattern)
     settings = get_active_settings(group_id=group_id)
     if not settings:
         return
@@ -1368,7 +1446,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             continue
 
         if data is None:
-            # Empty line — remove
             admin_remove_player(game_id, number, slot=None)
         else:
             name1 = data.get("name1")
@@ -1377,20 +1454,18 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             name2 = data.get("name2")
             paid2 = data.get("paid2", False)
 
-            # አስቀድሞ ያለውን አጥፋ
             admin_remove_player(game_id, number, slot=None)
 
             if name1:
                 register_number(game_id, 0, name1, number, is_half1, force=True)
-                if paid1:
-                    admin_mark_paid(game_id, number, slot=1, is_paid=True)
+                # paid1 ✅ ካለ paid፣ ከሌለ unpaid
+                admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
 
             if name2:
                 register_number(game_id, 0, name2, number, is_half=False, force=True)
-                if paid2:
-                    admin_mark_paid(game_id, number, slot=2, is_paid=True)
+                # paid2 ✅ ካለ paid፣ ከሌለ unpaid
+                admin_mark_paid(game_id, number, slot=2, is_paid=paid2)
 
-            # nekay update
             if game_id in nekay_numbers:
                 snap = nekay_numbers.get(game_id, {})
                 if number in snap:
@@ -1400,18 +1475,15 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                         del snap[number]
                 nekay_numbers[game_id] = snap
 
-    # Admin የላከውን message ሰርዝ
     try:
         await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
     except Exception as e:
         logging.warning(f"[BoardReply] Delete admin msg error: {e}")
 
-    # Board refresh
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _refresh_board(ctx, fresh, group_id)
 
-        # nekay active ከሆነ refresh
         if game_id in nekay_active:
             snap = nekay_numbers.get(game_id, {})
             rem_msg_id = fresh.get("remaining_message_id")
@@ -1833,9 +1905,6 @@ async def handle_dbclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     try:
         db_num = int(parts[1])
-        if db_num < 1 or db_num > len(get_all_db_urls() if True else []):
-            await update.message.reply_text(f"❌ DB{db_num} የለም!")
-            return
         clear_db_data(db_num)
         await update.message.reply_text(f"✅ DB{db_num} ጸዳ! (usernames ይቀራሉ)")
     except ValueError:
@@ -1856,40 +1925,9 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_admin(user_id, group_id):
             return
     else:
-        enabled = get_enabled_groups()
-        admin_groups = [g for g in enabled if is_admin(user_id, g["group_id"])]
-        if not admin_groups:
-            await update.message.reply_text("❌ Admin የሆንክባቸው groups የሉም!")
-            return
-        if len(admin_groups) == 1:
-            group_id = admin_groups[0]["group_id"]
-        else:
-            all_lines = []
-            for g in admin_groups:
-                gid = g["group_id"]
-                winners_g = get_recent_winners(gid, hours=24)
-                if winners_g:
-                    gname = g.get("group_name") or str(gid)
-                    all_lines.append(f"📌 {gname}:")
-                    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-                    for w in winners_g:
-                        medal = medals.get(w["place"], "🎖️")
-                        balance = w["balance"]
-                        sent_mark = "✅" if w["sent"] else "⚠️ ያልተላከ"
-                        time_str = w["created_at"].strftime("%H:%M") if w["created_at"] else "?"
-                        line = f"{medal} {w['place']}ኛ: {w['user_name']} — ETB {w['prize']} {sent_mark}"
-                        if balance > 0:
-                            line += f"\n   💳 ቀሪ balance: ETB {balance}"
-                        line += f"\n   🕐 {time_str}"
-                        all_lines.append(line)
-            if all_lines:
-                await update.message.reply_text("🏆 Last 24hr Winners:\n\n" + "\n\n".join(all_lines))
-            else:
-                await update.message.reply_text("🏆 Last 24hr winners የሉም።")
-            try:
-                cleanup_old_winners()
-            except Exception:
-                pass
+        group_id = get_admin_group_id(user_id)
+        if not group_id:
+            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
             return
 
     winners = get_recent_winners(group_id, hours=24)
@@ -2213,43 +2251,10 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     user_id = update.effective_user.id
 
-    parts = update.message.text.strip().split()
-    group_id = None
-    if len(parts) > 1:
-        try:
-            group_id = int(parts[1])
-        except ValueError:
-            pass
-
+    group_id = get_admin_group_id(user_id)
     if not group_id:
-        enabled = get_enabled_groups()
-        admin_groups = []
-        for g in enabled:
-            if is_admin(user_id, g["group_id"]):
-                admin_groups.append(g)
-
-        if not admin_groups:
-            await update.message.reply_text("❌ Admin የሆነህ active group የለም!")
-            return ConversationHandler.END
-
-        if len(admin_groups) == 1:
-            group_id = admin_groups[0]["group_id"]
-        else:
-            active_groups = []
-            for g in admin_groups:
-                s = get_active_settings(group_id=g["group_id"])
-                if s:
-                    active_groups.append(g)
-            if len(active_groups) == 1:
-                group_id = active_groups[0]["group_id"]
-            else:
-                lines = ["📋 የትኛው group? ID ጻፍ:\n"]
-                for g in (active_groups if active_groups else admin_groups):
-                    lines.append(f"• {g['group_name'] or g['group_id']}: {g['group_id']}")
-                await update.message.reply_text("\n".join(lines))
-                ctx.user_data["awaiting_group_id"] = True
-                ctx.user_data["admin_groups"] = admin_groups
-                return ASK_SEND_PLACE
+        await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+        return ConversationHandler.END
 
     ctx.user_data["send_group_id"] = group_id
     return await _send_show_places(update, ctx, group_id)
@@ -2280,16 +2285,6 @@ async def _send_show_places(update, ctx, group_id: int):
 
 
 async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if ctx.user_data.get("awaiting_group_id"):
-        try:
-            group_id = int(update.message.text.strip())
-            ctx.user_data["send_group_id"] = group_id
-            ctx.user_data["awaiting_group_id"] = False
-            return await _send_show_places(update, ctx, group_id)
-        except ValueError:
-            await update.message.reply_text("❌ Group ID ቁጥር ብቻ ጻፍ!")
-            return ASK_SEND_PLACE
-
     text = update.message.text.strip()
     if text not in ("1", "2", "3"):
         await update.message.reply_text("❌ 1, 2, ወይም 3 ብቻ ጻፍ!")
@@ -2307,10 +2302,6 @@ async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     winner = get_winner_by_place(settings["id"], place)
     if not winner:
         await update.message.reply_text(f"❌ {place}ኛ winner አልተመዘገበም!")
-        return ConversationHandler.END
-
-    if winner.get("group_id") and winner["group_id"] != group_id:
-        await update.message.reply_text("❌ ይህ winner የዚህ group አይደለም!")
         return ConversationHandler.END
 
     ctx.user_data["send_place"] = place
@@ -2406,6 +2397,7 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "🎮 *Game*\n"
         "/setgame — አዲስ game settings ያቀናብራል\n"
         "/newgame — ቁጥሮችን ጠርጎ አዲስ ጨዋታ ይጀምራል\n"
+        "/setcountdown 2 — countdown ደቂቃ ይቀይራል (0=አጥፋ)\n"
         "/status — ሁሉንም commands ያሳያል\n\n"
         "👤 *ምዝገባ*\n"
         "/register 5 10+ አበበ — ቁጥር manually ይመዘግባል\n"
@@ -2574,6 +2566,7 @@ def main():
     app.add_handler(CommandHandler("paid", handle_paid_cmd))
     app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
     app.add_handler(CommandHandler("newgame", handle_newgame))
+    app.add_handler(CommandHandler("setcountdown", handle_setcountdown))
     app.add_handler(send_conv)
 
     app.add_handler(CommandHandler("enable", handle_enable))
@@ -2618,7 +2611,6 @@ def main():
         handle_group_photo
     ))
 
-    # አዲስ — admin board reply handler (group messages ከመጀመሪያ)
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_admin_board_reply
