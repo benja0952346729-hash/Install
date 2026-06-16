@@ -630,7 +630,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
                         done_by="user", balance_after=remaining_balance,
                     )
     except Exception as _log_err:
-        logger.warning(f"[log_transaction] Error: {_log_err}")'
+        logger.warning(f"[log_transaction] Error: {_log_err}")
 
     if confirmed and target_chat:
         settings = get_active_settings(group_id=_group_id)
