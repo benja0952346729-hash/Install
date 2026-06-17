@@ -1471,32 +1471,36 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             name2 = data.get("name2")
             paid2 = data.get("paid2", False)
 
-            # DB ላይ was_paid ይፈትሻል — direct query
+            # existing user_id እና is_paid ያምጣ — ከ DB direct
             conn_check = get_conn()
             cur_check = conn_check.cursor()
             cur_check.execute("""
-                SELECT is_paid FROM registrations
-                WHERE game_id=%s AND number=%s AND slot=1
+                SELECT slot, user_id, is_paid FROM registrations
+                WHERE game_id=%s AND number=%s
             """, (game_id, number))
-            paid_row = cur_check.fetchone()
-            was_paid1 = bool(paid_row and paid_row[0])
+            existing_rows = cur_check.fetchall()
             cur_check.close()
             conn_check.close()
+            uid_map = {row[0]: row[1] for row in existing_rows}
+            paid_map = {row[0]: row[2] for row in existing_rows}
+            was_paid1 = bool(paid_map.get(1, False))
 
             admin_remove_player(game_id, number, slot=None)
 
             if name1:
-                register_number(game_id, 0, name1, number, is_half1, force=True)
+                orig_uid1 = uid_map.get(1, 0)
+                register_number(game_id, orig_uid1, name1, number, is_half1, force=True)
                 admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
 
             if name2:
+                orig_uid2 = uid_map.get(2, 0)
                 conn2 = get_conn()
                 cur2 = conn2.cursor()
                 cur2.execute("""
                     INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay)
-                    VALUES (%s, 0, %s, %s, FALSE, 2, %s, FALSE)
+                    VALUES (%s, %s, %s, %s, FALSE, 2, %s, FALSE)
                     ON CONFLICT DO NOTHING
-                """, (game_id, name2, number, paid2))
+                """, (game_id, orig_uid2, name2, number, paid2))
                 conn2.commit()
                 cur2.close()
                 conn2.close()
@@ -1530,7 +1534,11 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     chat_id=group_id, message_id=board_msg_id_now, text=board_text_fresh
                 )
             except Exception:
-                # board gone ነው (admin ሰርዞ ስለሆነ) — አዲስ send
+                # board gone (admin ሰርዞ) — አሮጌ delete ሞክር ከዛ አዲስ send
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id_now)
+                except Exception:
+                    pass
                 new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
                 update_board_message_id(game_id, new_board_msg.message_id)
         else:
@@ -1538,7 +1546,16 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             update_board_message_id(game_id, new_board_msg.message_id)
 
         if game_id in nekay_active:
-            snap = nekay_numbers.get(game_id, {})
+            # snap ከ DB እንደገና ያምጣ — board edit ከሆነ በኋላ
+            unpaid_fresh = get_unpaid_numbers(game_id)
+            snap = {}
+            for number, slots in unpaid_fresh:
+                if slots == {2}:
+                    snap[number] = 2
+                else:
+                    snap[number] = 0
+            nekay_numbers[game_id] = snap
+
             rem_msg_id = fresh.get("remaining_message_id")
             if rem_msg_id:
                 try:
