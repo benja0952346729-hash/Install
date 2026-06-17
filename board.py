@@ -17,7 +17,6 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
 
     lines = []
 
-    # Rule ከላይ ይሆናል
     if game_rule:
         lines.append(game_rule)
         lines.append("")
@@ -73,16 +72,18 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
         paid_slots = set()
 
     if len(entry) == 1:
-        name, is_half, slot = entry[0]
+        name, is_half, slot, is_paid, pending_upgrade = entry[0]
         check = "✅" if slot in paid_slots else ""
         if is_half:
             return f"{name}{check}+"
         else:
+            if pending_upgrade:
+                return f"{name}{check}?"
             return f"{name}{check}"
 
     elif len(entry) == 2:
-        name1, _, slot1 = entry[0]
-        name2, _, slot2 = entry[1]
+        name1, _, slot1, is_paid1, _ = entry[0]
+        name2, _, slot2, is_paid2, _ = entry[1]
         check1 = "✅" if slot1 in paid_slots else ""
         check2 = "✅" if slot2 in paid_slots else ""
         return f"{name1}{check1}+{name2}{check2}"
