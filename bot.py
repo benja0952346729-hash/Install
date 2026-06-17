@@ -1447,23 +1447,13 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if not changes:
         return
 
-    # ① board ወዲያው delete (ፈጣን እንዲሆን)
-    fresh_before = get_active_settings(group_id=group_id)
-    if fresh_before:
-        board_msg_id_before = fresh_before.get("board_message_id")
-        if board_msg_id_before:
-            try:
-                await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id_before)
-            except Exception:
-                pass
-
-    # ② admin message delete
+    # ① admin message delete
     try:
         await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
     except Exception as e:
         logging.warning(f"[BoardReply] Delete admin msg error: {e}")
 
-    # ③ DB changes
+    # ② DB changes
     for number, data in changes.items():
         if number < 1 or number > settings["total_numbers"]:
             continue
@@ -1500,8 +1490,16 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
 
             if name2:
-                register_number(game_id, 0, name2, number, is_half=False, force=True)
-                admin_mark_paid(game_id, number, slot=2, is_paid=paid2)
+                conn2 = get_conn()
+                cur2 = conn2.cursor()
+                cur2.execute("""
+                    INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay)
+                    VALUES (%s, 0, %s, %s, FALSE, 2, %s, FALSE)
+                    ON CONFLICT DO NOTHING
+                """, (game_id, name2, number, paid2))
+                conn2.commit()
+                cur2.close()
+                conn2.close()
 
             if game_id in nekay_numbers:
                 snap = nekay_numbers.get(game_id, {})
@@ -1519,14 +1517,25 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
                 nekay_numbers[game_id] = snap
 
-    # ④ fresh board send
+    # ② fresh board edit (ካልሆነ replace)
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         taken_fresh = get_taken_numbers(game_id)
         paid_fresh = get_paid_numbers(game_id)
         board_text_fresh = build_board(fresh, taken_fresh, paid_fresh)
-        new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
-        update_board_message_id(game_id, new_board_msg.message_id)
+        board_msg_id_now = fresh.get("board_message_id")
+        if board_msg_id_now:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=group_id, message_id=board_msg_id_now, text=board_text_fresh
+                )
+            except Exception:
+                # board gone ነው (admin ሰርዞ ስለሆነ) — አዲስ send
+                new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
+                update_board_message_id(game_id, new_board_msg.message_id)
+        else:
+            new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
+            update_board_message_id(game_id, new_board_msg.message_id)
 
         if game_id in nekay_active:
             snap = nekay_numbers.get(game_id, {})
