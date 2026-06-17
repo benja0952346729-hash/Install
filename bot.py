@@ -36,6 +36,7 @@ from database import (
     set_warning_media, get_warning_media, get_all_warning_media, delete_warning_media,
     get_conn,
     update_countdown_settings,
+    clear_prize_balance,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -703,7 +704,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     else:
         countdown_seconds = 0
 
-    # ── user numbers & balance ──
     user_numbers = get_user_numbers(game_id, user_id)
     recent_winners = get_recent_winners(group_id, hours=24)
 
@@ -721,7 +721,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         recent_winners=recent_winners,
     )
 
-    # ── my_numbers_query ──
     if resp.get("my_numbers_query"):
         from responder import _format_my_numbers, RESPONSES as RESP
         if not user_numbers:
@@ -736,7 +735,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 await msg.reply_text(random.choice(RESP["my_numbers_none"]))
         return
 
-    # ── number_owner_query ──
     if resp.get("number_owner_query") is not None:
         return
 
@@ -788,7 +786,9 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         target = tc["target"]
         numbers = tc["numbers"]
 
-        parse_result = parse_numbers(text)
+        price_full = float(settings.get("price_full") or 0)
+        price_half = float(settings.get("price_half") or 0)
+        parse_result = parse_numbers(text, price_full=price_full, price_half=price_half)
         parsed_name = None
         if parse_result and parse_result["numbers"]:
             parsed_name = parse_result["numbers"][0][2]
@@ -994,7 +994,9 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         await msg.reply_text("\n".join(lines))
         return
 
-    parse_result = parse_numbers(text)
+    price_full = float(settings.get("price_full") or 0)
+    price_half = float(settings.get("price_half") or 0)
+    parse_result = parse_numbers(text, price_full=price_full, price_half=price_half)
 
     if not parse_result:
         if resp["reply"]:
@@ -1421,8 +1423,12 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if not msg.reply_to_message.from_user:
         return
 
-    if msg.reply_to_message.from_user.id != ctx.bot.id:
-        return
+    # reply_to_message bot message ወይም admin's own board-reply message ሊሆን ይችላል
+    reply_from_id = msg.reply_to_message.from_user.id
+    if reply_from_id != ctx.bot.id:
+        # admin የቀደመ board-reply edit ሲያደርግ — reply_to ራሱ admin ሊሆን ይችላል
+        # ስለዚህ የ reply_to_message text ላይ board pattern ይፈትሻል
+        pass
 
     settings = get_active_settings(group_id=group_id)
     if not settings:
@@ -1441,13 +1447,29 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if not changes:
         return
 
+    # ① board ወዲያው delete (ፈጣን እንዲሆን)
+    fresh_before = get_active_settings(group_id=group_id)
+    if fresh_before:
+        board_msg_id_before = fresh_before.get("board_message_id")
+        if board_msg_id_before:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id_before)
+            except Exception:
+                pass
+
+    # ② admin message delete
+    try:
+        await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+    except Exception as e:
+        logging.warning(f"[BoardReply] Delete admin msg error: {e}")
+
+    # ③ DB changes
     for number, data in changes.items():
         if number < 1 or number > settings["total_numbers"]:
             continue
 
         if data is None:
             admin_remove_player(game_id, number, slot=None)
-            # nekay ውስጥ ካለ አውጣ
             if game_id in nekay_numbers:
                 snap = nekay_numbers.get(game_id, {})
                 snap.pop(number, None)
@@ -1459,10 +1481,17 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             name2 = data.get("name2")
             paid2 = data.get("paid2", False)
 
-            # ከ DB የነበረውን እናምጣ (paid ነበር?)
-            taken_before = get_taken_numbers(game_id)
-            slots_before = taken_before.get(number, [])
-            was_paid1 = any(s[3] for s in slots_before if s[2] == 1)  # slot1 paid ነበር?
+            # DB ላይ was_paid ይፈትሻል — direct query
+            conn_check = get_conn()
+            cur_check = conn_check.cursor()
+            cur_check.execute("""
+                SELECT is_paid FROM registrations
+                WHERE game_id=%s AND number=%s AND slot=1
+            """, (game_id, number))
+            paid_row = cur_check.fetchone()
+            was_paid1 = bool(paid_row and paid_row[0])
+            cur_check.close()
+            conn_check.close()
 
             admin_remove_player(game_id, number, slot=None)
 
@@ -1474,35 +1503,30 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 register_number(game_id, 0, name2, number, is_half=False, force=True)
                 admin_mark_paid(game_id, number, slot=2, is_paid=paid2)
 
-            # nekay snap update
             if game_id in nekay_numbers:
                 snap = nekay_numbers.get(game_id, {})
 
                 if number in snap:
                     if paid1 and not was_paid1:
-                        # paid ✅ አደረገ → snap ይቀራል (payment handler ይሰርዘዋል)
                         pass
                     elif not paid1 and was_paid1:
-                        # paid ✅ አጠፋ → snap ላይ መልስ
                         snap[number] = 2 if is_half1 else 0
                     elif name1:
-                        # ስም replace አረገ → snap ከ አውጣ
                         del snap[number]
                 else:
                     if not paid1 and was_paid1:
-                        # paid ✅ አጠፋ → snap ላይ መልስ
                         snap[number] = 2 if is_half1 else 0
 
                 nekay_numbers[game_id] = snap
 
-    try:
-        await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
-    except Exception as e:
-        logging.warning(f"[BoardReply] Delete admin msg error: {e}")
-
+    # ④ fresh board send
     fresh = get_active_settings(group_id=group_id)
     if fresh:
-        await _refresh_board(ctx, fresh, group_id)
+        taken_fresh = get_taken_numbers(game_id)
+        paid_fresh = get_paid_numbers(game_id)
+        board_text_fresh = build_board(fresh, taken_fresh, paid_fresh)
+        new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
+        update_board_message_id(game_id, new_board_msg.message_id)
 
         if game_id in nekay_active:
             snap = nekay_numbers.get(game_id, {})
@@ -2201,7 +2225,9 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             settings2 = get_active_settings(group_id=group_id)
             if not settings2:
                 continue
-            result = parse_numbers(q_text)
+            price_full2 = float(settings2.get("price_full") or 0)
+            price_half2 = float(settings2.get("price_half") or 0)
+            result = parse_numbers(q_text, price_full=price_full2, price_half=price_half2)
             if not result:
                 continue
             numbers = result["numbers"]
@@ -2254,7 +2280,7 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
             pass
 
     clear_game(game_id)
-    clear_prize_balance(_group_id)  # ← prize_balance ይጸዳል፣ carry_balance ይቀራል
+    clear_prize_balance(_group_id)
     board_text = build_board(settings, {}, {})
     new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
     update_board_message_id(game_id, new_msg.message_id)
@@ -2403,15 +2429,24 @@ async def cancel_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /status
+# /status — private + group support
 # ============================================================
 
 async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
-    if not is_admin(update.effective_user.id, group_id):
-        return
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
 
-    is_main = is_main_admin(update.effective_user.id)
+    if chat_type != "private":
+        group_id = update.effective_chat.id
+        if not is_admin(user_id, group_id):
+            return
+    else:
+        group_id = get_admin_group_id(user_id)
+        if not group_id:
+            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            return
+
+    is_main = is_main_admin(user_id)
 
     text = (
         "🤖 Commands:\n\n"
