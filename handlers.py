@@ -227,24 +227,23 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
     _group_id = group_id or chat_id
 
-    # track sent messages for cleanup
-    sent_msg_ids = []
-
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
 
-        checking_msg = await msg.reply_text("⏳ Screenshot እየተረጋገጠ ነው...")
-        sent_msg_ids.append(checking_msg.message_id)
+        # ወዲያው "እሺ ቤተሰብ 🙏" photo reply
+        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
 
         analysis = await analyze_screenshot(image_base64)
 
         if not analysis:
             try:
-                await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።"
+                )
             except Exception:
                 pass
-            await msg.reply_text("⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
         photo_type = analysis.get("photoType", "other")
@@ -257,10 +256,11 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
                 logger.warning(f"[Describe] Failed: {e}")
                 desc = "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
             try:
-                await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id, text=desc
+                )
             except Exception:
                 pass
-            await msg.reply_text(desc)
             return
 
         amount = analysis.get("amount")
@@ -269,23 +269,15 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
         if not amount:
             try:
-                await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።"
+                )
             except Exception:
                 pass
-            await msg.reply_text("⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
         logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
-
-        # checking msg ሰርዝ — "እሺ ቤተሰብ 🙏" photo reply ይሁን
-        try:
-            await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
-            sent_msg_ids.remove(checking_msg.message_id)
-        except Exception:
-            pass
-
-        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
-        sent_msg_ids.append(receipt_msg.message_id)
 
         # group_id ጋር match ይሞክር — ካልሆነ group_id=None ጋር ዳግም
         match = find_matching_sms(
@@ -307,11 +299,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             )
 
         if not match:
-            await msg.reply_text(
-                f"⏳ SMS ገና አልደረሰም። ሲደርስ ይወጣዋል...\n"
-                f"💰 ETB {amount}"
-                + (f"\n👤 {sender_name}" if sender_name else "")
-            )
+            # SMS ካልደረሰ — "እሺ ቤተሰብ 🙏" ይቀራል፣ silent save
             save_screenshot_payment(
                 telegram_id=telegram_id,
                 amount=amount,
@@ -324,24 +312,16 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             return
 
         if is_sms_already_used(match["id"]):
-            # "እሺ ቤተሰብ 🙏" replace
-            for mid in sent_msg_ids:
-                try:
-                    await bot.delete_message(chat_id=chat_id, message_id=mid)
-                except Exception:
-                    pass
-            sent_msg_ids.clear()
-            await msg.reply_text("⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።")
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።"
+                )
+            except Exception:
+                pass
             return
 
         # approved — "እሺ ቤተሰብ 🙏" replace → random መልካም ዕድል
-        for mid in sent_msg_ids:
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=mid)
-            except Exception:
-                pass
-        sent_msg_ids.clear()
-
         mark_sms_as_used(match["id"])
         await notify_match(
             bot,
@@ -350,6 +330,8 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             _group_id,
             nekay_cb=nekay_cb,
             success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
+            receipt_msg_id=receipt_msg.message_id,
+            receipt_chat_id=chat_id,
         )
 
         try:
@@ -600,7 +582,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
 # MATCH NOTIFICATION
 # ============================================================
 
-async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None, success_msg: str = None):
+async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None, success_msg: str = None, receipt_msg_id: int = None, receipt_chat_id: int = None):
     from board import build_board
 
     telegram_id = match_data["telegram_id"]
@@ -618,15 +600,26 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     target_chat = _group_id
 
     if confirmed:
-        # approved — success message ብቻ (photo reply)
+        # "እሺ ቤተሰብ 🙏" → replace → random መልካም ዕድል
         final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
-        if target_chat:
+        if receipt_msg_id and receipt_chat_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=receipt_chat_id, message_id=receipt_msg_id, text=final_msg
+                )
+            except Exception:
+                if target_chat:
+                    if reply_msg_id:
+                        await bot.send_message(chat_id=target_chat, text=final_msg, reply_to_message_id=reply_msg_id)
+                    else:
+                        await bot.send_message(chat_id=target_chat, text=final_msg)
+        elif target_chat:
             if reply_msg_id:
                 await bot.send_message(chat_id=target_chat, text=final_msg, reply_to_message_id=reply_msg_id)
             else:
                 await bot.send_message(chat_id=target_chat, text=final_msg)
     else:
-        # ብር ደረሰ ግን ቁጥር ማይሸፍን — ቀሪ ብር ይናገር
+        # ብር ደረሰ ግን ቁጥር ማይሸፍን — ቀሪ ብር ይናገር — replace
         settings_check = get_active_settings(group_id=_group_id)
         needed_msg = ""
         if settings_check:
@@ -644,7 +637,18 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
             f"💳 ባላንስ: ETB {remaining_balance}"
             + needed_msg
         )
-        if target_chat:
+        if receipt_msg_id and receipt_chat_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=receipt_chat_id, message_id=receipt_msg_id, text=message
+                )
+            except Exception:
+                if target_chat:
+                    if reply_msg_id:
+                        await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
+                    else:
+                        await bot.send_message(chat_id=target_chat, text=message)
+        elif target_chat:
             if reply_msg_id:
                 await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
             else:
