@@ -106,7 +106,7 @@ async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
 async def _inactivity_notify_task(bot, game_id: int, group_id: int):
     import pytz
     et_tz = pytz.timezone("Africa/Addis_Ababa")
-    
+
     last_urgency_msg_id = None
     urgency_count = 0
     MAX_COUNT = 4
@@ -236,7 +236,6 @@ def is_admin(user_id: int, group_id: int = None) -> bool:
 # ============================================================
 
 def get_admin_group_id(user_id: int):
-    """Admin የሆነበት group_id ይመልሳል። ለሁሉም private chat commands ይጠቀም።"""
     enabled = get_enabled_groups()
     admin_groups = [g for g in enabled if is_admin(user_id, g["group_id"])]
     if not admin_groups:
@@ -350,9 +349,7 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
     if unpaid:
         snap = {}
         for number, slots in unpaid:
-            if slots == {1} or slots == {1, 2} or len(slots) == 0:
-                snap[number] = 0
-            elif slots == {2}:
+            if slots == {2}:
                 snap[number] = 2
             else:
                 snap[number] = 0
@@ -368,8 +365,6 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
         nekay_active.add(game_id)
         update_remaining_message_id(game_id, nekay_sent.message_id if nekay_sent else None)
-    else:
-        pass
 
     active_countdowns.pop(game_id, None)
 
@@ -1377,21 +1372,24 @@ def _parse_board_text(text: str, symbol: str = "#") -> dict:
             slot2_raw = parts[1].strip()
 
             paid1 = "✅" in slot1_raw
-            name1 = slot1_raw.replace("✅", "").strip()
+            name1 = slot1_raw.replace("✅", "").replace("?", "").strip()
             data["name1"] = name1 if name1 else None
             data["paid1"] = paid1
             data["is_half1"] = True
+            data["pending1"] = False
 
             paid2 = "✅" in slot2_raw
-            name2 = slot2_raw.replace("✅", "").strip()
+            name2 = slot2_raw.replace("✅", "").replace("?", "").strip()
             data["name2"] = name2 if name2 else None
             data["paid2"] = paid2
         else:
             paid1 = "✅" in rest
-            name1 = rest.replace("✅", "").strip()
+            pending1 = "?" in rest
+            name1 = rest.replace("✅", "").replace("?", "").strip()
             data["name1"] = name1 if name1 else None
             data["paid1"] = paid1
             data["is_half1"] = False
+            data["pending1"] = pending1
             data["name2"] = None
             data["paid2"] = False
 
@@ -1423,13 +1421,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if not msg.reply_to_message.from_user:
         return
 
-    # reply_to_message bot message ወይም admin's own board-reply message ሊሆን ይችላል
-    reply_from_id = msg.reply_to_message.from_user.id
-    if reply_from_id != ctx.bot.id:
-        # admin የቀደመ board-reply edit ሲያደርግ — reply_to ራሱ admin ሊሆን ይችላል
-        # ስለዚህ የ reply_to_message text ላይ board pattern ይፈትሻል
-        pass
-
     settings = get_active_settings(group_id=group_id)
     if not settings:
         return
@@ -1447,13 +1438,11 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if not changes:
         return
 
-    # ① admin message delete
     try:
         await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
     except Exception as e:
         logging.warning(f"[BoardReply] Delete admin msg error: {e}")
 
-    # ② DB changes
     for number, data in changes.items():
         if number < 1 or number > settings["total_numbers"]:
             continue
@@ -1468,10 +1457,10 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             name1 = data.get("name1")
             paid1 = data.get("paid1", False)
             is_half1 = data.get("is_half1", False)
+            pending1 = data.get("pending1", False)
             name2 = data.get("name2")
             paid2 = data.get("paid2", False)
 
-            # existing user_id እና is_paid ያምጣ — ከ DB direct
             conn_check = get_conn()
             cur_check = conn_check.cursor()
             cur_check.execute("""
@@ -1491,14 +1480,24 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 orig_uid1 = uid_map.get(1, 0)
                 register_number(game_id, orig_uid1, name1, number, is_half1, force=True)
                 admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
+                if pending1:
+                    conn_p = get_conn()
+                    cur_p = conn_p.cursor()
+                    cur_p.execute("""
+                        UPDATE registrations SET pending_upgrade=TRUE
+                        WHERE game_id=%s AND number=%s AND slot=1
+                    """, (game_id, number))
+                    conn_p.commit()
+                    cur_p.close()
+                    conn_p.close()
 
             if name2:
                 orig_uid2 = uid_map.get(2, 0)
                 conn2 = get_conn()
                 cur2 = conn2.cursor()
                 cur2.execute("""
-                    INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay)
-                    VALUES (%s, %s, %s, %s, FALSE, 2, %s, FALSE)
+                    INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                    VALUES (%s, %s, %s, %s, FALSE, 2, %s, FALSE, FALSE)
                     ON CONFLICT DO NOTHING
                 """, (game_id, orig_uid2, name2, number, paid2))
                 conn2.commit()
@@ -1521,7 +1520,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
                 nekay_numbers[game_id] = snap
 
-    # ② fresh board edit (ካልሆነ replace)
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         taken_fresh = get_taken_numbers(game_id)
@@ -1534,7 +1532,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     chat_id=group_id, message_id=board_msg_id_now, text=board_text_fresh
                 )
             except Exception:
-                # board gone (admin ሰርዞ) — አሮጌ delete ሞክር ከዛ አዲስ send
                 try:
                     await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id_now)
                 except Exception:
@@ -1546,7 +1543,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             update_board_message_id(game_id, new_board_msg.message_id)
 
         if game_id in nekay_active:
-            # snap ከ DB እንደገና ያምጣ — board edit ከሆነ በኋላ
             unpaid_fresh = get_unpaid_numbers(game_id)
             snap = {}
             for number, slots in unpaid_fresh:
@@ -2306,7 +2302,7 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
         except Exception:
             pass
 
-    clear_prize_balance(_group_id)  # ← ከ clear_game በፊት
+    clear_prize_balance(_group_id)
     clear_game(game_id)
     board_text = build_board(settings, {}, {})
     new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
@@ -2456,7 +2452,7 @@ async def cancel_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# /status — private + group support
+# /status
 # ============================================================
 
 async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
