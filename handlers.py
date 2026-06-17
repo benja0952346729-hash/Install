@@ -240,6 +240,10 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         analysis = await analyze_screenshot(image_base64)
 
         if not analysis:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
+            except Exception:
+                pass
             await msg.reply_text("⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
@@ -252,7 +256,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             except Exception as e:
                 logger.warning(f"[Describe] Failed: {e}")
                 desc = "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
-            # delete checking message
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
             except Exception:
@@ -265,12 +268,16 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         ref = analysis.get("ref")
 
         if not amount:
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
+            except Exception:
+                pass
             await msg.reply_text("⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።")
             return
 
         logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
 
-        # transaction screenshot ነው — "እሺ ቤተሰብ 🙏" ይበል (checking msg ሰርዞ)
+        # checking msg ሰርዝ — "እሺ ቤተሰብ 🙏" photo reply ይሁን
         try:
             await bot.delete_message(chat_id=chat_id, message_id=checking_msg.message_id)
             sent_msg_ids.remove(checking_msg.message_id)
@@ -280,6 +287,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
         sent_msg_ids.append(receipt_msg.message_id)
 
+        # group_id ጋር match ይሞክር — ካልሆነ group_id=None ጋር ዳግም
         match = find_matching_sms(
             telegram_id=telegram_id,
             amount=amount,
@@ -288,6 +296,15 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             pay_type=photo_type,
             group_id=_group_id,
         )
+        if not match:
+            match = find_matching_sms(
+                telegram_id=telegram_id,
+                amount=amount,
+                sender_name=sender_name,
+                ref=ref,
+                pay_type=photo_type,
+                group_id=None,
+            )
 
         if not match:
             await msg.reply_text(
@@ -307,10 +324,17 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             return
 
         if is_sms_already_used(match["id"]):
+            # "እሺ ቤተሰብ 🙏" replace
+            for mid in sent_msg_ids:
+                try:
+                    await bot.delete_message(chat_id=chat_id, message_id=mid)
+                except Exception:
+                    pass
+            sent_msg_ids.clear()
             await msg.reply_text("⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።")
             return
 
-        # approved — delete intermediate messages, send success
+        # approved — "እሺ ቤተሰብ 🙏" replace → random መልካም ዕድል
         for mid in sent_msg_ids:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -440,6 +464,11 @@ Total numbers in game: {settings.get('total_numbers')}
 
 Extract the winning numbers from the image carefully.
 
+CRITICAL ORDER RULES:
+- If numbers are arranged VERTICALLY (top to bottom): TOP = 1st place, MIDDLE = 2nd place, BOTTOM = 3rd place
+- If numbers are arranged HORIZONTALLY (left to right): LEFT = 1st place, MIDDLE = 2nd place, RIGHT = 3rd place
+- Always assign 1st place to the first/top/left number, regardless of the number's value
+
 Respond ONLY in this exact JSON format with no extra text:
 {{
   "1st": <winning number as integer or null>,
@@ -487,7 +516,8 @@ Only include places that have prizes. Numbers must be integers."""
 # WINNER PHOTO HANDLER
 # ============================================================
 
-async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
+async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
+    """Returns True if winners found, False otherwise"""
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
@@ -498,7 +528,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
 
         if not winners:
             await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
-            return
+            return False
 
         prize_map = {
             1: settings.get("prize_1st", 0),
@@ -558,9 +588,12 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None):
             except Exception:
                 pass
 
+        return True
+
     except Exception as e:
         logger.error(f"[Winner] Handler error: {e}", exc_info=True)
         await msg.reply_text("❌ Error ተፈጥሯል።")
+        return False
 
 
 # ============================================================
@@ -585,7 +618,7 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     target_chat = _group_id
 
     if confirmed:
-        # approved — success message ብቻ
+        # approved — success message ብቻ (photo reply)
         final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
         if target_chat:
             if reply_msg_id:
@@ -593,10 +626,23 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
             else:
                 await bot.send_message(chat_id=target_chat, text=final_msg)
     else:
+        # ብር ደረሰ ግን ቁጥር ማይሸፍን — ቀሪ ብር ይናገር
+        settings_check = get_active_settings(group_id=_group_id)
+        needed_msg = ""
+        if settings_check:
+            price_full = float(settings_check.get("price_full") or 0)
+            price_half = float(settings_check.get("price_half") or 0)
+            if remaining_balance < price_half and price_half > 0:
+                short = price_half - remaining_balance
+                needed_msg = f"\n⚠️ ቀሪ: ETB {short:.0f} ይላኩ (ለግማሽ)"
+            elif remaining_balance < price_full:
+                short = price_full - remaining_balance
+                needed_msg = f"\n⚠️ ቀሪ: ETB {short:.0f} ይላኩ (ለሙሉ)"
+
         message = (
-            f"💰 ETB {amount} ተቀብሏል — ነገር ግን የሚሸፈን ቁጥር የለም።\n"
-            f"🆔 Telegram ID: {telegram_id}\n"
+            f"💰 ETB {amount} ደረሰ።\n"
             f"💳 ባላንስ: ETB {remaining_balance}"
+            + needed_msg
         )
         if target_chat:
             if reply_msg_id:
