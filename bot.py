@@ -2222,9 +2222,10 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 return
             handled_winner_photos.add(photo_uid)
 
-            await handle_winner_photo(ctx.bot, update.message, settings, group_id=group_id)
-            await _auto_newgame(ctx.bot, settings, group_id)
-            return
+            winner_found = await handle_winner_photo(ctx.bot, update.message, settings, group_id=group_id)
+            if winner_found:
+                await _auto_newgame(ctx.bot, settings, group_id)
+        return
 
     _increment_counter(group_id)
     settings = get_active_settings(group_id=group_id)
