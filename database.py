@@ -1113,8 +1113,8 @@ def mark_nekay(game_id: int, number: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE registrations SET is_nekay=TRUE, is_paid=FALSE
-        WHERE game_id=%s AND number=%s
+        UPDATE registrations SET is_nekay=TRUE
+        WHERE game_id=%s AND number=%s AND is_paid=FALSE
     """, (game_id, number))
     conn.commit()
     cur.close()
@@ -2162,4 +2162,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-    }
+                     }
