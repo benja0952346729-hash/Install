@@ -600,26 +600,20 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     target_chat = _group_id
 
     if confirmed:
-        # "እሺ ቤተሰብ 🙏" → replace → random መልካም ዕድል
+        # "እሺ ቤተሰብ 🙏" → delete → random መልካም ዕድል photo reply
         final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
         if receipt_msg_id and receipt_chat_id:
             try:
-                await bot.edit_message_text(
-                    chat_id=receipt_chat_id, message_id=receipt_msg_id, text=final_msg
-                )
+                await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
             except Exception:
-                if target_chat:
-                    if reply_msg_id:
-                        await bot.send_message(chat_id=target_chat, text=final_msg, reply_to_message_id=reply_msg_id)
-                    else:
-                        await bot.send_message(chat_id=target_chat, text=final_msg)
-        elif target_chat:
+                pass
+        if target_chat:
             if reply_msg_id:
                 await bot.send_message(chat_id=target_chat, text=final_msg, reply_to_message_id=reply_msg_id)
             else:
                 await bot.send_message(chat_id=target_chat, text=final_msg)
     else:
-        # ብር ደረሰ ግን ቁጥር ማይሸፍን — ቀሪ ብር ይናገር — replace
+        # ብር ደረሰ ግን ቁጥር ማይሸፍን — ቀሪ ብር ይናገር — receipt_msg replace
         settings_check = get_active_settings(group_id=_group_id)
         needed_msg = ""
         if settings_check:
@@ -643,6 +637,10 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
                     chat_id=receipt_chat_id, message_id=receipt_msg_id, text=message
                 )
             except Exception:
+                try:
+                    await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
+                except Exception:
+                    pass
                 if target_chat:
                     if reply_msg_id:
                         await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
