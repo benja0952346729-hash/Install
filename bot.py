@@ -2306,8 +2306,8 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
         except Exception:
             pass
 
+    clear_prize_balance(_group_id)  # ← ከ clear_game በፊት
     clear_game(game_id)
-    clear_prize_balance(_group_id)
     board_text = build_board(settings, {}, {})
     new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
     update_board_message_id(game_id, new_msg.message_id)
