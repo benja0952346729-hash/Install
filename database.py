@@ -385,6 +385,11 @@ def init_db():
                 ON balance_transactions(group_id, telegram_id, game_id)
             """)
 
+            # ✅ FIX 2: winner_carried column — አንድ round ብቻ prize_balance ለማለፍ
+            cur.execute("""
+                ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS winner_carried BOOLEAN DEFAULT FALSE;
+            """)
+
             conn.commit()
             cur.close()
             conn.close()
@@ -980,7 +985,6 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
         r = cur.fetchone()
         _group_id = r[0] if r else None
 
-    # carry_balance ላይ ይጨምራል (payment = carry)
     cur.execute("""
         INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance)
         VALUES (%s, %s, %s, %s, 0)
@@ -1152,12 +1156,13 @@ def add_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: 
         _group_id = r[0] if r else None
     # prize_balance ላይ ብቻ ይጨምራል
     cur.execute("""
-        INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance)
-        VALUES (%s, %s, %s, 0, %s)
+        INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance, winner_carried)
+        VALUES (%s, %s, %s, 0, %s, FALSE)
         ON CONFLICT (group_id, telegram_id)
         DO UPDATE SET
             prize_balance = user_balance.prize_balance + %s,
             balance = user_balance.balance + %s,
+            winner_carried = FALSE,
             updated_at = NOW()
     """, (_group_id, telegram_id, amount, amount, amount, amount))
     conn.commit()
@@ -1280,7 +1285,6 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_i
     carry_balance = float(bal_row[0])
     prize_balance = float(bal_row[1])
 
-    # prize_balance መጀመሪያ ይቀንሳል
     if prize_balance >= amount:
         new_prize = prize_balance - amount
         new_carry = carry_balance
@@ -1339,20 +1343,37 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_i
 
 
 # ============================================================
-# CLEAR PRIZE BALANCE ON NEW GAME
+# CLEAR PRIZE BALANCE ON NEW GAME — FIX 2
+# winner prize_balance አንድ round ብቻ ይተላለፋል
 # ============================================================
 
 def clear_prize_balance(group_id: int):
-    """Game ሲቀየር prize_balance ይጸዳል፣ carry_balance ይቀራል"""
+    """
+    Game ሲቀየር:
+    - winner_carried=FALSE ያላቸው (አዲስ winner) → prize_balance ይቀራል፣ winner_carried=TRUE ይሆናል
+    - winner_carried=TRUE ያላቸው (ካለፈው round) → prize_balance ይጸዳል
+    - carry_balance ሁሌ ይቀራል
+    """
     conn = get_conn()
     cur = conn.cursor()
+
+    # ካለፈው round የተሸጋገሩ prize_balance ይጸዳሉ
     cur.execute("""
         UPDATE user_balance
         SET prize_balance=0,
             balance=carry_balance,
             updated_at=NOW()
-        WHERE group_id=%s
+        WHERE group_id=%s AND winner_carried=TRUE
     """, (group_id,))
+
+    # አዲስ winners → winner_carried=TRUE (ቀጣይ round ይጸዳሉ)
+    cur.execute("""
+        UPDATE user_balance
+        SET winner_carried=TRUE,
+            updated_at=NOW()
+        WHERE group_id=%s AND winner_carried=FALSE AND prize_balance > 0
+    """, (group_id,))
+
     conn.commit()
     cur.close()
     conn.close()
@@ -1383,20 +1404,90 @@ def admin_remove_player(game_id: int, number: int, slot: int = None):
     conn.close()
 
 
+# ============================================================
+# FIX 3: admin_mark_paid — balance deduction when admin marks ✅
+# ============================================================
+
 def admin_mark_paid(game_id: int, number: int, slot: int, is_paid: bool = True):
     conn = get_conn()
     cur = conn.cursor()
+
+    if not is_paid:
+        cur.execute("""
+            UPDATE registrations SET is_paid=%s
+            WHERE game_id=%s AND number=%s AND slot=%s
+        """, (is_paid, game_id, number, slot))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    # is_paid=TRUE ሲሆን — user balance ካለ ይቀንሳል
     cur.execute("""
-        UPDATE registrations SET is_paid=%s
+        SELECT r.user_id, r.is_half, r.is_paid,
+               gs.price_full, gs.price_half, gs.group_id
+        FROM registrations r
+        JOIN game_settings gs ON gs.id = r.game_id
+        WHERE r.game_id=%s AND r.number=%s AND r.slot=%s
+    """, (game_id, number, slot))
+    row = cur.fetchone()
+
+    if not row:
+        cur.close()
+        conn.close()
+        return
+
+    user_id, is_half, already_paid, price_full, price_half, group_id = row
+    price_full = float(price_full or 0)
+    price_half = float(price_half or 0)
+
+    cur.execute("""
+        UPDATE registrations SET is_paid=TRUE
         WHERE game_id=%s AND number=%s AND slot=%s
-    """, (is_paid, game_id, number, slot))
+    """, (game_id, number, slot))
+
+    # already paid ከሆነ balance አንቀንስ
+    if already_paid or not user_id or user_id == 0:
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    # cost ማስላት
+    cost = price_half if is_half else price_full
+
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, user_id))
+    bal_row = cur.fetchone()
+    if not bal_row:
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    carry_balance = float(bal_row[0])
+    prize_balance = float(bal_row[1])
+    total_balance = carry_balance + prize_balance
+
+    if total_balance <= 0:
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    # balance ይቀንሳል (cost ያህል ወይም ያለው ብቻ)
+    deduct = min(cost, total_balance)
+    _deduct_balance(cur, group_id, user_id, deduct, prize_balance, carry_balance)
+
     conn.commit()
     cur.close()
     conn.close()
 
 
 # ============================================================
-# TYPE CHANGE
+# TYPE CHANGE — FIX 1: balance transfer to own unpaid numbers
 # ============================================================
 
 def change_number_type(game_id: int, user_id: int, number: int, target: str) -> dict:
@@ -1444,14 +1535,45 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
         if is_paid:
             refund = price_full - price_half
             if refund > 0:
-                # refund → carry_balance ላይ ይጨምራል
                 new_carry = carry_balance + refund
-                new_total = new_carry + prize_balance
+                new_prize = prize_balance
+                new_total = new_carry + new_prize
+
                 cur.execute("""
                     UPDATE user_balance
                     SET carry_balance=%s, balance=%s, updated_at=NOW()
                     WHERE group_id=%s AND telegram_id=%s
                 """, (new_carry, new_total, group_id, user_id))
+
+                # ✅ FIX 1: refund ብር ራሱ ያዛቸው unpaid numbers ላይ ይሄዳል
+                cur.execute("""
+                    SELECT id, number, is_half, slot
+                    FROM registrations
+                    WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND number != %s
+                    ORDER BY registered_at, slot
+                """, (game_id, user_id, number))
+                unpaid_own = cur.fetchall()
+
+                remaining_carry = new_carry
+                remaining_prize = new_prize
+                for reg_id2, reg_num, reg_is_half, reg_slot in unpaid_own:
+                    cost2 = price_half if reg_is_half else price_full
+                    if remaining_carry + remaining_prize >= cost2:
+                        cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id2,))
+                        if remaining_prize >= cost2:
+                            remaining_prize -= cost2
+                        else:
+                            diff = cost2 - remaining_prize
+                            remaining_prize = 0
+                            remaining_carry -= diff
+
+                new_total2 = remaining_carry + remaining_prize
+                cur.execute("""
+                    UPDATE user_balance
+                    SET carry_balance=%s, prize_balance=%s, balance=%s, updated_at=NOW()
+                    WHERE group_id=%s AND telegram_id=%s
+                """, (remaining_carry, remaining_prize, new_total2, group_id, user_id))
+
         else:
             if total_balance >= price_half:
                 cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
@@ -1468,6 +1590,43 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
         if total_balance >= charge:
             cur.execute("UPDATE registrations SET is_half=FALSE, is_paid=TRUE, is_nekay=FALSE WHERE id=%s", (reg_id,))
             _deduct_balance(cur, group_id, user_id, charge, prize_balance, carry_balance)
+
+            # ✅ FIX 1: ቀሪ balance ራሱ ያዛቸው unpaid numbers ላይ ይሄዳል
+            cur.execute("""
+                SELECT carry_balance, prize_balance FROM user_balance
+                WHERE group_id=%s AND telegram_id=%s
+            """, (group_id, user_id))
+            updated_bal = cur.fetchone()
+            if updated_bal:
+                rem_carry = float(updated_bal[0])
+                rem_prize = float(updated_bal[1])
+
+                cur.execute("""
+                    SELECT id, number, is_half, slot
+                    FROM registrations
+                    WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND number != %s
+                    ORDER BY registered_at, slot
+                """, (game_id, user_id, number))
+                unpaid_own = cur.fetchall()
+
+                for reg_id2, reg_num, reg_is_half, reg_slot in unpaid_own:
+                    cost2 = price_half if reg_is_half else price_full
+                    if rem_carry + rem_prize >= cost2:
+                        cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id2,))
+                        if rem_prize >= cost2:
+                            rem_prize -= cost2
+                        else:
+                            diff = cost2 - rem_prize
+                            rem_prize = 0
+                            rem_carry -= diff
+
+                new_total2 = rem_carry + rem_prize
+                cur.execute("""
+                    UPDATE user_balance
+                    SET carry_balance=%s, prize_balance=%s, balance=%s, updated_at=NOW()
+                    WHERE group_id=%s AND telegram_id=%s
+                """, (rem_carry, rem_prize, new_total2, group_id, user_id))
+
             conn.commit()
             cur.close()
             conn.close()
@@ -1475,7 +1634,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
         else:
             cur.execute("UPDATE registrations SET is_half=FALSE, is_paid=FALSE, is_nekay=FALSE WHERE id=%s", (reg_id,))
             if is_paid:
-                # refund → carry_balance ላይ
                 new_carry = carry_balance + price_half
                 new_total = new_carry + prize_balance
                 cur.execute("""
@@ -1835,7 +1993,6 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
     cur.execute("DELETE FROM registrations WHERE game_id=%s AND user_id=%s AND number=%s", (game_id, user_id, number))
 
     if refund > 0:
-        # refund → carry_balance ላይ ይጨምራል
         cur.execute("""
             SELECT carry_balance, prize_balance FROM user_balance
             WHERE group_id=%s AND telegram_id=%s
@@ -1855,7 +2012,6 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
                 carry_balance=%s, balance=%s, updated_at=NOW()
         """, (group_id, user_id, new_total, new_carry, prize_balance, new_carry, new_total))
 
-        # unpaid ቁጥሮች ለመክፈል ይሞክራል
         cur.execute("""
             SELECT id, number, is_half, slot
             FROM registrations
@@ -2162,4 +2318,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-                     }
+                              }
