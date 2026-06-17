@@ -6,7 +6,10 @@ FULL_WORDS = ["bemulu", "mulu", "በሙሉ", "ሙሉ"]
 GLOBAL_HALF_WORDS = ["ሁሉንም በግማሽ", "ሁሉንም ግማሽ", "ሁሉም በግማሽ", "hulunm begmash", "hulunm gmash"]
 GLOBAL_FULL_WORDS = ["ሁሉንም በሙሉ", "ሁሉንም ሙሉ", "ሁሉም ሙሉ", "hulunm bemulu", "hulunm mulu"]
 
-NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + [
+# "በ" / "be" / "bet" — ዋጋ prefix words
+PRICE_PREFIX_WORDS = ["በ", "be", "bet", "b"]
+
+NON_NAME_WORDS = set([w.lower() for w in HALF_WORDS + FULL_WORDS + PRICE_PREFIX_WORDS + [
     "yaz", "yazligni", "ያዝ", "ፃፍ", "መዝግብ", "bel", "belaw", "በላቸው",
     "yaze", "yazat", "ble", "yibelachew", "yibelat",
     "awo", "aydelem", "yes", "no", "aha",
@@ -31,12 +34,9 @@ NEBER_WORDS = {"ነበር", "ነበረ", "nebere", "neber"}
 # ================================================================
 # FUZZY MATCHING HELPERS
 # ================================================================
-# rapidfuzz.fuzz.ratio ምትክ difflib.SequenceMatcher.ratio() (built-in, install
-# አያስፈልገውም) ጥቅም ላይ ይውላል — ሁለቱም 0-100 scale ላይ ተመጣጣኝ ውጤት ይሰጣሉ።
-# Amharic እና Latin ፊደላት ላይ እኩል ይሰራል (Unicode strings ናቸው)።
 
 FUZZY_THRESHOLD = 70
-FUZZY_MIN_LEN = 3  # ከዚህ በታች ያሉ tokens fuzzy matching ውስጥ አይገቡም (false positive ለመቀነስ)
+FUZZY_MIN_LEN = 3
 
 
 def _fuzzy_ratio(a: str, b: str) -> float:
@@ -44,9 +44,6 @@ def _fuzzy_ratio(a: str, b: str) -> float:
 
 
 def _fuzzy_match(token: str, candidates) -> bool:
-    """token ከ candidates ዝርዝር ውስጥ ካለ ቃል ጋር exact ወይም fuzzy (>=FUZZY_THRESHOLD) ይመስል ይሁን አይሁን ይመልሳል።
-    Amharic እና Latin ሁለቱም ላይ ይሰራል። አጭር tokens (< FUZZY_MIN_LEN) exact match ብቻ ይፈቀዳል።
-    """
     tok_lower = token.lower()
     for cand in candidates:
         cand_lower = cand.lower()
@@ -71,6 +68,9 @@ def _is_full_word(w):
 
 def _is_non_name_word(w):
     return _fuzzy_match(w, NON_NAME_WORDS)
+
+def _is_price_prefix(w):
+    return w.lower() in PRICE_PREFIX_WORDS
 
 
 SEPARATOR_CHARS = set('+-/.,|*= \t\n')
@@ -134,13 +134,27 @@ def _pre_tokenize(text: str) -> list:
     text = re.sub(r'\bእና\b|\bና\b|\band\b', ' ', text, flags=re.IGNORECASE)
     text = re.sub(r'(?<!#)#(?!#)', ' ', text)
     text = re.sub(r'(\d+\+)(\d)', r'\1 \2', text)
-    parts = re.sub(r'[,.=/&?*]', ' ', text).split()
+    # = ምልክት ወደ space (ቁጥር=ቁጥር ለመለያየት)
+    parts = re.sub(r'[,./&?*]', ' ', text).split()
 
     for part in parts:
+        # num=num pattern — ይለያያል
+        if re.match(r'^\d+=\d+$', part):
+            left, right = part.split('=', 1)
+            sub = _split_pure_numbers(left)
+            tokens.extend(sub)
+            tokens.append(f"__PRICE__{right}")
+            continue
+        # num+ pattern
         if re.match(r'^[\d\+]+$', part):
             sub = _split_pure_numbers(part)
             tokens.extend(sub)
         else:
+            # be100 / በ100 pattern
+            m_price = re.match(r'^(be|bet|በ|b)(\d+)$', part, re.IGNORECASE)
+            if m_price:
+                tokens.append(f"__PRICE_PREFIX__{m_price.group(2)}")
+                continue
             sub = _split_mixed(part)
             tokens.extend(sub)
 
@@ -287,7 +301,6 @@ def _parse_token(tok: str):
 
 
 def _scan_for_half_full(tokens: list, start: int, skip_indices: set):
-    """start index ጀምሮ remaining tokens ውስጥ half/full word ይፈልጋል"""
     j = start
     while j < len(tokens):
         if j in skip_indices:
@@ -309,7 +322,21 @@ def _scan_for_half_full(tokens: list, start: int, skip_indices: set):
     return None, -1
 
 
-def parse_numbers(text: str):
+def _resolve_price_type(amount: float, price_full: float, price_half: float) -> str:
+    """ዋጋ ከ price_full/price_half ጋር ያወዳድራል — half ወይም full ይመልሳል"""
+    if price_half and price_half > 0:
+        diff_half = abs(amount - price_half)
+        diff_full = abs(amount - price_full)
+        if diff_half <= diff_full:
+            return "half"
+        else:
+            return "full"
+    if price_full and abs(amount - price_full) < price_full * 0.3:
+        return "full"
+    return "full"
+
+
+def parse_numbers(text: str, price_full: float = None, price_half: float = None):
     original = text.strip()
 
     stripped = original.rstrip()
@@ -325,6 +352,17 @@ def parse_numbers(text: str):
     numbers = []
     skip_indices = set()
 
+    # global price prefix check — "10 20 30 በ 50" / "10 20 30 be 50"
+    global_price_amount = None
+    for idx, tok in enumerate(tokens):
+        if tok.startswith("__PRICE_PREFIX__"):
+            amt_str = tok.replace("__PRICE_PREFIX__", "")
+            try:
+                global_price_amount = float(amt_str)
+                skip_indices.add(idx)
+            except ValueError:
+                pass
+
     i = 0
     while i < len(tokens):
         if i in skip_indices:
@@ -333,7 +371,23 @@ def parse_numbers(text: str):
 
         tok = tokens[i]
 
+        # __PRICE__ token — skip (ቁጥር አይደለም)
+        if tok.startswith("__PRICE__"):
+            i += 1
+            continue
+
         if not re.search(r'\d', tok):
+            # standalone price prefix check — "በ" / "be" ብቻ
+            tok_lower = tok.strip().lower()
+            if _is_price_prefix(tok_lower) and i + 1 < len(tokens):
+                nxt = tokens[i + 1]
+                if re.match(r'^\d+$', nxt.strip()):
+                    try:
+                        global_price_amount = float(nxt.strip())
+                        skip_indices.add(i)
+                        skip_indices.add(i + 1)
+                    except ValueError:
+                        pass
             i += 1
             continue
 
@@ -345,7 +399,25 @@ def parse_numbers(text: str):
         num, is_half, is_full, name = parsed
         name_from_token = name is not None
 
-        if i + 1 < len(tokens):
+        # __PRICE__ token ቀጥሎ ካለ — ዋጋ ያወጣ
+        inline_price = None
+        if i + 1 < len(tokens) and tokens[i + 1].startswith("__PRICE__"):
+            amt_str = tokens[i + 1].replace("__PRICE__", "")
+            try:
+                inline_price = float(amt_str)
+                skip_indices.add(i + 1)
+            except ValueError:
+                pass
+
+        if inline_price is not None and price_full:
+            ptype = _resolve_price_type(inline_price, price_full or 0, price_half or 0)
+            if ptype == "half":
+                is_half = True
+                is_full = False
+            else:
+                is_half = False
+                is_full = True
+        elif i + 1 < len(tokens):
             nxt = tokens[i + 1].strip()
             if not re.search(r'\d', nxt):
                 nxt_lower = nxt.lower()
@@ -374,6 +446,24 @@ def parse_numbers(text: str):
                     skip_indices.add(i + 1)
                     if name_from_token:
                         name = None
+                elif _is_price_prefix(nxt_lower) and i + 2 < len(tokens):
+                    # "21 be 100" / "21 በ 100"
+                    price_tok = tokens[i + 2].strip()
+                    if re.match(r'^\d+$', price_tok):
+                        try:
+                            inline_price2 = float(price_tok)
+                            skip_indices.add(i + 1)
+                            skip_indices.add(i + 2)
+                            if price_full:
+                                ptype = _resolve_price_type(inline_price2, price_full or 0, price_half or 0)
+                                if ptype == "half":
+                                    is_half = True
+                                    is_full = False
+                                else:
+                                    is_half = False
+                                    is_full = True
+                        except ValueError:
+                            pass
                 elif not _is_non_name_word(nxt_lower) and nxt_lower not in NEBER_WORDS and name is None:
                     collected, last_idx = _collect_name(tokens, i + 1, skip_indices)
                     if collected and _is_valid_name(collected):
@@ -410,6 +500,16 @@ def parse_numbers(text: str):
     if not re.search(r'\d', last_tok) and any(last_tok == fw.lower() for fw in ["bemulu", "mulu", "ሙሉ", "በሙሉ"]):
         is_global_full = True
 
+    # global price amount — ሁሉንም ቁጥሮች ዋጋ ያወዳድራል
+    if global_price_amount is not None and price_full:
+        ptype = _resolve_price_type(global_price_amount, price_full or 0, price_half or 0)
+        if ptype == "half":
+            is_global_half = True
+            is_global_full = False
+        else:
+            is_global_full = True
+            is_global_half = False
+
     result = []
     for num, is_half, is_full, name in numbers:
         if is_global_full:
@@ -420,7 +520,7 @@ def parse_numbers(text: str):
             is_half = False
         result.append((num, is_half, name))
 
-    # ስም propagation — መጨረሻ ላይ 1 ስም ብቻ ሲሆን ለሁሉም ይሰጥ
+    # ስም propagation
     all_named = [(i, nm) for i, (_, _, nm) in enumerate(result) if nm]
     if len(all_named) == 1:
         only_idx, only_name = all_named[0]
@@ -475,7 +575,6 @@ if __name__ == "__main__":
         ("12አበበ begmash",           [(12, True,  None)]),
         ("11 አበበ በሙሉ",              [(11, False, None)]),
         ("11 አበበ ብለህ በሙሉ ያዝ",      [(11, False, None)]),
-        # OLDER FIXES
         ("11 አበበ begmash",          [(11, True,  "አበበ")]),
         ("11 አበበ ግማሽ",             [(11, True,  "አበበ")]),
         ("11 አበበ ግ",               [(11, True,  "አበበ")]),
@@ -484,26 +583,33 @@ if __name__ == "__main__":
         ("03 አበበ ብለህ begmash ያዝ",  [(3,  True,  "አበበ")]),
         ("01 አበበ +",               [(1,  True,  "አበበ")]),
         ("05 ሰለሞን +",              [(5,  True,  "ሰለሞን")]),
-        # FUZZY KEYWORD TESTS (typo variants)
         ("09 begmashi argew",       [(9,  True,  None)]),
         ("11 አበበ begmashi",         [(11, True,  "አበበ")]),
         ("12 gimash",               [(12, True,  None)]),
         ("12 በግምሽ",                [(12, True,  None)]),
         ("12 mulu adrig",           [(12, False, None)]),
-        # FALSE POSITIVE GUARDS — these are names, not half/full keywords
         ("11 ግማዶ",                 [(11, False, "ግማዶ")]),
         ("11 ግማሳ",                 [(11, False, "ግማሳ")]),
-        # YAZ/COMMAND WORD REGRESSION GUARD
         ("01 begmash yaz",          [(1,  True,  None)]),
         ("01+ yaz",                 [(1,  True,  None)]),
         ("01 አበበ ሰለሞን ብለህ ያዝ",    [(1,  False, "አበበ ሰለሞን")]),
+        # NEW — price-based tests (price_full=100, price_half=50)
+        ("11 በ 50",                 [(11, True,  None)]),
+        ("21=100",                  [(21, False, None)]),
+        ("11=50",                   [(11, True,  None)]),
+        ("21=100,11=50",            [(21, False, None), (11, True, None)]),
+        ("21 be 100",               [(21, False, None)]),
+        ("31 be 50",                [(31, True,  None)]),
+        ("10 20 30 በ 50",           [(10, True,  None), (20, True, None), (30, True, None)]),
+        ("10 20 30 በ 100",          [(10, False, None), (20, False, None), (30, False, None)]),
+        ("11+ 21 31g 41",           [(11, True,  None), (21, False, None), (31, True, None), (41, False, None)]),
     ]
 
     print("=" * 50)
     passed = 0
     failed = 0
     for text, expected in tests:
-        result = parse_numbers(text)
+        result = parse_numbers(text, price_full=100, price_half=50)
         nums = result["numbers"] if result else None
         ok = nums == expected
         if ok:
