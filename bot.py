@@ -1262,6 +1262,20 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             continue
 
         is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
+
+        # ✅ FIX: user የራሱ ቁጥር ከሆነ directly change_number_type ጠራ
+        if user_owns_number(game_id, user_id, actual_num) and not is_nekay:
+            target_type = "half" if is_half else "full"
+            result_tc = change_number_type(game_id, user_id, actual_num, target_type)
+            if result_tc["status"] == "ok":
+                actual_is_half = result_tc.get("pending_upgrade", False) or is_half if result_tc.get("pending_upgrade") else is_half
+                registered.append((actual_num, actual_is_half))
+            elif result_tc["status"] == "no_change":
+                no_change_reply = True
+            elif result_tc["status"] == "conflict":
+                all_taken.append(actual_num)
+            continue
+
         result = register_number(
             game_id, user_id, actual_name, actual_num, is_half,
             force=is_nekay, allow_toggle=allow_toggle,
@@ -1415,7 +1429,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
             countdown_done.add(game_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
