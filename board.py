@@ -74,10 +74,10 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
     if len(entry) == 1:
         name, is_half, slot, is_paid, pending_upgrade = entry[0]
         check = "✅" if slot in paid_slots else ""
-        if is_half and is_paid:
-            return f"{name}{check}+"
-        elif is_half and not is_paid:
+        if is_half and not is_paid and slot == 1:
             return f"{name}?"
+        elif is_half:
+            return f"{name}{check}+"
         else:
             if pending_upgrade and check:
                 return f"{name}{check}?"
@@ -91,7 +91,7 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
         return f"{name1}{check1}+{name2}{check2}"
 
     return ""
-
+    
 def get_group_start(number: int, per_person: int) -> int:
     return ((number - 1) // per_person) * per_person + 1
 
