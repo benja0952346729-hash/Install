@@ -1253,9 +1253,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_nekay = (nekay_snap_value is not None)
         is_nekay_force = (nekay_snap_value == 0)
 
-        # ✅ FIX: force-replace ጊዜ ሁልጊዜ አዲሱን user_name ተጠቀም
+        # ✅ FIX: force-replace ጊዜ parsed_name ካለ እሱን ተጠቀም፣ ካልሆነ telegram name
         if is_nekay_force:
-            actual_name = user_name
+            actual_name = parsed_name if parsed_name else user_name
         elif parsed_name:
             actual_name = parsed_name
         elif actual_num in taken_before:
