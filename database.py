@@ -1733,7 +1733,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
         else:
             cur.execute("""
                 UPDATE registrations
-                SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
+                SET is_nekay=FALSE, pending_upgrade=TRUE
                 WHERE id=%s
             """, (reg_id,))
             conn.commit()
@@ -1744,7 +1744,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
     cur.close()
     conn.close()
     return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
-
 
 # ============================================================
 # FAILED ATTEMPTS
@@ -2417,4 +2416,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-    }
+            }
