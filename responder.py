@@ -2,69 +2,44 @@ import re
 import math
 import random
 from collections import defaultdict
-from rapidfuzz import fuzz
 
 # ================================================================
 # AMHARIC → LATIN TRANSLITERATOR
 # ================================================================
 
 FIDEL_TO_LATIN = {
-    # ሀ family
     "ሀ": "ha", "ሁ": "hu", "ሂ": "hi", "ሃ": "ha", "ሄ": "he", "ህ": "h", "ሆ": "ho",
     "ሐ": "ha", "ሑ": "hu", "ሒ": "hi", "ሓ": "ha", "ሔ": "he", "ሕ": "h", "ሖ": "ho",
-    # ለ family
     "ለ": "le", "ሉ": "lu", "ሊ": "li", "ላ": "la", "ሌ": "le", "ል": "l", "ሎ": "lo",
-    # መ family
     "መ": "me", "ሙ": "mu", "ሚ": "mi", "ማ": "ma", "ሜ": "me", "ም": "m", "ሞ": "mo",
-    # ሰ family
     "ሰ": "se", "ሱ": "su", "ሲ": "si", "ሳ": "sa", "ሴ": "se", "ስ": "s", "ሶ": "so",
     "ሠ": "se", "ሡ": "su", "ሢ": "si", "ሣ": "sa", "ሤ": "se", "ሥ": "s", "ሦ": "so",
-    # ሸ family
     "ሸ": "she", "ሹ": "shu", "ሺ": "shi", "ሻ": "sha", "ሼ": "she", "ሽ": "sh", "ሾ": "sho",
-    # ቀ family
     "ቀ": "qe", "ቁ": "qu", "ቂ": "qi", "ቃ": "qa", "ቄ": "qe", "ቅ": "q", "ቆ": "qo",
     "ቈ": "qo", "ቊ": "qu", "ቋ": "qua", "ቌ": "qe", "ቍ": "qu",
-    # በ family
     "በ": "be", "ቡ": "bu", "ቢ": "bi", "ባ": "ba", "ቤ": "be", "ብ": "b", "ቦ": "bo",
-    # ተ family
     "ተ": "te", "ቱ": "tu", "ቲ": "ti", "ታ": "ta", "ቴ": "te", "ት": "t", "ቶ": "to",
-    # ቸ family
     "ቸ": "che", "ቹ": "chu", "ቺ": "chi", "ቻ": "cha", "ቼ": "che", "ች": "ch", "ቾ": "cho",
-    # ነ family
     "ነ": "ne", "ኑ": "nu", "ኒ": "ni", "ና": "na", "ኔ": "ne", "ን": "n", "ኖ": "no",
     "ኘ": "nye", "ኙ": "nyu", "ኚ": "nyi", "ኛ": "nya", "ኜ": "nye", "ኝ": "ny", "ኞ": "nyo",
-    # አ family
     "አ": "a", "ኡ": "u", "ኢ": "i", "ኣ": "a", "ኤ": "e", "እ": "e", "ኦ": "o",
-    # ከ family
     "ከ": "ke", "ኩ": "ku", "ኪ": "ki", "ካ": "ka", "ኬ": "ke", "ክ": "k", "ኮ": "ko",
-    # ወ family
     "ወ": "we", "ዉ": "wu", "ዊ": "wi", "ዋ": "wa", "ዌ": "we", "ው": "w", "ዎ": "wo",
-    # የ family
     "የ": "ye", "ዩ": "yu", "ዪ": "yi", "ያ": "ya", "ዬ": "ye", "ይ": "y", "ዮ": "yo",
-    # ደ family
     "ደ": "de", "ዱ": "du", "ዲ": "di", "ዳ": "da", "ዴ": "de", "ድ": "d", "ዶ": "do",
-    # ዘ family
     "ዘ": "ze", "ዙ": "zu", "ዚ": "zi", "ዛ": "za", "ዜ": "ze", "ዝ": "z", "ዞ": "zo",
-    # ዠ family
     "ዠ": "zhe", "ዡ": "zhu", "ዢ": "zhi", "ዣ": "zha", "ዤ": "zhe", "ዥ": "zh", "ዦ": "zho",
-    # ጀ family
     "ጀ": "je", "ጁ": "ju", "ጂ": "ji", "ጃ": "ja", "ጄ": "je", "ጅ": "j", "ጆ": "jo",
-    # ገ family
     "ገ": "ge", "ጉ": "gu", "ጊ": "gi", "ጋ": "ga", "ጌ": "ge", "ግ": "g", "ጎ": "go",
-    # ጠ family
     "ጠ": "te", "ጡ": "tu", "ጢ": "ti", "ጣ": "ta", "ጤ": "te", "ጥ": "t", "ጦ": "to",
-    # ጰ family
     "ጰ": "pe", "ጱ": "pu", "ጲ": "pi", "ጳ": "pa", "ጴ": "pe", "ጵ": "p", "ጶ": "po",
-    # ጸ/ፀ family
     "ጸ": "tse", "ጹ": "tsu", "ጺ": "tsi", "ጻ": "tsa", "ጼ": "tse", "ጽ": "ts", "ጾ": "tso",
     "ፀ": "tse", "ፁ": "tsu", "ፂ": "tsi", "ፃ": "tsa", "ፄ": "tse", "ፅ": "ts", "ፆ": "tso",
-    # ፈ family
     "ፈ": "fe", "ፉ": "fu", "ፊ": "fi", "ፋ": "fa", "ፌ": "fe", "ፍ": "f", "ፎ": "fo",
-    # ፐ family
     "ፐ": "pe", "ፑ": "pu", "ፒ": "pi", "ፓ": "pa", "ፔ": "pe", "ፕ": "p", "ፖ": "po",
-    # punctuation
     "።": ".", "፣": ",", "፤": ";", "፥": ":", "፦": ":-", "፧": "?", "፨": "*",
 }
+
 
 def to_latin(text: str) -> str:
     result = []
@@ -75,199 +50,6 @@ def to_latin(text: str) -> str:
             result.append(ch.lower())
     return "".join(result)
 
-
-# ================================================================
-# LATIN → AMHARIC KEYWORD MAP
-# ================================================================
-
-LATIN_TO_AMHARIC = {
-    "yaz": "ያዝ", "yazat": "ያዛት", "yazachew": "ያዛቸው",
-    "tsafligni": "ፃፍልኝ", "tsaf": "ፃፍ", "yazligni": "ያዝልኝ",
-    "mezgib": "መዝግብ", "mezgibat": "መዝግባት", "mezgibligni": "መዝግብልኝ",
-    "qeri": "ቀሪ", "keri": "ቀሪ",
-    "qitr": "ቁጥር", "kitr": "ቁጥር",
-    "min ale": "ምን አለ",
-    "sint qere": "ስንት ቀረ", "sint kere": "ስንት ቀረ",
-    "sint ale": "ስንት አለ",
-    "qeri ale": "ቀሪ አለ", "keri ale": "ቀሪ አለ",
-    "qitr ale": "ቁጥር አለ", "kitr ale": "ቁጥር አለ",
-    "yalteyaze": "ያልተያዘ", "yalteyazun": "ያልተያዙ",
-    "nekay": "ነቃይ", "tenekay": "ተነቃይ", "nkay": "ነቃይ",
-    "nekay ale": "ነቃይ አለ", "nekay zerzir": "ነቃይ ዘርዝር",
-    "nekay neger": "ነቃይ ንገር", "nekay lak": "ነቃይ ላክ",
-    "nekayoch": "ነቃዮች", "mishit ale": "ሚሸጥ አለ",
-    "nekay zerzirligni": "ነቃይ ዘርዝርልኝ",
-    "nekay negerign": "ነቃይ ንገረኝ",
-    "nekay qitroch": "ነቃይ ቁጥሮች", "nekay kitroch": "ነቃይ ቁጥሮች",
-    "tenekay ale": "ተነቃይ አለ",
-    "nekay asayen": "ነቃይ አሳየኝ",
-    "nekay asay": "ነቃይ አሳይ",
-    "nekay asaygn": "ነቃይ አሳይ",
-    "nekay awqegn": "ነቃይ አውቀኝ",
-    "nekay asayi": "ነቃይ አሳይ",
-    "hulunm teyazuwal": "ሁሉም ተይዘዋል",
-    "hulunm teyaze": "ሁሉም ተያዘ",
-    "hulunm alteyazum": "ሁሉም አልተያዙም",
-    "qeri lak": "ቀሪ ላክ", "keri lak": "ቀሪ ላክ",
-    "qitr lak": "ቁጥር ላክ", "kitr lak": "ቁጥር ላክ",
-    "kutr lak": "ቁጥር ላክ", "cutr lak": "ቁጥር ላክ",
-    "kutr ale": "ቁጥር አለ", "cutr ale": "ቁጥር አለ",
-    "kutr": "ቁጥር", "cutr": "ቁጥር",
-    "qeri asayen": "ቀሪ አሳየኝ", "keri asayen": "ቀሪ አሳየኝ",
-    "tolo tolo qeri lak": "ቶሎ ቶሎ ቀሪ ላክ", "tolo tolo keri lak": "ቶሎ ቶሎ ቀሪ ላክ",
-    "teyaze": "ተያዘ", "teyazo": "ተይዞ", "teyazuwal": "ተይዙዋል",
-    "awo": "አዎ", "aydelem": "አይደለም",
-    "tnx": "አመሰግናለሁ", "thanks": "አመሰግናለሁ",
-    "ale": "አለ",
-    "serzew": "ሰርዝ", "srez": "ሰርዝ", "serz": "ሰርዝ",
-    "shitew": "ሽጠው", "shtew": "ሽጠው", "shitkhew": "ሽጠው", "shetek": "ሽጠው",
-    "atfaw": "አጥፋው", "atfa": "አጥፋው", "yitfa": "ይጥፋ",
-    "awta": "አውጣ", "awuta": "አውጣ",
-    "alfeligm": "አልፈልግም", "alfelegim": "አልፈልግም", "alfelegm": "አልፈልግም",
-    "tenekelku": "ተነቀልኩ", "teneklku": "ተነቀልኩ", "nekelku": "ተነቀልኩ",
-    "qitr tenekelk": "ቁጥር ተነቀለ", "kitr tenekelk": "ቁጥር ተነቀለ",
-    "number tenekelk": "ቁጥር ተነቀለ",
-    "lmin shitkhew": "ለምን ሸጥከው", "lmin shitkh": "ለምን ሸጥከው",
-    "lmin shetek": "ለምን ሸጥከው", "lemin shetek": "ለምን ሸጥከው",
-    "lmin tenklaleh": "ለምን ትነቅላለህ", "lmin tinklaleh": "ለምን ትነቅላለህ",
-    "why shetek": "ለምን ሸጥህ", "why teneklaleh": "ለምን ትነቅላለህ",
-    "kefye nekelk": "ከፍዬ ነቀልክ", "kefye neklek": "ከፍዬ ነቀልክ",
-    "tekeflo nekelk": "ተከፍሎ ነቀልክ", "tekefilo neklek": "ተከፍሎ ነቀልክ",
-    "kefye shetk": "ከፍዬ ሸጥክ", "kefye shetkh": "ከፍዬ ሸጥክ",
-    "likeyalew lmin": "ልክያለው ለምን", "likyalew lemin": "ልክያለው ለምን",
-    "telkuwal lmin nekelk": "ተልኩዋል ለምን ነቀልክ",
-    "telkual lmin": "ተልኩዋል ለምን",
-    "like tineklaleh": "ልኬ ትነቅላለህ", "lke tinklaleh": "ልኬ ትነቅላለህ",
-    "lkuwal lmin": "ልክያለው ለምን", "selkuwal lemin": "ልክያለው ለምን",
-    "payment ale lmin": "ከፍዬ ሸጥክ", "lefkuwal lmin": "ልክያለው ለምን",
-    "selam": "ሰላም", "salam": "ሰላም", "selem": "ሰላም", "selaam": "ሰላም",
-    "hi": "ሰላም", "hay": "ሰላም", "hello": "ሰላም", "helo": "ሰላም",
-    "endet neh": "እንዴት ነህ", "endet ne": "እንዴት ነህ", "indet neh": "እንዴት ነህ",
-    "dena aderk": "ደና አደርክ", "dena adek": "ደና አደርክ", "dena adrk": "ደና አደርክ",
-    "dena walk": "ደና ዋልክ",
-    "endet amesheh": "እንዴት አመሸህ", "indet amesheh": "እንዴት አመሸህ",
-    "selam amesheh": "ሰላም አመሸህ",
-    "beselam aderk": "በሰላም አደርክ", "beselam adek": "በሰላም አደርክ",
-    "endet arefedek": "እንዴት አረፈድክ", "indet arefedek": "እንዴት አረፈድክ",
-    "tena yistilign": "ጤና ይስጥልኝ", "tena yistligni": "ጤና ይስጥልኝ",
-    "endemen nachuh": "እንደምን ናችሁ", "endemen nacuh": "እንደምን ናችሁ",
-    "wede": "ወደ",
-    "qeyir": "ቀይር", "keyir": "ቀይር",
-    "qeyirew": "ቀይረው", "keyirew": "ቀይረው",
-    "qeyirligni": "ቀይርልኝ", "keyirligni": "ቀይርልኝ",
-    "lewet": "ለወጥ", "lewetew": "ለወጠው", "lewetligni": "ለወጥልኝ",
-    "azawir": "አዛውር", "azawrew": "አዛውረው",
-    "yihun": "ይሁን",
-    "tew": "ተው",
-    "arig": "አርግ", "arigew": "አርገው",
-    "adrg": "አድርግ", "adrgew": "አድርገው",
-    "change arig": "ቀይር አርግ",
-    "change adrig": "ቀይር አድርግ",
-    "change arigew": "ቀይር አርገው",
-    "account lak": "አካውንት ላክ",
-    "acount lak": "አካውንት ላክ",
-    "account lai": "አካውንት ላኪ",
-    "acount lai": "አካውንት ላኪ",
-    "account info": "አካውንት ላክ",
-    "acount info": "አካውንት ላክ",
-    "account negeregn": "አካውንት ንገረኝ",
-    "acount negeregn": "አካውንት ንገረኝ",
-    "account asayen": "አካውንት አሳየኝ",
-    "acount asayen": "አካውንት አሳየኝ",
-    "account yetale": "አካውንት የታለ",
-    "acount yetale": "አካውንት የታለ",
-    "account ale": "አካውንት ካለ",
-    "acount ale": "አካውንት ካለ",
-    "nigid bank account": "ንግድ ባንክ አካውንት",
-    "nigid bank lak": "ንግድ ባንክ ላክ",
-    "nigid bank number": "ንግድ ባንክ ቁጥር",
-    "nigid bank": "ንግድ ባንክ",
-    "commercial bank": "ንግድ ባንክ",
-    "bank account": "ባንክ አካውንት",
-    "cbe account": "ሲቢኢ አካውንት",
-    "cbe lak": "ሲቢኢ ላክ",
-    "cbe number": "ሲቢኢ ቁጥር",
-    "cbe": "ሲቢኢ",
-    "telebirr account": "ቴሌብር አካውንት",
-    "telebirr acount": "ቴሌብር አካውንት",
-    "telebirr lak": "ቴሌብር ላክ",
-    "telebirr number": "ቴሌብር ቁጥር",
-    "telebirr": "ቴሌብር",
-    "telebr account": "ቴሌብር አካውንት",
-    "telebr lak": "ቴሌብር ላክ",
-    "telebr number": "ቴሌብር ቁጥር",
-    "telebr": "ቴሌብር",
-    "awash account": "አዋሽ አካውንት",
-    "awash acount": "አዋሽ አካውንት",
-    "awash lak": "አዋሽ ላክ",
-    "awash number": "አዋሽ ቁጥር",
-    "awash numer": "አዋሽ ቁጥር",
-    "awash": "አዋሽ",
-    "payment number": "የሚከፈልበት ቁጥር",
-    "payment info": "አካውንት ላክ",
-    "yemikefelbew number": "የሚከፈልበት ቁጥር",
-    "account": "አካውንት",
-    "acount": "አካውንት",
-    "acawnt": "አካውንት",
-    "akownt": "አካውንት",
-    "akawnt": "አካውንት",
-    "akaunt": "አካውንት",
-    "akount": "አካውንት",
-    "acwnt": "አካውንት",
-    "bemulu areg": "በሙሉ አርግ",
-    "bemulu adrig": "በሙሉ አድርግ",
-    "bemulu yihun": "በሙሉ ይሁን",
-    "begmash areg": "በግማሽ አርግ",
-    "begmash adrig": "በግማሽ አድርግ",
-    "begmash yihun": "በግማሽ ይሁን",
-    "gmash areg": "ግማሽ አርግ",
-    "gmash yihun": "ግማሽ ይሁን",
-    "mulu areg": "ሙሉ አርግ",
-    "mulu yihun": "ሙሉ ይሁን",
-    "lmin alyazkilgnim": "ለምን አልያዝክልኝም",
-    "lmin altsafkilgnim": "ለምን አልፃፍክልኝም",
-    "lmin almezegbkegnim": "ለምን አልመዘገብከኝም",
-    "lmin qitire alteyazem": "ለምን ቁጥሬ አልተያዘም",
-    "lmin kitire alteyazem": "ለምን ቁጥሬ አልተያዘም",
-    "lmin algeba": "ለምን አልገባም",
-    "lmin sayiyaz qere": "ለምን ሳይያዝ ቀረ",
-    "lmin sayiyaz kere": "ለምን ሳይያዝ ቀረ",
-    "lmin alteyazelign": "ለምን አልተያዘልኝም",
-    "lmin altemezegebem": "ለምን አልተመዘገበም",
-    "qitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
-    "kitire lmin alteyazem": "ቁጥሬ ለምን አልተያዘም",
-    "lmin alasgegabhegnim": "ለምን አላስገባኸኝም",
-    "sint new": "ስንት ነው",
-    "bale sint new": "ባለ ስንት ነው",
-    "sint lilaк": "ስንት ልላክ",
-    "sint br lilaк": "ስንት ብር ልላክ",
-    "derashn sint new": "ደራሽ ስንት ነው",
-    "sint derash new": "ስንት ደራሽ ነው",
-    "sint sew new": "ስንት ሰው ነው",
-    "sint sew qere": "ስንት ሰው ቀረ",
-    "wetset": "ውጤት",
-    "wetset asawqen": "ውጤት አሳውቀን",
-    "br alderesegnim": "ብር አልደረሰኝም",
-    "br algeba": "ብር አልገባም",
-    # ── NEW ──
-    "min qitr yazk": "ምን ቁጥር ያዝክ",
-    "sint qitr yazk": "ስንት ቁጥር ያዝክ",
-    "min qitroch yazk": "ምን ቁጥሮች ያዝክ",
-    "yaze qitroch": "ያዘ ቁጥሮች",
-    "yaze qitr": "ያዘ ቁጥር",
-    "le man yaze": "ለማን ያዘ",
-    "le man mezegbk": "ለማን መዘገብክ",
-    "link laklign": "ሊንክ ላክልኝ",
-    "link lak": "ሊንክ ላክ",
-    "chewataw yiftsen": "ጫወታው ይፍጠን",
-    "fetsen fetsen": "ፈጠን ፈጠን",
-    "tolo tolo achawten": "ቶሎ ቶሎ አጫውተን",
-}
-
-
-# ================================================================
-# UNIFIED NORMALIZER
-# ================================================================
 
 def normalize_to_latin(text: str) -> str:
     result = []
@@ -297,6 +79,7 @@ ACCOUNT_PATTERNS = [
     r"\d{10,}",
 ]
 
+
 def _extract_account_lines(payment_info: str) -> str:
     if not payment_info:
         return ""
@@ -312,7 +95,7 @@ def _extract_account_lines(payment_info: str) -> str:
 
 
 # ================================================================
-# CHANGE NUMBER PATTERN DETECTOR
+# CHANGE NUMBER / TYPE CHANGE DETECTORS
 # ================================================================
 
 CHANGE_CANCEL_WORDS_LAT = ["alfelegm", "alfeligm", "tew", "atfa", "atfaw", "serz", "serzew"]
@@ -322,6 +105,7 @@ CHANGE_CONFIRM_WORDS_LAT = [
     "lewet", "lewetew", "lewetligni", "azawir", "azawrew",
 ]
 CHANGE_WEDE_WORDS_LAT = ["wede", "to"]
+
 
 def detect_change_number(text: str):
     latin = normalize_to_latin(text)
@@ -341,10 +125,6 @@ def detect_change_number(text: str):
         return (from_num, to_num)
     return None
 
-
-# ================================================================
-# TYPE CHANGE DETECTOR
-# ================================================================
 
 def detect_type_change(text: str):
     latin = normalize_to_latin(text)
@@ -412,10 +192,6 @@ INTENT_EXAMPLES = {
         "ሰላም እንዴት ነህ", "ሰላም ወዳጄ", "ሰላምታ",
         "hi", "hello", "hey",
         "selam", "salam", "selem",
-        "endet neh", "indet neh",
-        "dena aderk", "dena walk",
-        "tena yistilign",
-        "endemen nachuh",
     ],
     "cancel_number": [
         "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
@@ -424,11 +200,6 @@ INTENT_EXAMPLES = {
         "አልፈለኩም", "አልፈልገውም", "አልፈልጋቸውም",
         "አያስፈልገኝም", "cancel ነው", "drop አርግ",
         "ትቼዋለሁ", "cancel አርግ", "ሰርዝልኝ ቁጥሩን",
-        "alfeligm", "alfelegim", "alfelegm",
-        "serzew", "srez", "serz",
-        "atfaw", "atfa", "yitfa",
-        "awta", "awuta",
-        "cancel", "drop",
     ],
     "complaint_removed": [
         "ተነቀልኩ", "ቁጥሬ ተነቀለ", "ቁጥሬ ጠፋ", "ቁጥሬ ሄደ",
@@ -436,22 +207,11 @@ INTENT_EXAMPLES = {
         "ቁጥሬ የለም", "ቁጥሬ ጠፋ ለምን", "ቁጥሬ ሄደ ለምን",
         "ቁጥሬ ተቀነሰ", "ቁጥሬ ተወሰደ ለምን",
         "ቁጥሬ ለምን ተነቀለ", "ቁጥሬ ለምን ጠፋ",
-        "ቁጥሬ ለምን ሄደ", "ቁጥሬ ለምን ተወሰደ",
-        "ቁጥሬ ተነቅሏል", "ቁጥሬ ጠፍቷል",
-        "tenekelku", "teneklku", "nekelku",
-        "number tenekelk", "number hede", "number yellem",
-        "lmin tenekelku", "tenekelku eko",
-        "lmin nekelku", "lmin tenekelk",
     ],
     "complaint_why_sold": [
         "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
         "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
         "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥከው",
-        "ለምን ቁጥሬን ነቀልክ", "ቁጥሬ ለምን ሄደ",
-        "lmin shitkhew", "lmin shitkh",
-        "lmin shetek", "lemin shetek",
-        "lmin tenklaleh", "lmin tinklaleh",
-        "why shetek", "why teneklaleh",
     ],
     "complaint_paid_removed": [
         "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
@@ -459,25 +219,12 @@ INTENT_EXAMPLES = {
         "ልክያለው ለምን", "ልኬ ትነቅላለህ",
         "ብሬ ተልኳል ለምን ነቀልክ", "ገንዘብ ልኬ ነቀልክ",
         "ከፈልኩ ለምን ሸጥክ", "ልኩዋል ለምን", "ተልኩዋል ሸጥክ",
-        "payment ላኩ ለምን ሸጥክ", "ከፍዬ ቁጥሬ ሄደ",
-        "kefye nekelk", "kefye neklek",
-        "tekeflo nekelk", "tekefilo neklek",
-        "kefye shetk", "kefye shetkh",
-        "likeyalew lmin", "likyalew lemin",
-        "telkuwal lmin nekelk", "telkual lmin",
-        "like tineklaleh", "lke tinklaleh",
-        "lkuwal lmin", "selkuwal lemin",
-        "payment ale lmin", "lefkuwal lmin",
     ],
     "change_number": [
         "ወደ ቀይር", "ቀይር", "ቀይረው", "ቀይርልኝ",
         "ለወጥ", "ለወጠው", "ለወጥልኝ", "አዛውር", "አዛውረው",
         "ቁጥሩን ቀይር", "ቁጥሩን ለወጥ", "ቁጥሬን ቀይርልኝ",
         "change አርግ", "ቁጥሩን change አርግ",
-        "qeyir", "keyir", "qeyirew", "keyirew",
-        "lewet", "lewetew", "azawir", "azawrew",
-        "change arig", "change adrig",
-        "wede qeyir", "wede keyir",
     ],
     "account_query": [
         "አካውንት", "አካውንት ላክ", "አካውንት ምንድን ነው",
@@ -486,92 +233,52 @@ INTENT_EXAMPLES = {
         "የሚከፈልበት ቁጥር", "የባንክ ቁጥር", "ባንክ አካውንት",
         "ላኩ ወዴት", "ገንዘብ ወዴት ልላክ",
         "ቴሌብር አካውንት ስጠኝ", "ወዴት ልከፍል",
-        "account lak", "acount lak",
-        "account info", "acount info",
-        "telebirr", "telebr",
-        "awash", "cbe",
-        "nigid bank", "commercial bank",
-        "payment number", "payment info",
     ],
     "type_change": [
         "በሙሉ አርግ", "በሙሉ አድርግ", "በሙሉ ይሁን", "በሙሉ ቀይረው",
         "ሙሉ አርግ", "ሙሉ ይሁን",
         "በግማሽ አርግ", "በግማሽ አድርግ", "በግማሽ ይሁን", "በግማሽ ቀይረው",
         "ግማሽ አርግ", "ግማሽ ይሁን",
-        "gmash areg", "bemulu areg", "begmash areg",
-        "bemulu adrig", "begmash adrig",
-        "bemulu yihun", "begmash yihun",
-        "mulu areg", "mulu yihun",
     ],
     "why_not_registered": [
         "ለምን አልያዝክልኝም", "ለምን አልፃፍክልኝም", "ለምን አልመዘገብከኝም",
         "ለምን ቁጥሬ አልተያዘም", "ለምን ቁጥሩ አልተያዘም",
         "ቁጥሩ ለምን አልተያዘም", "ለምን አልገባም", "ለምን ሳይያዝ ቀረ",
         "ለምን አልያዘልኝም", "ለምን አልተመዘገበም",
-        "ለምን አልተያዘልኝም", "ለምን አላስገባኸኝም",
-        "lmin alyazkilgnim", "lmin altsafkilgnim",
-        "lmin qitire alteyazem", "lmin kitire alteyazem",
-        "lmin algeba",
-        "lmin sayiyaz qere", "lmin sayiyaz kere",
-        "lmin alteyazelign", "lmin altemezegebem",
-        "lmin alasgegabhegnim",
     ],
     "price_query": [
         "ስንት ነው", "በ ስንት ነው", "ስንት ብር ነው",
         "ባለ ስንት ነው", "መደብ ስንት ነው", "ባለ ስንት ብር ነው",
         "ዋጋ ስንት ነው", "ዋጋው ስንት ነው", "ምን ያህል ነው",
         "ምን ያህል ብር ነው", "ስንት ያስከፍላል",
-        "sint new", "bale sint new", "sint br new",
-        "wagaw sint new", "min yahil new",
     ],
     "prize_query": [
         "ደራሽ ስንት ነው", "ስንት ደራሽ ነው", "ባለ ስንት ደራሽ ነው",
         "ሽልማቱ ስንት ነው", "1ኛ ሽልማት ስንት ነው", "prize ስንት ነው",
         "ምን ያህል ደራሽ ነው", "ስንት ብር ደራሽ ነው",
-        "derash sint new", "sint derash new",
-        "shilmat sint new", "prize sint new",
-        "bale sint derash new",
     ],
     "players_query": [
         "ስንት ሰው ነው", "ከስንት ሰው ጋር ነው", "ለ ስንት ሰው ነው",
         "ምን ያህል ሰው ነው", "ስንት ሰዎች ናቸው",
         "ጨዋታው ለስንት ሰው ነው", "ስንት ተጫዋቾች ናቸው",
-        "sint sew new", "kesint sew gar new",
-        "le sint sew new", "min yahil sew new",
     ],
     "players_remaining_query": [
         "ስንት ሰው ቀረ", "ስንት ሰው ነው የቀረው", "ስንት ሰዎች ቀሩ",
         "ምን ያህል ሰው ቀረ", "ስንት ሰው ይቀራል",
         "ቀሪ ሰው ስንት ነው", "ስንት ሰው ይቀረዋል",
-        "sint sew qere", "sint sew new yekerehu",
-        "qeri sew sint new",
     ],
     "payment_not_received": [
         "ብር አልደረሰኝም", "አልገባልኝም", "ብር አልገባም",
         "ብር ላክልኝ", "ቀሪ ብር ላክልኝ", "ለምን አትልክም",
         "ብሬን ለምን አላክም", "ብር ለምን አልስገባህም",
         "ገንዘቤ አልደረሰኝም", "ብሬ አልደረሰም", "ብር አልተላከም",
-        "ለምን ብሬን አልላክም", "ብሬ የለም",
-        "br alderesegnim", "br algeba", "br lak lign",
-        "lemin atlikm", "br lemin allakim",
     ],
     "result_query": [
         "ውጤት", "ውጤት አሳውቀን", "ስንት ቁጥር ወጣ",
         "ስንት ወጣ", "ምን ቁጥር ወጣ", "ውጤት ስንት ነው",
         "የወጣው ስንት ቁጥር ነው", "የወጣው ምንድነው",
         "ውጤቱ ምንድን ነው", "ውጤቱ ምን ነው",
-        "wetset", "wetset asawqen", "sint qitr weta",
-        "min qitr weta", "yewetaw sint new",
     ],
-    "balance_query": [
-        "ስንት ብር ልላክ", "ስንት ነው ምቀርብኝ", "ስንት ነው የምልከው",
-        "ስንት ልላክ", "ስንት ብር ልጨምር", "ምን ያህል ልጨምር",
-        "ቀሪ ብሬ ስንት ነው", "ምን ያህል ብር ይቀረኛል",
-        "ስንት ይቀረኛል", "ምን ያህል ይቀረኛል",
-        "sint br lilaк", "sint lilaк", "sint br lijemer",
-        "min yahil lijemer", "qeri bre sint new",
-    ],
-    # ── NEW INTENTS ──
     "my_numbers_query": [
         "ምን ቁጥር ያዝክልኝ", "ስንት ቁጥሮችን ነው የያዝኩት",
         "ምን ቁጥሮች ያዝኩ", "ስንት ቁጥር ያዝኩ",
@@ -579,27 +286,61 @@ INTENT_EXAMPLES = {
         "የያዝኩት ቁጥሮች ምን ምን ናቸው", "ቁጥሬ ምን ምን ነው",
         "ያዘዝኩት ቁጥር ምን ነው", "ምን ቁጥሮች ጻፍክልኝ",
         "ቁጥሮቼ ምን ምን ናቸው", "ምን ቁጥሮች ነው ያዘዝኩት",
-        "min qitr yazk", "sint qitr yazk",
-        "min qitroch yazk", "yaze qitroch",
+        "ቁጥሮቼን ንገረኝ", "ቁጥሮቼን አሳውቀኝ",
+        "የያዝክልኝ ቁጥር አለ", "ስንት ቁጥር ነው የኔ",
     ],
     "number_owner_query": [
         "01 የማነው", "06 ለማን ያዘ", "ለማን ያዘ", "ለማን መዘገብክ",
         "ለማን ያዝከው", "ይህ ቁጥር ለማን ተያዘ",
         "ቁጥሩ ለማን ነው", "ቁጥሩ የማነው",
-        "le man yaze", "le man mezegbk",
-        "qitru le man new", "qitru ye man new",
     ],
     "link_request": [
         "ሊንክ ላክልኝ", "ሊንክ ላክ", "link ላክልኝ", "link ላክ",
-        "link laklign", "link lak",
         "ሊንኩን ላክ", "ሊንክ ስጠኝ", "group link ላክልኝ",
     ],
     "speed_request": [
         "ጫወታው ይፍጠን", "ፈጠን ፈጠን አርገው", "ፈጣን ይሁን",
         "ቶሎ ቶሎ አጫውተን", "speed", "ፈጠን",
         "ቶሎ ቶሎ", "ይፍጠን", "ፍጠን",
-        "chewataw yiftsen", "fetsen fetsen",
-        "tolo tolo achawten",
+    ],
+    # ── NEW INTENTS ──
+    "balance_query": [
+        "ስንት ብር አለኝ", "ስንት ቀሪ አለኝ", "ስንት ብር ይቀረኛል",
+        "አንተጋ ስንት አለኝ", "ስንት አለኝ", "ብሬ ስንት ነው",
+        "balance ስንት ነው", "ምን ያህል ብር አለኝ",
+        "ቀሪ balance ስንት ነው", "ስንት ብር ይቀረኛል",
+        "sint br alegn", "sint alegn", "balance sint new",
+        "antenga sint alegn",
+    ],
+    "shortfall_query": [
+        "ስንት ብር ይቀራል", "ስንት ልጨምር", "ስንት ልሙላ",
+        "ስንት ይጎላል", "ስንት ያስጨምራል", "ምን ያህል ይጎዳል",
+        "ሁሉም ✅ ለመሆን ስንት", "ለሙሉ ክፍያ ስንት ይጎላል",
+        "ስንት ብር ልጨምር ሁሉም እንዲሆን",
+        "sint lijevmer", "sint yigolal", "sint yasijemir",
+        "sint limula",
+    ],
+    "winner_query": [
+        "ማን አሸነፈ", "ማነው የዘጋው", "ማን ዘጋ", "ማን በላ",
+        "ማነው የበላው", "አሸናፊው ማን ነው", "ማን ነው ያሸነፈው",
+        "ዘጋው ማን ነው", "winner ማን ነው",
+        "man asheneffe", "man zega", "man bela",
+        "ashenafiw man new",
+    ],
+    "i_won_query": [
+        "ለኔ ወጣልኝ", "እኔ አሸነፍኩ", "የኔ ቁጥር ወጣ",
+        "ወጣልኝ", "እኔ በላው", "እኔ አሸነፍኩ",
+        "የኔ ነው ያሸነፈው", "እኔ ነኝ ያሸነፍኩት",
+        "ene ashenefjku", "wetaleygn", "yene qitr weta",
+        "ene belahu",
+    ],
+    "not_registered_complaint": [
+        "11 ብዬ ነበር", "ለምን አልያዝክልኝም 11", "21 አልያዝክልኝም",
+        "ለምን አልያዝክልኝም", "21 ለምን አልመዘገብክልኝም",
+        "21 ቀድማለው", "21 የኔ ነው", "21 ይዤ ነበር",
+        "ቁጥሬ ተቀደመ", "ቀድሞብኛል", "ቀድሞብኝ",
+        "lmin alyazkilgnim", "qedmalehu", "qedmobign",
+        "yize neberku", "yene new", "qitre teqedeme",
     ],
 }
 
@@ -686,10 +427,6 @@ def cosine_similarity(vec_a: dict, vec_b: dict) -> float:
     return dot / (norm_a * norm_b)
 
 
-# ================================================================
-# MODEL BUILD
-# ================================================================
-
 print("🔧 Building intent vectors...")
 TFIDF_VECTORS, GLOBAL_IDF = build_tfidf(INTENT_EXAMPLES)
 print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
@@ -703,12 +440,86 @@ def detect_intent(text: str) -> tuple:
     latin = normalize_to_latin(text)
     numbers_in_text = re.findall(r"\d+", text)
 
+    # ── i_won_query ───────────────────────────────────────────────
+    I_WON_KW = [
+        normalize_to_latin("ለኔ ወጣልኝ"),
+        normalize_to_latin("እኔ አሸነፍኩ"),
+        normalize_to_latin("የኔ ቁጥር ወጣ"),
+        normalize_to_latin("ወጣልኝ"),
+        normalize_to_latin("እኔ በላው"),
+        normalize_to_latin("ያሸነፍኩት"),
+        "ene ashenefjku", "wetaleygn", "yene qitr weta", "ene belahu",
+    ]
+    if any(kw in latin for kw in I_WON_KW):
+        return "i_won_query", 1.0
+
+    # ── winner_query ──────────────────────────────────────────────
+    WINNER_KW = [
+        normalize_to_latin("ማን አሸነፈ"),
+        normalize_to_latin("ማን ዘጋ"),
+        normalize_to_latin("ማን በላ"),
+        normalize_to_latin("ማነው የዘጋው"),
+        normalize_to_latin("ማነው የበላው"),
+        normalize_to_latin("አሸናፊው"),
+        "man asheneffe", "man zega", "man bela", "ashenafiw",
+    ]
+    if any(kw in latin for kw in WINNER_KW):
+        return "winner_query", 1.0
+
+    # ── balance_query ─────────────────────────────────────────────
+    BALANCE_KW = [
+        normalize_to_latin("ስንት ብር አለኝ"),
+        normalize_to_latin("ስንት ቀሪ አለኝ"),
+        normalize_to_latin("አንተጋ ስንት አለኝ"),
+        normalize_to_latin("ብሬ ስንት ነው"),
+        normalize_to_latin("ምን ያህል ብር አለኝ"),
+        normalize_to_latin("ቀሪ balance"),
+        "antenga sint alegn", "balance sint", "sint br alegn",
+    ]
+    BALANCE_SINT_ALEGN = normalize_to_latin("ስንት አለኝ")
+    if any(kw in latin for kw in BALANCE_KW):
+        return "balance_query", 1.0
+    if BALANCE_SINT_ALEGN in latin and not numbers_in_text:
+        return "balance_query", 1.0
+
+    # ── shortfall_query ───────────────────────────────────────────
+    SHORTFALL_KW = [
+        normalize_to_latin("ስንት ልጨምር"),
+        normalize_to_latin("ስንት ልሙላ"),
+        normalize_to_latin("ስንት ይጎላል"),
+        normalize_to_latin("ስንት ያስጨምራል"),
+        normalize_to_latin("ስንት ብር ይቀራል"),
+        normalize_to_latin("ሁሉም ✅ ለመሆን"),
+        "sint lijevmer", "sint yigolal", "sint yasijemir", "sint limula",
+    ]
+    if any(kw in latin for kw in SHORTFALL_KW):
+        return "shortfall_query", 1.0
+
+    # ── not_registered_complaint ──────────────────────────────────
+    NOT_REG_KW = [
+        normalize_to_latin("ቀድማለው"),
+        normalize_to_latin("ቀድሞብኝ"),
+        normalize_to_latin("ቀድሞብኛል"),
+        normalize_to_latin("ይዤ ነበር"),
+        normalize_to_latin("የኔ ነው"),
+        normalize_to_latin("ብዬ ነበር"),
+        "qedmalehu", "qedmobign", "yize neberku",
+    ]
+    NOT_REG_LMIN_KW = [
+        normalize_to_latin("ለምን አልያዝክልኝም"),
+        normalize_to_latin("ለምን አልመዘገብክልኝም"),
+        "lmin alyazkilgnim",
+    ]
+    if any(kw in latin for kw in NOT_REG_KW) and numbers_in_text:
+        return "not_registered_complaint", 1.0
+    if any(kw in latin for kw in NOT_REG_LMIN_KW) and numbers_in_text:
+        return "not_registered_complaint", 1.0
+
     # ── account keywords ──────────────────────────────────────────
     ACCOUNT_KW_LAT = [
-        "akawnt", "akaunt", "akount", "akawnt",
+        "akawnt", "akaunt", "akount",
         "telebirr", "telebr", "awash", "cbe",
         "nigid bank", "bank akawnt",
-        "yemikefelbew qitr", "yebank qitr",
     ]
     ACCOUNT_KW_AMH_LAT = [
         normalize_to_latin("አካውንት"),
@@ -719,59 +530,50 @@ def detect_intent(text: str) -> tuple:
         normalize_to_latin("የሚከፈልበት ቁጥር"),
         normalize_to_latin("የባንክ ቁጥር"),
     ]
-    all_account_kw = ACCOUNT_KW_LAT + ACCOUNT_KW_AMH_LAT
-    if any(kw in latin for kw in all_account_kw):
+    if any(kw in latin for kw in ACCOUNT_KW_LAT + ACCOUNT_KW_AMH_LAT):
         return "account_query", 1.0
 
     # ── link request ──────────────────────────────────────────────
-    LINK_KW_LAT = [
-        normalize_to_latin("ሊንክ"),
-        "link",
-    ]
-    if any(kw in latin for kw in LINK_KW_LAT):
+    LINK_KW = [normalize_to_latin("ሊንክ"), "link"]
+    if any(kw in latin for kw in LINK_KW):
         return "link_request", 1.0
 
     # ── speed request ─────────────────────────────────────────────
-    SPEED_KW_LAT = [
+    SPEED_KW = [
         normalize_to_latin("ይፍጠን"),
         normalize_to_latin("ፈጠን ፈጠን"),
-        normalize_to_latin("ፈጣን ይሁን"),
-        normalize_to_latin("ቶሎ ቶሎ አጫውተን"),
         normalize_to_latin("ፍጠን"),
         "speed", "yiftsen", "fetsen",
     ]
-    if any(kw in latin for kw in SPEED_KW_LAT):
+    if any(kw in latin for kw in SPEED_KW):
         return "speed_request", 1.0
 
     # ── my numbers query ──────────────────────────────────────────
-    MY_NUM_KW_LAT = [
+    MY_NUM_KW = [
         normalize_to_latin("ምን ቁጥር ያዝክልኝ"),
         normalize_to_latin("ስንት ቁጥሮችን ነው የያዝኩት"),
         normalize_to_latin("ምን ቁጥሮች ያዝኩ"),
-        normalize_to_latin("ስንት ቁጥር ያዝኩ"),
         normalize_to_latin("ቁጥሮቼ"),
         normalize_to_latin("ያዘዝኩት ቁጥር"),
         normalize_to_latin("ምን ቁጥሮች ጻፍክልኝ"),
-        normalize_to_latin("ቁጥሬ ምን ምን"),
-        "min qitr yazk", "sint qitr yazk",
-        "yaze qitroch", "min qitroch yazk",
+        normalize_to_latin("ቁጥሮቼን ንገረኝ"),
+        normalize_to_latin("ቁጥሮቼን አሳውቀኝ"),
+        normalize_to_latin("የያዝክልኝ ቁጥር አለ"),
+        normalize_to_latin("ስንት ቁጥር ነው የኔ"),
     ]
-    if any(kw in latin for kw in MY_NUM_KW_LAT):
+    if any(kw in latin for kw in MY_NUM_KW):
         return "my_numbers_query", 1.0
 
-    # ── number owner query — ቁጥር ሲኖር ብቻ ─────────────────────────
+    # ── number owner query ────────────────────────────────────────
     if numbers_in_text:
-        OWNER_KW_LAT = [
+        OWNER_KW = [
             normalize_to_latin("ለማን ያዘ"),
             normalize_to_latin("ለማን ነው"),
             normalize_to_latin("የማነው"),
             normalize_to_latin("ለማን ተያዘ"),
             normalize_to_latin("ለማን መዘገብክ"),
-            normalize_to_latin("ለማን ያዝከው"),
-            "le man yaze", "le man mezegbk",
-            "ye man new", "le man new",
         ]
-        if any(kw in latin for kw in OWNER_KW_LAT):
+        if any(kw in latin for kw in OWNER_KW):
             return "number_owner_query", 1.0
 
     # ── change number ─────────────────────────────────────────────
@@ -789,8 +591,7 @@ def detect_intent(text: str) -> tuple:
         TYPE_ACTION_LAT = [
             normalize_to_latin("አርግ"), normalize_to_latin("አድርግ"),
             normalize_to_latin("ይሁን"), normalize_to_latin("ቀይር"),
-            normalize_to_latin("ቀይረው"),
-            "areg", "adrig", "yihun", "qeyir", "qeyirew", "keyir", "keyirew",
+            "areg", "adrig", "yihun", "qeyir", "keyir",
         ]
         if any(w in latin for w in TYPE_ACTION_LAT):
             return "type_change", 1.0
@@ -807,87 +608,68 @@ def detect_intent(text: str) -> tuple:
         return "why_not_registered", 1.0
 
     # ── result query ──────────────────────────────────────────────
-    RESULT_KW_LAT = [
+    RESULT_KW = [
         normalize_to_latin("ውጤት"),
         normalize_to_latin("ስንት ቁጥር ወጣ"),
         normalize_to_latin("ምን ቁጥር ወጣ"),
         normalize_to_latin("የወጣው"),
-        "wetset", "wetset asawqen",
-        "sint qitr weta", "min qitr weta", "yewetaw",
+        "wetset", "sint qitr weta", "min qitr weta",
     ]
-    if any(kw in latin for kw in RESULT_KW_LAT):
+    if any(kw in latin for kw in RESULT_KW):
         return "result_query", 1.0
 
     # ── prize query ───────────────────────────────────────────────
-    PRIZE_KW_LAT = [
+    PRIZE_KW = [
         normalize_to_latin("ደራሽ"),
         normalize_to_latin("ሽልማት"),
         "derash", "shilmat", "prize",
     ]
-    if any(kw in latin for kw in PRIZE_KW_LAT):
+    if any(kw in latin for kw in PRIZE_KW):
         return "prize_query", 1.0
 
     # ── payment not received ──────────────────────────────────────
-    PAYMENT_NOT_RECV_LAT = [
+    PAYMENT_NOT_RECV = [
         normalize_to_latin("ብር አልደረሰኝም"),
         normalize_to_latin("አልገባልኝም"),
         normalize_to_latin("ብር አልገባም"),
         normalize_to_latin("ብር ላክልኝ"),
         normalize_to_latin("ለምን አትልክም"),
-        normalize_to_latin("ብሬን ለምን አላክም"),
         "br alderesegnim", "br algeba", "lemin atlikm",
-        "br laklign", "br lemin allakim",
     ]
-    if any(kw in latin for kw in PAYMENT_NOT_RECV_LAT):
+    if any(kw in latin for kw in PAYMENT_NOT_RECV):
         return "payment_not_received", 1.0
 
-    # ── balance query ─────────────────────────────────────────────
-    BALANCE_KW_LAT = [
-        normalize_to_latin("ስንት ብር ልላክ"),
-        normalize_to_latin("ስንት ልላክ"),
-        normalize_to_latin("ስንት ብር ልጨምር"),
-        normalize_to_latin("ምን ያህል ልጨምር"),
-        normalize_to_latin("ምን ያህል ይቀረኛል"),
-        normalize_to_latin("ስንት ይቀረኛል"),
-        "sint br lilaк", "sint lilaк", "min yahil lijemer",
-        "qeri bre sint new", "sint br lijemer",
-    ]
-    if any(kw in latin for kw in BALANCE_KW_LAT):
-        return "balance_query", 1.0
-
     # ── players remaining query ───────────────────────────────────
-    PLAYERS_REM_LAT = [
+    PLAYERS_REM = [
         normalize_to_latin("ስንት ሰው ቀረ"),
         normalize_to_latin("ስንት ሰዎች ቀሩ"),
         normalize_to_latin("ቀሪ ሰው"),
         "sint sew qere", "qeri sew",
     ]
-    if any(kw in latin for kw in PLAYERS_REM_LAT):
+    if any(kw in latin for kw in PLAYERS_REM):
         return "players_remaining_query", 1.0
 
     # ── players query ─────────────────────────────────────────────
-    PLAYERS_KW_LAT = [
+    PLAYERS_KW = [
         normalize_to_latin("ስንት ሰው ነው"),
         normalize_to_latin("ከስንት ሰው ጋር ነው"),
-        normalize_to_latin("ለ ስንት ሰው ነው"),
-        "sint sew new", "kesint sew gar new", "le sint sew new",
+        "sint sew new", "kesint sew gar new",
     ]
-    if any(kw in latin for kw in PLAYERS_KW_LAT):
+    if any(kw in latin for kw in PLAYERS_KW):
         return "players_query", 1.0
 
     # ── price query ───────────────────────────────────────────────
-    PRICE_KW_LAT = [
+    PRICE_KW = [
         normalize_to_latin("ዋጋ ስንት"),
         normalize_to_latin("ዋጋው ስንት"),
         normalize_to_latin("ምን ያህል ብር"),
         normalize_to_latin("ስንት ያስከፍላል"),
-        "wagaw sint", "min yahil br", "sint yasikeflal",
+        "wagaw sint", "min yahil br",
     ]
-    PRICE_SINT_NEW_LAT = normalize_to_latin("ስንት ነው")
-    has_sint_new = PRICE_SINT_NEW_LAT in latin
-    if not numbers_in_text and has_sint_new:
+    PRICE_SINT_NEW = normalize_to_latin("ስንት ነው")
+    if not numbers_in_text and PRICE_SINT_NEW in latin:
         return "price_query", 1.0
-    if any(kw in latin for kw in PRICE_KW_LAT):
+    if any(kw in latin for kw in PRICE_KW):
         return "price_query", 1.0
 
     # ── specific number query ─────────────────────────────────────
@@ -902,9 +684,8 @@ def detect_intent(text: str) -> tuple:
     CANCEL_LAT = [
         normalize_to_latin(w) for w in
         ["አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ", "አጥፋልኝ", "ሰርዝልኝ"]
-    ] + ["alfeligm", "alfelegim", "alfelegm", "serzew", "serz", "atfaw", "atfa", "awta"]
-    has_cancel = any(w in latin for w in CANCEL_LAT)
-    if len(numbers_in_text) == 1 and has_cancel:
+    ] + ["alfeligm", "alfelegim", "serzew", "serz", "atfaw", "atfa", "awta"]
+    if len(numbers_in_text) == 1 and any(w in latin for w in CANCEL_LAT):
         return "cancel_number", 1.0
 
     # ── TF-IDF cosine fallback ────────────────────────────────────
@@ -917,13 +698,13 @@ def detect_intent(text: str) -> tuple:
         bonus = 0.0
         if numbers_in_text:
             if intent in ("booking", "specific_number_query", "cancel_number",
-                          "change_number", "type_change"):
+                          "change_number", "type_change", "not_registered_complaint"):
                 bonus += 0.08
             elif intent not in ("account_query", "price_query", "prize_query",
                                 "players_query", "players_remaining_query",
-                                "result_query", "balance_query",
+                                "result_query", "balance_query", "shortfall_query",
                                 "payment_not_received", "number_owner_query",
-                                "my_numbers_query"):
+                                "my_numbers_query", "winner_query", "i_won_query"):
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
@@ -984,7 +765,7 @@ RESPONSES = {
     "cancel_number_ack": ["እሺ ተሰርዟል 🙏", "እሺ ተነቅሏል 🙏"],
     "complaint_removed_taken": [
         "አዎ ገቢ ማረግ ረሳክ የጫወታው ባህሪ ነው 🙏",
-        "ቤተሰብ ገቢ ሳታርግ ቁጥሩ ይለቀቃል 🙏",
+        "ቤተሰብ ገቢ ሳታርግ ቁጥሉ ይለቀቃል 🙏",
         "ገቢ ማረግ ረሳህ ቤተሰብ የጫወታው ሕግ ነው 🙏",
     ],
     "complaint_removed_nekay": [
@@ -1009,17 +790,12 @@ RESPONSES = {
         "ተቀይሯል🙏 {from_num} → {to_num}",
     ],
     "change_number_not_yours": [
-        "ቁጥሩ የእርስዎ አይደለም 🙏",
+        "ቁጥሉ የእርስዎ አይደለም 🙏",
         "{from_num} የእርስዎ ቁጥር አይደለም 🙏",
     ],
     "change_number_target_taken": [
         "{to_num} ተይዟል ቤተሰብ ሌላ ምረጥ 🙏",
         "ቤተሰብ {to_num} ክፍት አይደለም ሌላ ምረጥ 🙏",
-        "{to_num} ቀድሞ ተወስዷል 🙏",
-    ],
-    "change_number_target_paid": [
-        "{to_num} ✅ ተከፍሏል መቀየር አይቻልም 🙏",
-        "ቤተሰብ {to_num} paid ነው አይቀየርም 🙏",
     ],
     "change_number_invalid": [
         "ቁጥሩ ትክክል አይደለም 🙏", "ያ ቁጥር የለም 🙏",
@@ -1097,17 +873,12 @@ RESPONSES = {
         "ገና ውጤት የለም ቤተሰብ 🙏",
         "ውጤት አልተላከም ቤተሰብ 🙏",
     ],
-    "balance_query": [
-        "{balance} ብር ነው ቤተሰብ 🙏",
-        "ቀሪ {balance} ብር ነው 🙏",
-    ],
-    # ── NEW RESPONSES ──
     "my_numbers_none": [
+        "ምንም ቁጥር አልተያዘልህም ቤተሰብ 🙏",
         "ቁጥር አልያዝክም ቤተሰብ 🙏",
-        "ምንም ቁጥር አልተመዘገበም 🙏",
     ],
     "my_numbers_show": [
-        "{numbers_text} ቤተሰብ 🙏",
+        "{numbers_text} ተይዞልሃል ቤተሰብ 🙏",
         "የያዝካቸው: {numbers_text} ቤተሰብ 🙏",
     ],
     "number_owner_show": [
@@ -1133,6 +904,55 @@ RESPONSES = {
         "እሺ 🙏 እየሞከርኩ ነው",
         "እሺ ቤተሰብ 🙏 እየሞከርኩ ነው",
     ],
+    # ── NEW RESPONSES ──
+    "balance_show": [
+        "{balance} ብር እኔጋ አለክ ቤተሰብ 🙏",
+        "ቤተሰብ {balance} ብር አለህ 🙏",
+    ],
+    "balance_zero": [
+        "0 ብር አለክ ቤተሰብ 🙏",
+        "ቤተሰብ balance የለህም 🙏",
+    ],
+    "shortfall_show": [
+        "ቤተሰብ {numbers_text} ✅ እንዲሆን {shortfall} ብር ያስፈልጋል 🙏",
+        "{shortfall} ብር ያስጨምርሃል ቤተሰብ ({numbers_text}) 🙏",
+    ],
+    "shortfall_all_paid": [
+        "ሁሉም ✅ ነው ቤተሰብ ምንም አያስፈልግም 🙏",
+        "ቤተሰብ ሁሉም ተከፍሏል ✅ 🙏",
+    ],
+    "shortfall_no_numbers": [
+        "ቁጥር አልያዝክም ቤተሰብ 🙏",
+    ],
+    "winner_show": [
+        "🥇 1ኛ፡ {first}\n🥈 2ኛ፡ {second}\n🥉 3ኛ፡ {third} 🙏",
+        "አሸናፊዎቹ 🏆\n1ኛ፡ {first}\n2ኛ፡ {second}\n3ኛ፡ {third} 🙏",
+    ],
+    "winner_show_one": [
+        "🥇 1ኛ፡ {first} 🙏",
+    ],
+    "winner_show_two": [
+        "🥇 1ኛ፡ {first}\n🥈 2ኛ፡ {second} 🙏",
+    ],
+    "winner_none": [
+        "ገና አልተወሰነም ቤተሰብ 🙏",
+        "ውጤት አልወጣም ቤተሰብ 🙏",
+    ],
+    "i_won_yes": [
+        "ቤተሰብ አዎ {place}ኛ ወቶልሃል 🙏",
+        "አዎ ቤተሰብ {place}ኛ ሆነሃል 🏆🙏",
+    ],
+    "i_won_no": [
+        "ቤተሰብ አላሸነፍክም 🙏\n🥇 1ኛ፡ {first}\n🥈 2ኛ፡ {second}\n🥉 3ኛ፡ {third}",
+        "አላሸነፍክም ቤተሰብ 🙏\n1ኛ፡ {first}\n2ኛ፡ {second}\n3ኛ፡ {third}",
+    ],
+    "i_won_no_winners": [
+        "ቤተሰብ አላሸነፍክም ወይም ውጤት ገና አልወጣም 🙏",
+    ],
+    "not_registered_taken": [
+        "{num} አበበ ስለቀደመክ ነው ቤተሰብ 🙏",
+        "ቤተሰብ {num} {name} ቀድሞሃል 🙏",
+    ],
 }
 
 
@@ -1141,17 +961,11 @@ RESPONSES = {
 # ================================================================
 
 def _format_my_numbers(user_numbers: list) -> str:
-    """
-    user_numbers = [(number, is_half, slot, is_paid), ...]
-    ቁጥሮች format አርጎ string ይመልሳል
-    """
-    # slot=1 ብቻ ይውሰድ — ቁጥሮቹን ያሳያል
     seen = {}
     for number, is_half, slot, is_paid in user_numbers:
         if slot == 1:
             seen[number] = is_half
         elif number not in seen:
-            # slot=2 ብቻ ካለ (half) ያሳያል
             seen[number] = True
 
     if not seen:
@@ -1160,39 +974,55 @@ def _format_my_numbers(user_numbers: list) -> str:
     parts = []
     nums_sorted = sorted(seen.keys())
 
-    if len(nums_sorted) == 1:
-        num = nums_sorted[0]
+    for num in nums_sorted:
         is_half = seen[num]
         if is_half:
-            parts.append(f"{num:02d} በግማሽ")
+            parts.append(f"{num:02d}+")
         else:
             parts.append(f"{num:02d}")
-        return parts[0]
 
-    # ብዙ ቁጥሮች
-    for i, num in enumerate(nums_sorted):
-        is_half = seen[num]
-        label = f"{num:02d}"
+    return " ".join(parts)
+
+
+# ================================================================
+# SHORTFALL CALCULATOR
+# ================================================================
+
+def _calculate_shortfall(user_numbers: list, settings: dict, user_balance: float) -> dict:
+    price_full = float(settings.get("price_full") or 0)
+    price_half = float(settings.get("price_half") or 0)
+
+    unpaid_numbers = []
+    total_unpaid_cost = 0.0
+
+    seen_slots = {}
+    for number, is_half, slot, is_paid in user_numbers:
+        if slot == 1:
+            seen_slots[number] = {"is_half": is_half, "is_paid": is_paid}
+        elif number not in seen_slots:
+            seen_slots[number] = {"is_half": True, "is_paid": is_paid}
+
+    for number, data in seen_slots.items():
+        if not data["is_paid"]:
+            cost = price_half if data["is_half"] else price_full
+            total_unpaid_cost += cost
+            unpaid_numbers.append((number, data["is_half"]))
+
+    shortfall = max(0.0, total_unpaid_cost - user_balance)
+
+    unpaid_text_parts = []
+    for num, is_half in unpaid_numbers:
         if is_half:
-            label += "+"
-        parts.append(label)
+            unpaid_text_parts.append(f"{num:02d}+")
+        else:
+            unpaid_text_parts.append(f"{num:02d}")
 
-    # ሁሉም half ከሆኑ
-    all_half = all(seen[n] for n in nums_sorted)
-    all_full = all(not seen[n] for n in nums_sorted)
-
-    if all_half:
-        nums_str = " እና ".join(f"{n:02d}" for n in nums_sorted) if len(nums_sorted) == 2 \
-            else ", ".join(f"{n:02d}" for n in nums_sorted)
-        return f"{nums_str} ሁለቱንም በግማሽ" if len(nums_sorted) == 2 else f"{nums_str} ሁሉም በግማሽ"
-
-    if all_full:
-        if len(nums_sorted) == 2:
-            return f"{nums_sorted[0]:02d} እና {nums_sorted[1]:02d}"
-        return ", ".join(f"{n:02d}" for n in nums_sorted)
-
-    # Mixed — each labeled
-    return " እና ".join(parts) if len(parts) == 2 else ", ".join(parts)
+    return {
+        "shortfall": shortfall,
+        "unpaid_numbers": unpaid_numbers,
+        "unpaid_text": " ".join(unpaid_text_parts),
+        "all_paid": len(unpaid_numbers) == 0,
+    }
 
 
 # ================================================================
@@ -1214,8 +1044,10 @@ def get_response(
     failed_numbers: list = None,
     recent_winners: list = None,
     user_unpaid_balance: float = None,
-    # ── NEW params ──
     user_numbers: list = None,
+    # ── NEW params ──
+    user_balance: float = None,
+    failed_attempts: list = None,
 ) -> dict:
 
     THRESHOLD_RESPOND  = 0.25
@@ -1254,6 +1086,99 @@ def get_response(
     if score < THRESHOLD_RESPOND:
         return result
 
+    # ── balance_query ─────────────────────────────────────────────
+    if intent == "balance_query":
+        bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
+        if bal > 0:
+            result["reply"] = random.choice(RESPONSES["balance_show"]).format(
+                balance=int(bal)
+            )
+        else:
+            result["reply"] = random.choice(RESPONSES["balance_zero"])
+        return result
+
+    # ── shortfall_query ───────────────────────────────────────────
+    if intent == "shortfall_query":
+        if not user_numbers:
+            result["reply"] = random.choice(RESPONSES["shortfall_no_numbers"])
+            return result
+        bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
+        sf = _calculate_shortfall(user_numbers, settings, bal)
+        if sf["all_paid"]:
+            result["reply"] = random.choice(RESPONSES["shortfall_all_paid"])
+        else:
+            result["reply"] = random.choice(RESPONSES["shortfall_show"]).format(
+                numbers_text=sf["unpaid_text"],
+                shortfall=int(sf["shortfall"]),
+            )
+        return result
+
+    # ── winner_query ──────────────────────────────────────────────
+    if intent == "winner_query":
+        if not recent_winners:
+            result["reply"] = random.choice(RESPONSES["winner_none"])
+            return result
+        w = recent_winners
+        def fmt_winner(w_item):
+            return f"{w_item['user_name']} ({w_item['number']:02d})" if w_item.get("number") else w_item.get("user_name", "—")
+        if len(w) == 1:
+            result["reply"] = random.choice(RESPONSES["winner_show_one"]).format(
+                first=fmt_winner(w[0])
+            )
+        elif len(w) == 2:
+            result["reply"] = random.choice(RESPONSES["winner_show_two"]).format(
+                first=fmt_winner(w[0]),
+                second=fmt_winner(w[1]),
+            )
+        else:
+            result["reply"] = random.choice(RESPONSES["winner_show"]).format(
+                first=fmt_winner(w[0]),
+                second=fmt_winner(w[1]) if len(w) > 1 else "—",
+                third=fmt_winner(w[2]) if len(w) > 2 else "—",
+            )
+        return result
+
+    # ── i_won_query ───────────────────────────────────────────────
+    if intent == "i_won_query":
+        if not recent_winners:
+            result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
+            return result
+        # user recent_winners ውስጥ ካለ
+        user_place = None
+        for w in recent_winners:
+            if w.get("telegram_id") == user_id:
+                user_place = w["place"]
+                break
+        if user_place:
+            place_label = {1: "1", 2: "2", 3: "3"}.get(user_place, str(user_place))
+            result["reply"] = random.choice(RESPONSES["i_won_yes"]).format(place=place_label)
+        else:
+            def fmt_w(w_item):
+                return f"{w_item['user_name']} ({w_item['number']:02d})" if w_item.get("number") else w_item.get("user_name", "—")
+            w = recent_winners
+            result["reply"] = random.choice(RESPONSES["i_won_no"]).format(
+                first=fmt_w(w[0]) if len(w) > 0 else "—",
+                second=fmt_w(w[1]) if len(w) > 1 else "—",
+                third=fmt_w(w[2]) if len(w) > 2 else "—",
+            )
+        return result
+
+    # ── not_registered_complaint ──────────────────────────────────
+    if intent == "not_registered_complaint":
+        numbers_found = re.findall(r"\d+", text)
+        if numbers_found and failed_attempts:
+            num = int(numbers_found[0])
+            # ያ ቁጥር failed_attempts ውስጥ ካለ
+            attempt = next((a for a in failed_attempts if a["number"] == num), None)
+            if attempt and attempt["reason"] == "taken" and attempt.get("slot1_name"):
+                name = attempt["slot1_name"]
+                result["reply"] = random.choice(RESPONSES["not_registered_taken"]).format(
+                    num=f"{num:02d}",
+                    name=name,
+                )
+            # failed_attempts ከሌለ → ignore
+        return result
+
     # ── account_query ─────────────────────────────────────────────
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
@@ -1285,7 +1210,6 @@ def get_response(
                 else:
                     result["reply"] = random.choice(RESPONSES["my_numbers_none"])
         else:
-            # bot.py ያምጣ — flag set
             result["my_numbers_query"] = True
         return result
 
@@ -1300,17 +1224,13 @@ def get_response(
                     result["reply"] = random.choice(RESPONSES["number_owner_free"])
                 else:
                     owner_name = entry[0][0]
-                    if user_id and any(
-                        True for name, is_half, slot in entry
-                        if name == user_name
-                    ):
+                    if user_name and any(name == user_name for name, _, _, _, _ in entry):
                         result["reply"] = random.choice(RESPONSES["number_owner_yours"])
                     else:
                         result["reply"] = random.choice(RESPONSES["number_owner_show"]).format(
                             name=owner_name
                         )
             else:
-                # Multiple numbers
                 lines = []
                 for n_str in numbers_found:
                     num = int(n_str)
@@ -1319,7 +1239,7 @@ def get_response(
                         lines.append(f"{num:02d} — ክፍት ነው")
                     else:
                         owner_name = entry[0][0]
-                        if user_name and any(name == user_name for name, _, _ in entry):
+                        if user_name and any(name == user_name for name, _, _, _, _ in entry):
                             lines.append(f"{num:02d} — ያንተ ነው")
                         else:
                             lines.append(f"{num:02d} — ለ {owner_name}")
@@ -1528,14 +1448,6 @@ def get_response(
             )
         else:
             result["reply"] = random.choice(RESPONSES["result_query_none"])
-        return result
-
-    # ── balance_query ─────────────────────────────────────────────
-    if intent == "balance_query":
-        if user_unpaid_balance is not None:
-            result["reply"] = random.choice(RESPONSES["balance_query"]).format(
-                balance=int(user_unpaid_balance)
-            )
         return result
 
     return result
