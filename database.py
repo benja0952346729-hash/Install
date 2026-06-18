@@ -1731,19 +1731,11 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
             conn.close()
             return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True}
         else:
-            # FIX — is_paid=FALSE ሲሆን pending_upgrade አትቀምጥ
-            if not is_paid:
-                cur.execute("""
-                    UPDATE registrations
-                    SET is_half=FALSE
-                    WHERE id=%s
-                """, (reg_id,))
-            else:
-                cur.execute("""
-                    UPDATE registrations
-                    SET is_half=FALSE, pending_upgrade=TRUE
-                    WHERE id=%s
-                """, (reg_id,))
+            cur.execute("""
+                UPDATE registrations
+                SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
+                WHERE id=%s
+            """, (reg_id,))
             conn.commit()
             cur.close()
             conn.close()
@@ -1752,6 +1744,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
     cur.close()
     conn.close()
     return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
+
 
 # ============================================================
 # FAILED ATTEMPTS
@@ -2424,4 +2417,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-    }
+        }
