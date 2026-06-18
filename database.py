@@ -1199,7 +1199,7 @@ def get_unpaid_numbers(game_id: int) -> list:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT number, slot, is_half, pending_upgrade
+        SELECT number, slot, is_half, is_paid, pending_upgrade
         FROM registrations
         WHERE game_id=%s AND (is_paid=FALSE OR pending_upgrade=TRUE)
         ORDER BY number, slot
@@ -1208,10 +1208,10 @@ def get_unpaid_numbers(game_id: int) -> list:
     cur.close()
     conn.close()
     result = {}
-    for number, slot, is_half, pending_upgrade in rows:
+    for number, slot, is_half, is_paid, pending_upgrade in rows:
         if number not in result:
             result[number] = set()
-        if pending_upgrade:
+        if pending_upgrade and is_paid:
             result[number].add(2)
         else:
             result[number].add(slot)
@@ -2417,4 +2417,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-        }
+            }
