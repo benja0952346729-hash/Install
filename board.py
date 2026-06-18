@@ -77,7 +77,7 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
         if is_half:
             return f"{name}{check}+"
         else:
-            if pending_upgrade:
+            if pending_upgrade and check:
                 return f"{name}{check}?"
             return f"{name}{check}"
 
@@ -89,7 +89,6 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
         return f"{name1}{check1}+{name2}{check2}"
 
     return ""
-
 
 def get_group_start(number: int, per_person: int) -> int:
     return ((number - 1) // per_person) * per_person + 1
