@@ -231,10 +231,6 @@ def is_admin(user_id: int, group_id: int = None) -> bool:
     return False
 
 
-# ============================================================
-# GET ADMIN GROUP HELPER
-# ============================================================
-
 def get_admin_group_id(user_id: int):
     enabled = get_enabled_groups()
     admin_groups = [g for g in enabled if is_admin(user_id, g["group_id"])]
@@ -358,7 +354,17 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         for number, slots in unpaid:
             mark_nekay(game_id, number)
 
-        nekay_list = _build_nekay_from_snap(snap)
+        # snap ከ mark_nekay በኋላ እንደገና ይስራ — pending_upgrade ያላቸው is_half=TRUE ሆነዋል
+        unpaid2 = get_unpaid_numbers(game_id)
+        snap2 = {}
+        for number, slots in unpaid2:
+            if slots == {2}:
+                snap2[number] = 2
+            else:
+                snap2[number] = 0
+        nekay_numbers[game_id] = snap2
+
+        nekay_list = _build_nekay_from_snap(snap2)
         nekay_text = build_nekay(nekay_list)
 
         nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
@@ -859,6 +865,37 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                     else:
                         new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                         update_board_message_id(game_id, new_msg.message_id)
+
+                # nekay snap update — pending_upgrade ሲሆን snap ይጠፋል (take ተደረገ)
+                snap_fresh = nekay_numbers.get(game_id, {})
+                for num in numbers:
+                    actual_num = get_group_start(num, fresh["numbers_per_person"]) \
+                        if fresh["numbers_per_person"] > 1 else num
+                    if actual_num in snap_fresh:
+                        if target == "full":
+                            # balance ይበቃል → snap ይጠፋል
+                            # balance አይበቃም (pending_upgrade) → snap ይጠፋል (take ተደረገ)
+                            del snap_fresh[actual_num]
+                        elif target == "half" and snap_fresh[actual_num] == 0:
+                            snap_fresh[actual_num] = 2
+                nekay_numbers[game_id] = snap_fresh
+
+                rem_msg_id = fresh.get("remaining_message_id")
+                if rem_msg_id:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                    except Exception:
+                        pass
+                if snap_fresh:
+                    nekay_list_f = _build_nekay_from_snap(snap_fresh)
+                    nekay_text_f = build_nekay(nekay_list_f)
+                    new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_f)
+                    update_remaining_message_id(game_id, new_nekay.message_id)
+                else:
+                    update_remaining_message_id(game_id, None)
+                    nekay_active.discard(game_id)
+                    nekay_numbers.pop(game_id, None)
+                    _stop_inactivity_tracker(game_id)
             elif fresh_remaining <= 7 and should_resend_tc:
                 if fresh_board_msg_id:
                     try:
@@ -880,35 +917,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                     new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                     update_board_message_id(game_id, new_msg.message_id)
 
-            if game_id in nekay_active:
-                snap_fresh = nekay_numbers.get(game_id, {})
-                for num in numbers:
-                    actual_num = get_group_start(num, fresh["numbers_per_person"]) \
-                        if fresh["numbers_per_person"] > 1 else num
-                    if actual_num in snap_fresh:
-                        if target == "half" and snap_fresh[actual_num] == 0:
-                            snap_fresh[actual_num] = 2
-                        elif target == "full":
-                            del snap_fresh[actual_num]
-                nekay_numbers[game_id] = snap_fresh
-
-                rem_msg_id = fresh.get("remaining_message_id")
-                if rem_msg_id:
-                    try:
-                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                    except Exception:
-                        pass
-                if snap_fresh:
-                    nekay_list_f = _build_nekay_from_snap(snap_fresh)
-                    nekay_text_f = build_nekay(nekay_list_f)
-                    new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_f)
-                    update_remaining_message_id(game_id, new_nekay.message_id)
-                else:
-                    update_remaining_message_id(game_id, None)
-                    nekay_active.discard(game_id)
-                    nekay_numbers.pop(game_id, None)
-                    _stop_inactivity_tracker(game_id)
-            else:
+            if game_id not in nekay_active:
                 if fresh_remaining <= 7:
                     await _send_remaining(ctx, fresh, group_id)
                     _reset_inactivity_tracker(ctx.bot, game_id, group_id)
@@ -1506,7 +1515,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
             if game_id in nekay_numbers:
                 snap = nekay_numbers.get(game_id, {})
-
                 if number in snap:
                     if paid1 and not was_paid1:
                         pass
@@ -1517,7 +1525,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 else:
                     if not paid1 and was_paid1:
                         snap[number] = 2 if is_half1 else 0
-
                 nekay_numbers[game_id] = snap
 
     fresh = get_active_settings(group_id=group_id)
@@ -2320,7 +2327,6 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     user_id = update.effective_user.id
-
     group_id = get_admin_group_id(user_id)
     if not group_id:
         await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
