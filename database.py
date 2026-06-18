@@ -1102,11 +1102,7 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
         cost = price_half
         total_remaining = remaining_prize + remaining_carry
         if total_remaining >= cost:
-            cur.execute("""
-                UPDATE registrations
-                SET is_paid=TRUE, is_half=FALSE, pending_upgrade=FALSE, is_nekay=FALSE
-                WHERE id=%s
-            """, (reg_id,))
+            cur.execute("UPDATE registrations SET pending_upgrade=FALSE, is_nekay=FALSE WHERE id=%s", (reg_id,))
             if remaining_prize >= cost:
                 remaining_prize -= cost
             else:
@@ -1223,17 +1219,19 @@ def get_unpaid_numbers(game_id: int) -> list:
 
 
 # ============================================================
-# NEKAY
+# NEKAY — FIX 2a
 # ============================================================
 
 def mark_nekay(game_id: int, number: int):
     conn = get_conn()
     cur = conn.cursor()
+    # is_paid=FALSE ያላቸው → is_nekay=TRUE
     cur.execute("""
         UPDATE registrations
         SET is_nekay=TRUE
         WHERE game_id=%s AND number=%s AND is_paid=FALSE
     """, (game_id, number))
+    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE + pending_upgrade=FALSE
     cur.execute("""
         UPDATE registrations
         SET is_nekay=TRUE,
@@ -1732,22 +1730,34 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
             cur.close()
             conn.close()
             return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True}
+
         else:
-            cur.execute("""
-                UPDATE registrations
-                SET is_nekay=FALSE, pending_upgrade=TRUE
-                WHERE id=%s
-            """, (reg_id,))
-            conn.commit()
-            cur.close()
-            conn.close()
-            return {"status": "ok", "refund": 0, "charge": charge, "is_paid": is_paid, "pending_upgrade": True}
+            if is_paid:
+                # ሁኔታ 2 — paid half, balance ከሌለ → pending_upgrade
+                cur.execute("""
+                    UPDATE registrations
+                    SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
+                    WHERE id=%s
+                """, (reg_id,))
+                conn.commit()
+                cur.close()
+                conn.close()
+                return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True, "pending_upgrade": True}
+            else:
+                # ሁኔታ 1 — unpaid half, balance ከሌለ → ምንም ምልክት የለም
+                cur.execute("""
+                    UPDATE registrations
+                    SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=FALSE
+                    WHERE id=%s
+                """, (reg_id,))
+                conn.commit()
+                cur.close()
+                conn.close()
+                return {"status": "ok", "refund": 0, "charge": charge, "is_paid": False, "pending_upgrade": False}
 
     cur.close()
     conn.close()
     return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
-
-
 # ============================================================
 # FAILED ATTEMPTS
 # ============================================================
@@ -2117,6 +2127,7 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
             DO UPDATE SET carry_balance=%s, balance=%s, updated_at=NOW()
         """, (group_id, user_id, new_total, new_carry, prize_balance, new_carry, new_total))
 
+        # FIX 2b — pending_upgrade=TRUE ያላቸውን ጨምሮ ሁሉንም unpaid ይከፍላል
         cur.execute("""
             SELECT id, number, is_half, slot, pending_upgrade
             FROM registrations
