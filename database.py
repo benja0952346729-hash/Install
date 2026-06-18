@@ -275,6 +275,12 @@ def _init_db_conn(conn, cur):
             date DATE DEFAULT CURRENT_DATE,
             UNIQUE(group_id, date)
         );
+
+        CREATE TABLE IF NOT EXISTS complete_stickers (
+            id SERIAL PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT NOW()
+        );
     """)
     conn.commit()
 
@@ -390,6 +396,13 @@ def init_db():
             cur.execute("""
                 ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS winner_carried BOOLEAN DEFAULT FALSE;
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS complete_stickers (
+                    id SERIAL PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    added_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
 
             conn.commit()
             cur.close()
@@ -397,6 +410,48 @@ def init_db():
         except Exception as e:
             import logging
             logging.warning(f"[init_db] DB {i} error: {e}")
+
+
+# ============================================================
+# COMPLETE STICKERS
+# ============================================================
+
+def add_complete_sticker(file_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO complete_stickers (file_id) VALUES (%s)
+    """, (file_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_complete_stickers() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, file_id, added_at FROM complete_stickers ORDER BY added_at ASC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"id": r[0], "file_id": r[1], "added_at": r[2]} for r in rows]
+
+
+def remove_complete_sticker_by_index(index: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM complete_stickers ORDER BY added_at ASC")
+    rows = cur.fetchall()
+    if index < 1 or index > len(rows):
+        cur.close()
+        conn.close()
+        return False
+    target_id = rows[index - 1][0]
+    cur.execute("DELETE FROM complete_stickers WHERE id=%s", (target_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
 
 
 # ============================================================
@@ -959,6 +1014,29 @@ def get_taken_numbers(game_id):
     return result
 
 
+def all_numbers_paid(game_id: int, settings: dict) -> bool:
+    taken = get_taken_numbers(game_id)
+    total = settings["total_numbers"]
+    per_person = settings["numbers_per_person"]
+
+    if per_person == 1:
+        number_range = range(1, total + 1)
+    else:
+        number_range = range(1, total + 1, per_person)
+
+    for n in number_range:
+        entry = taken.get(n, [])
+        if not entry:
+            return False
+        for name, is_half, slot, is_paid, pending_upgrade in entry:
+            if not is_paid or pending_upgrade:
+                return False
+        if len(entry) == 1 and entry[0][1]:
+            return False
+
+    return True
+
+
 # ============================================================
 # PAYMENT CONFIRMATION
 # ============================================================
@@ -1012,7 +1090,6 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
     remaining_carry = carry_balance
     confirmed = []
 
-    # 1. pending_upgrade=TRUE ያላቸው መጀመሪያ — cost = price_half (ቀሪ ብር)
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -1034,7 +1111,6 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
                 remaining_carry -= diff
             confirmed.append({"number": number, "is_half": False, "slot": slot})
 
-    # 2. is_paid=FALSE + is_nekay=FALSE
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -1056,7 +1132,6 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
                 remaining_carry -= diff
             confirmed.append({"number": number, "is_half": is_half, "slot": slot})
 
-    # 3. is_paid=FALSE + is_nekay=TRUE
     cur.execute("""
         SELECT id, number, is_half, slot
         FROM registrations
@@ -1123,7 +1198,6 @@ def get_paid_numbers(game_id: int) -> dict:
 def get_unpaid_numbers(game_id: int) -> list:
     conn = get_conn()
     cur = conn.cursor()
-    # is_paid=FALSE ወይም pending_upgrade=TRUE ያላቸው ሁሉም
     cur.execute("""
         SELECT number, slot, is_half, pending_upgrade
         FROM registrations
@@ -1137,16 +1211,15 @@ def get_unpaid_numbers(game_id: int) -> list:
     for number, slot, is_half, pending_upgrade in rows:
         if number not in result:
             result[number] = set()
-        # pending_upgrade=TRUE → ግማሽ ሆኖ ይወጣ
         if pending_upgrade:
-            result[number].add(2)  # slot=2 ማለት ግማሽ ነው
+            result[number].add(2)
         else:
             result[number].add(slot)
     return [(n, slots) for n, slots in sorted(result.items())]
 
 
 # ============================================================
-# NEKAY
+# NEKAY — FIX 2a
 # ============================================================
 
 def mark_nekay(game_id: int, number: int):
@@ -1158,12 +1231,12 @@ def mark_nekay(game_id: int, number: int):
         SET is_nekay=TRUE
         WHERE game_id=%s AND number=%s AND is_paid=FALSE
     """, (game_id, number))
-    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE + pending_upgrade=FALSE
+    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE
+    # pending_upgrade=FALSE አናርገውም — get_unpaid_numbers ውስጥ እንዲታይ
     cur.execute("""
         UPDATE registrations
         SET is_nekay=TRUE,
-            is_half=TRUE,
-            pending_upgrade=FALSE
+            is_half=TRUE
         WHERE game_id=%s AND number=%s AND is_paid=TRUE AND pending_upgrade=TRUE
     """, (game_id, number))
     conn.commit()
@@ -1557,7 +1630,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
 
         cur.execute("UPDATE registrations SET is_half=TRUE, pending_upgrade=FALSE WHERE id=%s", (reg_id,))
 
-        # pending_upgrade=TRUE ነበር → refund አይስጥ (ግማሽ ብር ብቻ ከፍሏል)
         if is_paid and not is_pending:
             refund = price_full - price_half
             if refund > 0:
@@ -1659,7 +1731,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
             conn.close()
             return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True}
         else:
-            # balance አይበቃም → is_paid=TRUE ይቀራል፣ pending_upgrade=TRUE
             cur.execute("""
                 UPDATE registrations
                 SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
@@ -2012,13 +2083,12 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
     price_half = float(price_row[1] or 0)
     group_id = price_row[2]
 
-    # refund: is_paid=TRUE ያላቸው — pending_upgrade=TRUE ሆነ ሙሉ ሆነ price_half ብቻ refund
     refund = 0
     for r in rows:
         reg_id, r_is_half, r_slot, r_is_paid, r_pending = r
         if r_is_paid:
             if r_pending:
-                refund += price_half  # ግማሽ ብር ብቻ ከፍሏል
+                refund += price_half
             elif r_is_half:
                 refund += price_half
             else:
@@ -2045,21 +2115,25 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
             DO UPDATE SET carry_balance=%s, balance=%s, updated_at=NOW()
         """, (group_id, user_id, new_total, new_carry, prize_balance, new_carry, new_total))
 
+        # FIX 2b — pending_upgrade=TRUE ያላቸውን ጨምሮ ሁሉንም unpaid ይከፍላል
         cur.execute("""
-            SELECT id, number, is_half, slot
+            SELECT id, number, is_half, slot, pending_upgrade
             FROM registrations
-            WHERE game_id=%s AND user_id=%s AND is_paid=FALSE
+            WHERE game_id=%s AND user_id=%s AND (is_paid=FALSE OR pending_upgrade=TRUE)
             ORDER BY registered_at, slot
         """, (game_id, user_id))
         unpaid = cur.fetchall()
 
         remaining_carry = new_carry
         remaining_prize = prize_balance
-        for reg_id, reg_number, reg_is_half, reg_slot in unpaid:
-            cost = price_half if reg_is_half else price_full
+        for reg_id, reg_number, reg_is_half, reg_slot, reg_pending in unpaid:
+            cost = price_half if (reg_is_half or reg_pending) else price_full
             total_remaining = remaining_carry + remaining_prize
             if total_remaining >= cost:
-                cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
+                cur.execute("""
+                    UPDATE registrations SET is_paid=TRUE, pending_upgrade=FALSE
+                    WHERE id=%s
+                """, (reg_id,))
                 if remaining_prize >= cost:
                     remaining_prize -= cost
                 else:
