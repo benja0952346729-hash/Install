@@ -1245,7 +1245,18 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
-        if parsed_name:
+        # ✅ nekay snap value ይለይ
+        nekay_snap_value = None
+        if game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {}):
+            nekay_snap_value = nekay_numbers[game_id][actual_num]
+
+        is_nekay = (nekay_snap_value is not None)
+        is_nekay_force = (nekay_snap_value == 0)
+
+        # ✅ FIX: force-replace ጊዜ ሁልጊዜ አዲሱን user_name ተጠቀም
+        if is_nekay_force:
+            actual_name = user_name
+        elif parsed_name:
             actual_name = parsed_name
         elif actual_num in taken_before:
             existing_slots = taken_before[actual_num]
@@ -1260,16 +1271,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if actual_num < 1 or actual_num > settings["total_numbers"]:
             all_taken.append(actual_num)
             continue
-
-        # ✅ FIX: nekay snap value ይለይ
-        # value 0 = slot1 unpaid (force replace ይፈቀዳል)
-        # value 2 = slot2 ብቻ ክፍት (force ሳያስፈልግ normal logic ይጠቀም)
-        nekay_snap_value = None
-        if game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {}):
-            nekay_snap_value = nekay_numbers[game_id][actual_num]
-
-        is_nekay = (nekay_snap_value is not None)
-        is_nekay_force = (nekay_snap_value == 0)
 
         # ✅ user የራሱ ቁጥር ከሆነ directly change_number_type ጠራ
         if user_owns_number(game_id, user_id, actual_num) and not is_nekay:
