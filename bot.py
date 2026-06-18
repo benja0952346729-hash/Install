@@ -281,19 +281,41 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
     if game_id not in nekay_active:
         return
 
-    snap = nekay_numbers.get(game_id, {})
-    changed = False
-
-    for c in confirmed:
-        number = c["number"]
-        if number in snap:
-            del snap[number]
-            changed = True
-
-    if not changed:
-        return
-
+    fresh_unpaid = get_unpaid_numbers(game_id)
+    snap = {}
+    for number, slots in fresh_unpaid:
+        if slots == {2}:
+            snap[number] = 2
+        else:
+            snap[number] = 0
     nekay_numbers[game_id] = snap
+
+    if not snap:
+        settings = get_active_settings()
+        if settings:
+            group_id = settings.get("group_id") or GROUP_ID
+            taken = get_taken_numbers(game_id)
+            paid = get_paid_numbers(game_id)
+            board_text = build_board(settings, taken, paid)
+            board_msg_id = settings.get("board_message_id")
+            if board_msg_id:
+                try:
+                    await bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+                except Exception:
+                    new_msg = await bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_msg.message_id)
+
+            rem_msg_id = settings.get("remaining_message_id")
+            if rem_msg_id:
+                try:
+                    await bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+                except Exception:
+                    pass
+            update_remaining_message_id(game_id, None)
+            nekay_active.discard(game_id)
+            nekay_numbers.pop(game_id, None)
+            _stop_inactivity_tracker(game_id)
+        return
 
     settings = get_active_settings()
     if not settings:
@@ -318,18 +340,11 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
         except Exception:
             pass
 
-    if snap:
-        nekay_list = _build_nekay_from_snap(snap)
-        nekay_text = build_nekay(nekay_list)
-        new_nekay = await bot.send_message(chat_id=group_id, text=nekay_text)
-        update_remaining_message_id(game_id, new_nekay.message_id)
-    else:
-        update_remaining_message_id(game_id, None)
-        nekay_active.discard(game_id)
-        nekay_numbers.pop(game_id, None)
-        _stop_inactivity_tracker(game_id)
+    nekay_list = _build_nekay_from_snap(snap)
+    nekay_text = build_nekay(nekay_list)
+    new_nekay = await bot.send_message(chat_id=group_id, text=nekay_text)
+    update_remaining_message_id(game_id, new_nekay.message_id)
 
-    # ሁሉም paid ሆኑ ወይ check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(bot, fresh, group_id)
