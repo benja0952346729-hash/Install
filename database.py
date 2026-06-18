@@ -419,9 +419,7 @@ def init_db():
 def add_complete_sticker(file_id: str):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO complete_stickers (file_id) VALUES (%s)
-    """, (file_id,))
+    cur.execute("INSERT INTO complete_stickers (file_id) VALUES (%s)", (file_id,))
     conn.commit()
     cur.close()
     conn.close()
@@ -552,9 +550,7 @@ def remove_group_admin(group_id: int, telegram_id: int) -> bool:
 def is_group_admin(group_id: int, telegram_id: int) -> bool:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT 1 FROM group_admins WHERE group_id=%s AND telegram_id=%s
-    """, (group_id, telegram_id))
+    cur.execute("SELECT 1 FROM group_admins WHERE group_id=%s AND telegram_id=%s", (group_id, telegram_id))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -596,9 +592,7 @@ def get_usernames(group_id: int) -> list:
     cur = conn.cursor()
     cur.execute("""
         SELECT username, is_read, last_seen
-        FROM group_members
-        WHERE group_id=%s
-        ORDER BY last_seen DESC
+        FROM group_members WHERE group_id=%s ORDER BY last_seen DESC
     """, (group_id,))
     rows = cur.fetchall()
     cur.close()
@@ -651,14 +645,12 @@ def get_activity(group_id: int = None) -> list:
     if group_id:
         cur.execute("""
             SELECT group_id, SUM(messages), SUM(registrations), SUM(payments), MAX(last_active)
-            FROM group_activity
-            WHERE group_id=%s
-            GROUP BY group_id
+            FROM group_activity WHERE group_id=%s GROUP BY group_id
         """, (group_id,))
     else:
         cur.execute("""
-            SELECT ga.group_id, SUM(ga.messages), SUM(ga.registrations), SUM(ga.payments), MAX(ga.last_active),
-                   g.group_name
+            SELECT ga.group_id, SUM(ga.messages), SUM(ga.registrations), SUM(ga.payments),
+                   MAX(ga.last_active), g.group_name
             FROM group_activity ga
             LEFT JOIN groups g ON g.group_id = ga.group_id
             WHERE g.is_enabled = TRUE
@@ -753,14 +745,10 @@ def get_active_settings(group_id: int = None):
     if group_id:
         cur.execute("""
             SELECT * FROM game_settings
-            WHERE is_active = TRUE AND group_id=%s
-            ORDER BY id DESC LIMIT 1
+            WHERE is_active = TRUE AND group_id=%s ORDER BY id DESC LIMIT 1
         """, (group_id,))
     else:
-        cur.execute("""
-            SELECT * FROM game_settings
-            WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
-        """)
+        cur.execute("SELECT * FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -778,9 +766,7 @@ def update_countdown_settings(game_id: int, enabled: bool, minutes: float):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE game_settings
-        SET countdown_enabled=%s, countdown_minutes=%s
-        WHERE id=%s
+        UPDATE game_settings SET countdown_enabled=%s, countdown_minutes=%s WHERE id=%s
     """, (enabled, minutes, game_id))
     conn.commit()
     cur.close()
@@ -798,9 +784,7 @@ def set_warning_media(minutes: float, file_id: str, media_type: str, set_by: int
         INSERT INTO warning_media (minutes, file_id, media_type)
         VALUES (%s, %s, %s)
         ON CONFLICT (minutes) DO UPDATE
-            SET file_id=EXCLUDED.file_id,
-                media_type=EXCLUDED.media_type,
-                added_at=NOW()
+            SET file_id=EXCLUDED.file_id, media_type=EXCLUDED.media_type, added_at=NOW()
     """, (minutes, file_id, media_type))
     conn.commit()
     cur.close()
@@ -811,10 +795,8 @@ def get_warning_media(minutes: float) -> dict:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT minutes, file_id, media_type
-        FROM warning_media
-        ORDER BY ABS(minutes - %s) ASC
-        LIMIT 1
+        SELECT minutes, file_id, media_type FROM warning_media
+        ORDER BY ABS(minutes - %s) ASC LIMIT 1
     """, (minutes,))
     row = cur.fetchone()
     cur.close()
@@ -946,7 +928,6 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False, a
                 WHERE game_id=%s AND number=%s AND user_id=%s
             """, (user_name.strip(), game_id, number, user_id))
             conn.commit()
-
         cur.close()
         conn.close()
         if not allow_toggle:
@@ -987,7 +968,6 @@ def _deduct_balance(cur, group_id: int, user_id: int, cost: float, prize_balance
     else:
         new_prize = 0
         new_carry = carry_balance - (cost - prize_balance)
-
     new_total = new_carry + new_prize
     cur.execute("""
         UPDATE user_balance
@@ -1018,12 +998,10 @@ def all_numbers_paid(game_id: int, settings: dict) -> bool:
     taken = get_taken_numbers(game_id)
     total = settings["total_numbers"]
     per_person = settings["numbers_per_person"]
-
     if per_person == 1:
         number_range = range(1, total + 1)
     else:
         number_range = range(1, total + 1, per_person)
-
     for n in number_range:
         entry = taken.get(n, [])
         if not entry:
@@ -1033,7 +1011,6 @@ def all_numbers_paid(game_id: int, settings: dict) -> bool:
                 return False
         if len(entry) == 1 and entry[0][1]:
             return False
-
     return True
 
 
@@ -1047,13 +1024,13 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
 
     if group_id:
         cur.execute("""
-            SELECT id, price_full, price_half
-            FROM game_settings WHERE is_active = TRUE AND group_id=%s ORDER BY id DESC LIMIT 1
+            SELECT id, price_full, price_half FROM game_settings
+            WHERE is_active = TRUE AND group_id=%s ORDER BY id DESC LIMIT 1
         """, (group_id,))
     else:
         cur.execute("""
-            SELECT id, price_full, price_half
-            FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
+            SELECT id, price_full, price_half FROM game_settings
+            WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
         """)
     game_row = cur.fetchone()
     if not game_row:
@@ -1091,9 +1068,8 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
     confirmed = []
 
     cur.execute("""
-        SELECT id, number, is_half, slot
-        FROM registrations
-        WHERE game_id = %s AND user_id = %s AND is_paid = TRUE AND pending_upgrade = TRUE
+        SELECT id, number, is_half, slot FROM registrations
+        WHERE game_id=%s AND user_id=%s AND is_paid=TRUE AND pending_upgrade=TRUE
         ORDER BY registered_at
     """, (game_id, telegram_id))
     pending_upgrades = cur.fetchall()
@@ -1112,9 +1088,8 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
             confirmed.append({"number": number, "is_half": False, "slot": slot})
 
     cur.execute("""
-        SELECT id, number, is_half, slot
-        FROM registrations
-        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE AND is_nekay = FALSE
+        SELECT id, number, is_half, slot FROM registrations
+        WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND is_nekay=FALSE
         ORDER BY registered_at, slot
     """, (game_id, telegram_id))
     unpaid = cur.fetchall()
@@ -1133,9 +1108,8 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
             confirmed.append({"number": number, "is_half": is_half, "slot": slot})
 
     cur.execute("""
-        SELECT id, number, is_half, slot
-        FROM registrations
-        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE AND is_nekay = TRUE
+        SELECT id, number, is_half, slot FROM registrations
+        WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND is_nekay=TRUE
         ORDER BY registered_at, slot
     """, (game_id, telegram_id))
     nekay_unpaid = cur.fetchall()
@@ -1176,10 +1150,7 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
 def get_paid_numbers(game_id: int) -> dict:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT number, slot FROM registrations
-        WHERE game_id = %s AND is_paid = TRUE
-    """, (game_id,))
+    cur.execute("SELECT number, slot FROM registrations WHERE game_id=%s AND is_paid=TRUE", (game_id,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -1199,8 +1170,7 @@ def get_unpaid_numbers(game_id: int) -> list:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT number, slot, is_half, pending_upgrade
-        FROM registrations
+        SELECT number, slot, is_half, pending_upgrade FROM registrations
         WHERE game_id=%s AND (is_paid=FALSE OR pending_upgrade=TRUE)
         ORDER BY number, slot
     """, (game_id,))
@@ -1219,24 +1189,19 @@ def get_unpaid_numbers(game_id: int) -> list:
 
 
 # ============================================================
-# NEKAY — FIX 2a
+# NEKAY
 # ============================================================
 
 def mark_nekay(game_id: int, number: int):
     conn = get_conn()
     cur = conn.cursor()
-    # is_paid=FALSE ያላቸው → is_nekay=TRUE
     cur.execute("""
-        UPDATE registrations
-        SET is_nekay=TRUE
+        UPDATE registrations SET is_nekay=TRUE
         WHERE game_id=%s AND number=%s AND is_paid=FALSE
     """, (game_id, number))
-    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE + pending_upgrade=FALSE
     cur.execute("""
         UPDATE registrations
-        SET is_nekay=TRUE,
-            is_half=TRUE,
-            pending_upgrade=FALSE
+        SET is_nekay=TRUE, is_half=TRUE, pending_upgrade=FALSE
         WHERE game_id=%s AND number=%s AND is_paid=TRUE AND pending_upgrade=TRUE
     """, (game_id, number))
     conn.commit()
@@ -1253,9 +1218,7 @@ def get_user_by_number(game_id: int, number: int) -> dict:
     cur = conn.cursor()
     cur.execute("""
         SELECT user_id, user_name FROM registrations
-        WHERE game_id=%s AND number=%s
-        ORDER BY is_paid DESC, slot ASC
-        LIMIT 1
+        WHERE game_id=%s AND number=%s ORDER BY is_paid DESC, slot ASC LIMIT 1
     """, (game_id, number))
     row = cur.fetchone()
     cur.close()
@@ -1296,7 +1259,7 @@ def get_winner_by_place(game_id: int, place: int) -> dict:
                COALESCE(ub.balance, 0) as balance, w.group_id
         FROM winners w
         LEFT JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
-        WHERE w.game_id = %s AND w.place = %s
+        WHERE w.game_id=%s AND w.place=%s
     """, (game_id, place))
     row = cur.fetchone()
     cur.close()
@@ -1304,8 +1267,7 @@ def get_winner_by_place(game_id: int, place: int) -> dict:
     if not row:
         return None
     return {
-        "telegram_id": row[0],
-        "user_name": row[1],
+        "telegram_id": row[0], "user_name": row[1],
         "prize": float(row[2]) if row[2] else 0,
         "balance": float(row[3]) if row[3] else 0,
         "group_id": row[4],
@@ -1320,24 +1282,23 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
         INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize, group_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (game_id, place) DO UPDATE
-            SET telegram_id=EXCLUDED.telegram_id,
-                user_name=EXCLUDED.user_name,
-                number=EXCLUDED.number,
-                prize=EXCLUDED.prize,
-                group_id=EXCLUDED.group_id
+            SET telegram_id=EXCLUDED.telegram_id, user_name=EXCLUDED.user_name,
+                number=EXCLUDED.number, prize=EXCLUDED.prize, group_id=EXCLUDED.group_id
     """, (game_id, place, telegram_id, user_name, number, prize, group_id))
     conn.commit()
     cur.close()
     conn.close()
 
 
+# ── FIX: telegram_id ጨምሯል ──
 def get_recent_winners(group_id: int, hours: int = 24) -> list:
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=hours)
     cur.execute("""
         SELECT w.place, w.user_name, w.prize, w.created_at,
-               COALESCE(ub.balance, 0) as balance, w.sent
+               COALESCE(ub.balance, 0) as balance, w.sent,
+               w.telegram_id, w.number
         FROM winners w
         LEFT JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
         WHERE w.group_id=%s AND w.created_at >= %s
@@ -1348,7 +1309,8 @@ def get_recent_winners(group_id: int, hours: int = 24) -> list:
     conn.close()
     return [{
         "place": r[0], "user_name": r[1], "prize": float(r[2] or 0),
-        "created_at": r[3], "balance": float(r[4] or 0), "sent": r[5]
+        "created_at": r[3], "balance": float(r[4] or 0), "sent": r[5],
+        "telegram_id": r[6], "number": r[7],
     } for r in rows]
 
 
@@ -1357,12 +1319,9 @@ def cleanup_old_winners():
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=24)
     cur.execute("""
-        DELETE FROM winners w
-        USING user_balance ub
-        WHERE w.telegram_id = ub.telegram_id
-          AND w.group_id = ub.group_id
-          AND w.created_at < %s
-          AND COALESCE(ub.balance, 0) <= 0
+        DELETE FROM winners w USING user_balance ub
+        WHERE w.telegram_id = ub.telegram_id AND w.group_id = ub.group_id
+          AND w.created_at < %s AND COALESCE(ub.balance, 0) <= 0
     """, (cutoff,))
     conn.commit()
     cur.close()
@@ -1372,9 +1331,7 @@ def cleanup_old_winners():
 def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        UPDATE winners SET sent=TRUE WHERE game_id=%s AND telegram_id=%s
-    """, (game_id, telegram_id))
+    cur.execute("UPDATE winners SET sent=TRUE WHERE game_id=%s AND telegram_id=%s", (game_id, telegram_id))
     conn.commit()
     cur.close()
     conn.close()
@@ -1428,12 +1385,9 @@ def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_i
         price_half = float(price_row[1] or 0)
 
         cur.execute("""
-            SELECT id, number, is_half, slot
-            FROM registrations
-            WHERE game_id = %s AND user_id = %s AND is_paid = TRUE AND is_nekay = FALSE
-            ORDER BY
-                CASE WHEN is_half THEN %s ELSE %s END ASC,
-                registered_at DESC
+            SELECT id, number, is_half, slot FROM registrations
+            WHERE game_id=%s AND user_id=%s AND is_paid=TRUE AND is_nekay=FALSE
+            ORDER BY CASE WHEN is_half THEN %s ELSE %s END ASC, registered_at DESC
         """, (game_id, telegram_id, price_half, price_full))
         paid_regs = cur.fetchall()
 
@@ -1468,16 +1422,11 @@ def clear_prize_balance(group_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE user_balance
-        SET prize_balance=0,
-            balance=carry_balance,
-            updated_at=NOW()
+        UPDATE user_balance SET prize_balance=0, balance=carry_balance, updated_at=NOW()
         WHERE group_id=%s AND winner_carried=TRUE
     """, (group_id,))
     cur.execute("""
-        UPDATE user_balance
-        SET winner_carried=TRUE,
-            updated_at=NOW()
+        UPDATE user_balance SET winner_carried=TRUE, updated_at=NOW()
         WHERE group_id=%s AND winner_carried=FALSE AND prize_balance > 0
     """, (group_id,))
     conn.commit()
@@ -1516,8 +1465,7 @@ def admin_mark_paid(game_id: int, number: int, slot: int, is_paid: bool = True):
 
     if not is_paid:
         cur.execute("""
-            UPDATE registrations SET is_paid=%s
-            WHERE game_id=%s AND number=%s AND slot=%s
+            UPDATE registrations SET is_paid=%s WHERE game_id=%s AND number=%s AND slot=%s
         """, (is_paid, game_id, number, slot))
         conn.commit()
         cur.close()
@@ -1525,8 +1473,7 @@ def admin_mark_paid(game_id: int, number: int, slot: int, is_paid: bool = True):
         return
 
     cur.execute("""
-        SELECT r.user_id, r.is_half, r.is_paid,
-               gs.price_full, gs.price_half, gs.group_id
+        SELECT r.user_id, r.is_half, r.is_paid, gs.price_full, gs.price_half, gs.group_id
         FROM registrations r
         JOIN game_settings gs ON gs.id = r.game_id
         WHERE r.game_id=%s AND r.number=%s AND r.slot=%s
@@ -1578,7 +1525,6 @@ def admin_mark_paid(game_id: int, number: int, slot: int, is_paid: bool = True):
 
     deduct = min(cost, total_balance)
     _deduct_balance(cur, group_id, user_id, deduct, prize_balance, carry_balance)
-
     conn.commit()
     cur.close()
     conn.close()
@@ -1593,10 +1539,8 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
     cur = conn.cursor()
 
     cur.execute("""
-        SELECT id, is_half, slot, is_paid, pending_upgrade
-        FROM registrations
-        WHERE game_id=%s AND user_id=%s AND number=%s
-        ORDER BY slot
+        SELECT id, is_half, slot, is_paid, pending_upgrade FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s ORDER BY slot
     """, (game_id, user_id, number))
     rows = cur.fetchall()
 
@@ -1636,16 +1580,13 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
                 new_carry = carry_balance + refund
                 new_prize = prize_balance
                 new_total = new_carry + new_prize
-
                 cur.execute("""
-                    UPDATE user_balance
-                    SET carry_balance=%s, balance=%s, updated_at=NOW()
+                    UPDATE user_balance SET carry_balance=%s, balance=%s, updated_at=NOW()
                     WHERE group_id=%s AND telegram_id=%s
                 """, (new_carry, new_total, group_id, user_id))
 
                 cur.execute("""
-                    SELECT id, number, is_half, slot
-                    FROM registrations
+                    SELECT id, number, is_half, slot FROM registrations
                     WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND number != %s
                     ORDER BY registered_at, slot
                 """, (game_id, user_id, number))
@@ -1701,8 +1642,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
                 rem_prize = float(updated_bal[1])
 
                 cur.execute("""
-                    SELECT id, number, is_half, slot
-                    FROM registrations
+                    SELECT id, number, is_half, slot FROM registrations
                     WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND number != %s
                     ORDER BY registered_at, slot
                 """, (game_id, user_id, number))
@@ -1732,9 +1672,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
             return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True}
         else:
             cur.execute("""
-                UPDATE registrations
-                SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
-                WHERE id=%s
+                UPDATE registrations SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE WHERE id=%s
             """, (reg_id,))
             conn.commit()
             cur.close()
@@ -1788,8 +1726,7 @@ def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
         cur.execute("""
             SELECT DISTINCT ON (number) number, reason, taken_by_slot1, taken_by_slot2,
                    taken_type_slot1, taken_type_slot2, attempted_at
-            FROM failed_attempts
-            WHERE game_id=%s AND user_id=%s
+            FROM failed_attempts WHERE game_id=%s AND user_id=%s
             ORDER BY number, attempted_at DESC
         """, (game_id, user_id))
     rows = cur.fetchall()
@@ -1797,6 +1734,26 @@ def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
     conn.close()
     return [{"number": r[0], "reason": r[1], "slot1_name": r[2], "slot2_name": r[3],
              "slot1_type": r[4], "slot2_type": r[5], "attempted_at": r[6]} for r in rows]
+
+
+# ============================================================
+# USER BALANCE — NEW FUNCTION
+# ============================================================
+
+def get_user_balance(group_id: int, telegram_id: int) -> float:
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT balance FROM user_balance
+            WHERE group_id=%s AND telegram_id=%s
+        """, (group_id, telegram_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return float(row[0]) if row else 0.0
+    except Exception:
+        return 0.0
 
 
 # ============================================================
@@ -1832,30 +1789,22 @@ def _names_match(name1: str, name2: str) -> bool:
 def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str, group_id: int = None) -> dict:
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
         INSERT INTO sms_payments (group_id, ref_no, amount, sender_name, pay_type, raw_sms, matched)
-        VALUES (%s, %s, %s, %s, %s, %s, FALSE)
-        RETURNING id
+        VALUES (%s, %s, %s, %s, %s, %s, FALSE) RETURNING id
     """, (group_id, ref, amount, sender_name, sms_type, raw_sms))
     sms_id = cur.fetchone()[0]
     conn.commit()
 
     if group_id:
         cur.execute("""
-            SELECT id, telegram_id, ref_no, amount, sender_name
-            FROM screenshot_payments
-            WHERE matched=FALSE AND group_id=%s
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
+            SELECT id, telegram_id, ref_no, amount, sender_name FROM screenshot_payments
+            WHERE matched=FALSE AND group_id=%s AND amount BETWEEN %s AND %s ORDER BY created_at ASC
         """, (group_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     else:
         cur.execute("""
-            SELECT id, telegram_id, ref_no, amount, sender_name
-            FROM screenshot_payments
-            WHERE matched=FALSE
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
+            SELECT id, telegram_id, ref_no, amount, sender_name FROM screenshot_payments
+            WHERE matched=FALSE AND amount BETWEEN %s AND %s ORDER BY created_at ASC
         """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     candidates = cur.fetchall()
 
@@ -1881,11 +1830,8 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
         cur.execute("UPDATE screenshot_payments SET matched=TRUE WHERE id=%s", (scr_id,))
         conn.commit()
         matched_data = {
-            "telegram_id": telegram_id,
-            "amount": float(amount),
-            "type": sms_type,
-            "sender_name": sender_name or scr_sender,
-            "group_id": group_id,
+            "telegram_id": telegram_id, "amount": float(amount),
+            "type": sms_type, "sender_name": sender_name or scr_sender, "group_id": group_id,
         }
 
     cur.close()
@@ -1898,19 +1844,13 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
     cur = conn.cursor()
     if group_id:
         cur.execute("""
-            SELECT id, ref_no, amount, sender_name, pay_type
-            FROM sms_payments
-            WHERE matched=FALSE AND group_id=%s
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
+            SELECT id, ref_no, amount, sender_name, pay_type FROM sms_payments
+            WHERE matched=FALSE AND group_id=%s AND amount BETWEEN %s AND %s ORDER BY created_at ASC
         """, (group_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     else:
         cur.execute("""
-            SELECT id, ref_no, amount, sender_name, pay_type
-            FROM sms_payments
-            WHERE matched=FALSE
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
+            SELECT id, ref_no, amount, sender_name, pay_type FROM sms_payments
+            WHERE matched=FALSE AND amount BETWEEN %s AND %s ORDER BY created_at ASC
         """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     candidates = cur.fetchall()
     cur.close()
@@ -1918,24 +1858,17 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
 
     if not candidates:
         return None
-
     if ref:
         for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
             if sms_ref and sms_ref == ref:
-                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
-                        "sender_name": sender_name or sms_sender}
-
+                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type, "sender_name": sender_name or sms_sender}
     if sender_name:
         for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
             if _names_match(sender_name, sms_sender):
-                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
-                        "sender_name": sender_name or sms_sender}
-
+                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type, "sender_name": sender_name or sms_sender}
     if len(candidates) == 1:
         sms_id, sms_ref, sms_amount, sms_sender, sms_type = candidates[0]
-        return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
-                "sender_name": sender_name or sms_sender}
-
+        return {"id": sms_id, "amount": float(sms_amount), "type": sms_type, "sender_name": sender_name or sms_sender}
     return None
 
 
@@ -1963,26 +1896,16 @@ def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
     import uuid
     conn = get_conn()
     cur = conn.cursor()
-
     if group_id:
-        cur.execute("""
-            DELETE FROM screenshot_payments
-            WHERE telegram_id=%s AND group_id=%s AND matched=FALSE
-        """, (telegram_id, group_id))
+        cur.execute("DELETE FROM screenshot_payments WHERE telegram_id=%s AND group_id=%s AND matched=FALSE", (telegram_id, group_id))
     else:
-        cur.execute("""
-            DELETE FROM screenshot_payments
-            WHERE telegram_id=%s AND matched=FALSE
-        """, (telegram_id,))
-
+        cur.execute("DELETE FROM screenshot_payments WHERE telegram_id=%s AND matched=FALSE", (telegram_id,))
     safe_ref = ref if (pay_type == "Telebirr" and ref) else str(uuid.uuid4())
-
     cur.execute("""
         INSERT INTO screenshot_payments
         (group_id, telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
         VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
     """, (group_id, telegram_id, safe_ref, amount, sender_name, pay_type, description))
-
     conn.commit()
     cur.close()
     conn.close()
@@ -1994,20 +1917,13 @@ def get_sms_payment_by_ref(ref_no: str):
         return None
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("""
-        SELECT id, ref_no, amount, sender_name, pay_type
-        FROM sms_payments WHERE ref_no = %s
-    """, (ref_no,))
+    cur.execute("SELECT id, ref_no, amount, sender_name, pay_type FROM sms_payments WHERE ref_no=%s", (ref_no,))
     row = cur.fetchone()
     cur.close()
     conn.close()
     if not row:
         return None
-    return {
-        "id": row[0], "refNo": row[1],
-        "amount": float(row[2]) if row[2] is not None else None,
-        "sender_name": row[3], "type": row[4],
-    }
+    return {"id": row[0], "refNo": row[1], "amount": float(row[2]) if row[2] is not None else None, "sender_name": row[3], "type": row[4]}
 
 
 def is_ref_matched_already(ref_no: str) -> bool:
@@ -2016,9 +1932,9 @@ def is_ref_matched_already(ref_no: str) -> bool:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT 1 FROM sms_payments WHERE ref_no = %s AND matched = TRUE
+        SELECT 1 FROM sms_payments WHERE ref_no=%s AND matched=TRUE
         UNION
-        SELECT 1 FROM screenshot_payments WHERE ref_no = %s AND matched = TRUE
+        SELECT 1 FROM screenshot_payments WHERE ref_no=%s AND matched=TRUE
     """, (ref_no, ref_no))
     row = cur.fetchone()
     cur.close()
@@ -2030,8 +1946,8 @@ def cleanup_old_payments(days: int = 7):
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(days=days)
-    cur.execute("DELETE FROM sms_payments WHERE matched = FALSE AND created_at < %s", (cutoff,))
-    cur.execute("DELETE FROM screenshot_payments WHERE matched = FALSE AND created_at < %s", (cutoff,))
+    cur.execute("DELETE FROM sms_payments WHERE matched=FALSE AND created_at < %s", (cutoff,))
+    cur.execute("DELETE FROM screenshot_payments WHERE matched=FALSE AND created_at < %s", (cutoff,))
     conn.commit()
     cur.close()
     conn.close()
@@ -2045,8 +1961,8 @@ def get_user_numbers(game_id: int, user_id: int) -> list:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT number, is_half, slot, is_paid
-        FROM registrations WHERE game_id=%s AND user_id=%s ORDER BY number, slot
+        SELECT number, is_half, slot, is_paid FROM registrations
+        WHERE game_id=%s AND user_id=%s ORDER BY number, slot
     """, (game_id, user_id))
     rows = cur.fetchall()
     cur.close()
@@ -2057,8 +1973,7 @@ def get_user_numbers(game_id: int, user_id: int) -> list:
 def user_owns_number(game_id: int, user_id: int, number: int) -> bool:
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM registrations WHERE game_id=%s AND user_id=%s AND number=%s LIMIT 1",
-                (game_id, user_id, number))
+    cur.execute("SELECT 1 FROM registrations WHERE game_id=%s AND user_id=%s AND number=%s LIMIT 1", (game_id, user_id, number))
     row = cur.fetchone()
     cur.close()
     conn.close()
@@ -2077,6 +1992,7 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
         cur.close()
         conn.close()
         return False
+
     cur.execute("SELECT price_full, price_half, group_id FROM game_settings WHERE id=%s", (game_id,))
     price_row = cur.fetchone()
     price_full = float(price_row[0] or 0)
@@ -2098,8 +2014,7 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
 
     if refund > 0:
         cur.execute("""
-            SELECT carry_balance, prize_balance FROM user_balance
-            WHERE group_id=%s AND telegram_id=%s
+            SELECT carry_balance, prize_balance FROM user_balance WHERE group_id=%s AND telegram_id=%s
         """, (group_id, user_id))
         bal_row = cur.fetchone()
         carry_balance = float(bal_row[0]) if bal_row else 0.0
@@ -2111,14 +2026,11 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
         cur.execute("""
             INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance)
             VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (group_id, telegram_id)
-            DO UPDATE SET carry_balance=%s, balance=%s, updated_at=NOW()
+            ON CONFLICT (group_id, telegram_id) DO UPDATE SET carry_balance=%s, balance=%s, updated_at=NOW()
         """, (group_id, user_id, new_total, new_carry, prize_balance, new_carry, new_total))
 
-        # FIX 2b — pending_upgrade=TRUE ያላቸውን ጨምሮ ሁሉንም unpaid ይከፍላል
         cur.execute("""
-            SELECT id, number, is_half, slot, pending_upgrade
-            FROM registrations
+            SELECT id, number, is_half, slot, pending_upgrade FROM registrations
             WHERE game_id=%s AND user_id=%s AND (is_paid=FALSE OR pending_upgrade=TRUE)
             ORDER BY registered_at, slot
         """, (game_id, user_id))
@@ -2130,10 +2042,7 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
             cost = price_half if (reg_is_half or reg_pending) else price_full
             total_remaining = remaining_carry + remaining_prize
             if total_remaining >= cost:
-                cur.execute("""
-                    UPDATE registrations SET is_paid=TRUE, pending_upgrade=FALSE
-                    WHERE id=%s
-                """, (reg_id,))
+                cur.execute("UPDATE registrations SET is_paid=TRUE, pending_upgrade=FALSE WHERE id=%s", (reg_id,))
                 if remaining_prize >= cost:
                     remaining_prize -= cost
                 else:
@@ -2143,8 +2052,7 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
 
         new_total = remaining_carry + remaining_prize
         cur.execute("""
-            UPDATE user_balance
-            SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+            UPDATE user_balance SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
             WHERE group_id=%s AND telegram_id=%s
         """, (new_total, remaining_carry, remaining_prize, group_id, user_id))
 
@@ -2201,12 +2109,10 @@ def clear_balance_by_username(group_id: int, username: str) -> bool:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT gm.username, r.user_id
-        FROM group_members gm
+        SELECT gm.username, r.user_id FROM group_members gm
         JOIN registrations r ON r.user_name = gm.username
         JOIN game_settings gs ON gs.id = r.game_id
-        WHERE gm.group_id=%s AND LOWER(gm.username)=LOWER(%s)
-        LIMIT 1
+        WHERE gm.group_id=%s AND LOWER(gm.username)=LOWER(%s) LIMIT 1
     """, (group_id, username.lstrip("@")))
     row = cur.fetchone()
     if not row:
@@ -2234,8 +2140,7 @@ def set_group_active(group_id: int, is_active: bool):
     cur.execute("UPDATE groups SET is_active=%s WHERE group_id=%s", (is_active, group_id))
     if cur.rowcount == 0:
         cur.execute("""
-            INSERT INTO groups (group_id, is_enabled, is_active)
-            VALUES (%s, TRUE, %s)
+            INSERT INTO groups (group_id, is_enabled, is_active) VALUES (%s, TRUE, %s)
             ON CONFLICT (group_id) DO UPDATE SET is_active=EXCLUDED.is_active
         """, (group_id, is_active))
     conn.commit()
@@ -2265,19 +2170,14 @@ def save_game_report(group_id: int, game_id: int, total_bet: float,
     cur = conn.cursor()
     cur.execute("""
         CREATE TABLE IF NOT EXISTS game_reports (
-            id SERIAL PRIMARY KEY,
-            group_id BIGINT NOT NULL,
-            game_id INT,
-            total_bet NUMERIC DEFAULT 0,
-            prize_total NUMERIC DEFAULT 0,
-            profit NUMERIC DEFAULT 0,
-            registered_count INT DEFAULT 0,
+            id SERIAL PRIMARY KEY, group_id BIGINT NOT NULL, game_id INT,
+            total_bet NUMERIC DEFAULT 0, prize_total NUMERIC DEFAULT 0,
+            profit NUMERIC DEFAULT 0, registered_count INT DEFAULT 0,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
     cur.execute("""
-        INSERT INTO game_reports
-        (group_id, game_id, total_bet, prize_total, profit, registered_count)
+        INSERT INTO game_reports (group_id, game_id, total_bet, prize_total, profit, registered_count)
         VALUES (%s, %s, %s, %s, %s, %s)
     """, (group_id, game_id, total_bet, prize_total, profit, registered_count))
     conn.commit()
@@ -2292,11 +2192,9 @@ def get_report(group_id: int) -> dict:
 
     try:
         cur.execute("""
-            SELECT COUNT(*), COALESCE(SUM(total_bet),0),
-                   COALESCE(SUM(prize_total),0), COALESCE(SUM(profit),0),
-                   COALESCE(SUM(registered_count),0)
-            FROM game_reports
-            WHERE group_id=%s AND created_at >= %s
+            SELECT COUNT(*), COALESCE(SUM(total_bet),0), COALESCE(SUM(prize_total),0),
+                   COALESCE(SUM(profit),0), COALESCE(SUM(registered_count),0)
+            FROM game_reports WHERE group_id=%s AND created_at >= %s
         """, (group_id, cutoff))
         row = cur.fetchone()
         games_count = int(row[0] or 0)
@@ -2308,27 +2206,19 @@ def get_report(group_id: int) -> dict:
         games_count = total_bet = prize_total = profit = registered_count = 0
 
     cur.execute("""
-        SELECT gs.id, gs.price_full, gs.price_half,
-               gs.prize_1st, gs.prize_2nd, gs.prize_3rd,
+        SELECT gs.id, gs.price_full, gs.price_half, gs.prize_1st, gs.prize_2nd, gs.prize_3rd,
                gs.numbers_per_person, gs.total_numbers
-        FROM game_settings gs
-        WHERE gs.group_id=%s AND gs.is_active=TRUE
-        ORDER BY gs.id DESC LIMIT 1
+        FROM game_settings gs WHERE gs.group_id=%s AND gs.is_active=TRUE ORDER BY gs.id DESC LIMIT 1
     """, (group_id,))
     active = cur.fetchone()
 
     active_data = None
     if active:
-        (game_id, price_full, price_half,
-         prize_1st, prize_2nd, prize_3rd,
-         per_person, total_numbers) = active
-
+        (game_id, price_full, price_half, prize_1st, prize_2nd, prize_3rd, per_person, total_numbers) = active
         price_full = float(price_full or 0)
         prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
 
-        cur.execute("""
-            SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
-        """, (game_id,))
+        cur.execute("SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s", (game_id,))
         filled_groups = cur.fetchone()[0] or 0
 
         cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
@@ -2338,25 +2228,16 @@ def get_report(group_id: int) -> dict:
         active_profit = total_bet - prize_total if total_slots >= 15 else 0
 
         active_data = {
-            "game_id": game_id,
-            "total_slots": total_slots,
-            "filled_groups": filled_groups,
-            "total_bet": total_bet,
-            "prize_total": prize_total,
-            "profit": active_profit,
+            "game_id": game_id, "total_slots": total_slots, "filled_groups": filled_groups,
+            "total_bet": total_bet, "prize_total": prize_total, "profit": active_profit,
             "counted": total_slots >= 15,
         }
 
     cur.close()
     conn.close()
-
     return {
-        "games_count": games_count,
-        "total_bet": total_bet,
-        "prize_total": prize_total,
-        "profit": profit,
-        "registered_count": registered_count,
-        "active": active_data,
+        "games_count": games_count, "total_bet": total_bet, "prize_total": prize_total,
+        "profit": profit, "registered_count": registered_count, "active": active_data,
     }
 
 
@@ -2376,7 +2257,6 @@ def cleanup_old_reports():
 def calculate_game_profit(game_id: int) -> dict:
     conn = get_conn()
     cur = conn.cursor()
-
     cur.execute("""
         SELECT price_full, price_half, prize_1st, prize_2nd, prize_3rd,
                numbers_per_person, total_numbers, group_id
@@ -2388,15 +2268,11 @@ def calculate_game_profit(game_id: int) -> dict:
         conn.close()
         return {}
 
-    price_full, price_half, prize_1st, prize_2nd, prize_3rd, \
-        per_person, total_numbers, group_id = row
-
+    price_full, price_half, prize_1st, prize_2nd, prize_3rd, per_person, total_numbers, group_id = row
     price_full = float(price_full or 0)
     prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
 
-    cur.execute("""
-        SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
-    """, (game_id,))
+    cur.execute("SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s", (game_id,))
     filled_groups = cur.fetchone()[0] or 0
 
     cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
@@ -2407,14 +2283,8 @@ def calculate_game_profit(game_id: int) -> dict:
 
     cur.close()
     conn.close()
-
     return {
-        "game_id": game_id,
-        "group_id": group_id,
-        "filled_groups": filled_groups,
-        "total_bet": total_bet,
-        "prize_total": prize_total,
-        "profit": profit,
-        "registered_count": registered_count,
-        "counted": registered_count >= 15,
+        "game_id": game_id, "group_id": group_id, "filled_groups": filled_groups,
+        "total_bet": total_bet, "prize_total": prize_total, "profit": profit,
+        "registered_count": registered_count, "counted": registered_count >= 15,
     }
