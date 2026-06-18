@@ -1261,14 +1261,24 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             all_taken.append(actual_num)
             continue
 
-        is_nekay = game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {})
+        # ✅ FIX: nekay snap value ይለይ
+        # value 0 = slot1 unpaid (force replace ይፈቀዳል)
+        # value 2 = slot2 ብቻ ክፍት (force ሳያስፈልግ normal logic ይጠቀም)
+        nekay_snap_value = None
+        if game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {}):
+            nekay_snap_value = nekay_numbers[game_id][actual_num]
 
-        # ✅ FIX: user የራሱ ቁጥር ከሆነ directly change_number_type ጠራ
+        is_nekay = (nekay_snap_value is not None)
+        is_nekay_force = (nekay_snap_value == 0)
+
+        # ✅ user የራሱ ቁጥር ከሆነ directly change_number_type ጠራ
         if user_owns_number(game_id, user_id, actual_num) and not is_nekay:
             target_type = "half" if is_half else "full"
             result_tc = change_number_type(game_id, user_id, actual_num, target_type)
             if result_tc["status"] == "ok":
-                actual_is_half = result_tc.get("pending_upgrade", False) or is_half if result_tc.get("pending_upgrade") else is_half
+                actual_is_half = is_half
+                if result_tc.get("pending_upgrade"):
+                    actual_is_half = True
                 registered.append((actual_num, actual_is_half))
             elif result_tc["status"] == "no_change":
                 no_change_reply = True
@@ -1278,7 +1288,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
         result = register_number(
             game_id, user_id, actual_name, actual_num, is_half,
-            force=is_nekay, allow_toggle=allow_toggle,
+            force=is_nekay_force, allow_toggle=allow_toggle,
             is_parsed_name=bool(parsed_name)
         )
         if result in ["registered", "registered_half"]:
@@ -1437,7 +1447,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         check_and_rotate_db()
     except Exception:
         pass
-
 
 # ============================================================
 # HELPERS
