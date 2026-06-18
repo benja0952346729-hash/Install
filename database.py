@@ -1231,12 +1231,12 @@ def mark_nekay(game_id: int, number: int):
         SET is_nekay=TRUE
         WHERE game_id=%s AND number=%s AND is_paid=FALSE
     """, (game_id, number))
-    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE
-    # pending_upgrade=FALSE አናርገውም — get_unpaid_numbers ውስጥ እንዲታይ
+    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE + pending_upgrade=FALSE
     cur.execute("""
         UPDATE registrations
         SET is_nekay=TRUE,
-            is_half=TRUE
+            is_half=TRUE,
+            pending_upgrade=FALSE
         WHERE game_id=%s AND number=%s AND is_paid=TRUE AND pending_upgrade=TRUE
     """, (game_id, number))
     conn.commit()
@@ -2417,4 +2417,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-    }
+        }
