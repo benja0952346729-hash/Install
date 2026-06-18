@@ -393,16 +393,7 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         for number, slots in unpaid:
             mark_nekay(game_id, number)
 
-        unpaid2 = get_unpaid_numbers(game_id)
-        snap2 = {}
-        for number, slots in unpaid2:
-            if slots == {2}:
-                snap2[number] = 2
-            else:
-                snap2[number] = 0
-        nekay_numbers[game_id] = snap2
-
-        nekay_list = _build_nekay_from_snap(snap2)
+        nekay_list = _build_nekay_from_snap(snap)
         nekay_text = build_nekay(nekay_list)
 
         nekay_sent = await bot.send_message(chat_id=group_id, text=nekay_text)
