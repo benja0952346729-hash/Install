@@ -2417,4 +2417,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-        }
+    }
