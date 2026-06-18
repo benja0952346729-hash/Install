@@ -329,7 +329,6 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
         nekay_numbers.pop(game_id, None)
         _stop_inactivity_tracker(game_id)
 
-    # ሁሉም paid ሆኑ ወይ check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(bot, fresh, group_id)
@@ -846,6 +845,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 )
             except Exception as _log_err:
                 logging.warning(f"[log_transaction] Error: {_log_err}")
+            # ← ይኼ ነው fix የተደረገው ቦታ
             if game_id in nekay_active:
                 fresh_unpaid = get_unpaid_numbers(game_id)
                 rebuilt_snap = {}
@@ -872,7 +872,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         update_remaining_message_id(game_id, None)
                         nekay_active.discard(game_id)
                         nekay_numbers.pop(game_id, None)
-                # all paid check
                 fresh2 = get_active_settings(group_id=group_id)
                 if fresh2:
                     await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
@@ -1025,7 +1024,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
                         countdown_done.add(game_id)
 
-            # all paid check
             fresh2 = get_active_settings(group_id=group_id)
             if fresh2:
                 await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
@@ -1186,6 +1184,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         log_activity(group_id, registrations=1)
     except Exception:
         pass
+
 
 async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
     pending = pending_ambiguous.get(user_id)
@@ -1400,7 +1399,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
             countdown_done.add(game_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -1679,7 +1677,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 nekay_numbers.pop(game_id, None)
                 _stop_inactivity_tracker(game_id)
 
-        # all paid check
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
 
@@ -1720,7 +1717,6 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _refresh_board(ctx, settings, group_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -1791,7 +1787,6 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _refresh_board(ctx, settings, group_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -1885,7 +1880,6 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _refresh_board(ctx, settings, group_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -2258,7 +2252,6 @@ async def handle_warnmedia_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     if not is_main_admin(update.effective_user.id):
         return
 
-    # complete sticker upload ቅድሚያ ይፈትሻል
     if ctx.user_data.get("awaiting_complete_sticker"):
         await handle_complete_sticker_upload(update, ctx)
         return
@@ -2403,7 +2396,6 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 await process_registration(ctx, settings2, numbers, q_user_id, q_user_name, group_id, q_msg)
 
-        # all paid check after payment photo
         fresh = get_active_settings(group_id=group_id)
         if fresh:
             await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
