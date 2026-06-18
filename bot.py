@@ -846,8 +846,12 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 )
             except Exception as _log_err:
                 logging.warning(f"[log_transaction] Error: {_log_err}")
-            if game_id in nekay_numbers and num in nekay_numbers.get(game_id, {}):
-                del nekay_numbers[game_id][num]
+            if game_id in nekay_active:
+                fresh_unpaid = get_unpaid_numbers(game_id)
+                rebuilt_snap = {}
+                for n, slots in fresh_unpaid:
+                    rebuilt_snap[n] = 2 if slots == {2} else 0
+                nekay_numbers[game_id] = rebuilt_snap
             fresh = get_active_settings(group_id=group_id)
             if fresh:
                 await _refresh_board(ctx, fresh, group_id)
@@ -1182,7 +1186,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         log_activity(group_id, registrations=1)
     except Exception:
         pass
-
 
 async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
     pending = pending_ambiguous.get(user_id)
