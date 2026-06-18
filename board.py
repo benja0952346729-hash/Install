@@ -80,7 +80,9 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
             return f"{name}{check}+"
         else:
             if pending_upgrade:
-                return f"{name}{check}?"
+                if check:
+                    return f"{name}{check}?"
+                return f"{name}+"
             return f"{name}{check}"
 
     elif len(entry) == 2:
@@ -110,6 +112,8 @@ def build_remaining(settings: dict, taken: dict) -> str:
                 remaining.append((n, False))
             elif len(entry) == 1 and entry[0][1]:
                 remaining.append((n, True))
+            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
+                remaining.append((n, True))
     else:
         n = 1
         while n <= total:
@@ -118,6 +122,8 @@ def build_remaining(settings: dict, taken: dict) -> str:
             if not entry:
                 remaining.append((group_start, False))
             elif len(entry) == 1 and entry[0][1]:
+                remaining.append((group_start, True))
+            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
                 remaining.append((group_start, True))
             n += per_person
 
@@ -140,13 +146,21 @@ def count_remaining(settings: dict, taken: dict) -> int:
     if per_person == 1:
         for n in range(1, total + 1):
             entry = taken.get(n, [])
-            if not entry or (len(entry) == 1 and entry[0][1]):
+            if not entry:
+                count += 1
+            elif len(entry) == 1 and entry[0][1]:
+                count += 1
+            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
                 count += 1
     else:
         n = 1
         while n <= total:
             entry = taken.get(n, [])
-            if not entry or (len(entry) == 1 and entry[0][1]):
+            if not entry:
+                count += 1
+            elif len(entry) == 1 and entry[0][1]:
+                count += 1
+            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
                 count += 1
             n += per_person
 
