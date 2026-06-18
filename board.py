@@ -110,9 +110,7 @@ def build_remaining(settings: dict, taken: dict) -> str:
             entry = taken.get(n, [])
             if not entry:
                 remaining.append((n, False))
-            elif len(entry) == 1 and entry[0][1]:
-                remaining.append((n, True))
-            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
+            elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
                 remaining.append((n, True))
     else:
         n = 1
@@ -121,9 +119,7 @@ def build_remaining(settings: dict, taken: dict) -> str:
             entry = taken.get(group_start, [])
             if not entry:
                 remaining.append((group_start, False))
-            elif len(entry) == 1 and entry[0][1]:
-                remaining.append((group_start, True))
-            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
+            elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
                 remaining.append((group_start, True))
             n += per_person
 
@@ -148,9 +144,7 @@ def count_remaining(settings: dict, taken: dict) -> int:
             entry = taken.get(n, [])
             if not entry:
                 count += 1
-            elif len(entry) == 1 and entry[0][1]:
-                count += 1
-            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
+            elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
                 count += 1
     else:
         n = 1
@@ -158,9 +152,7 @@ def count_remaining(settings: dict, taken: dict) -> int:
             entry = taken.get(n, [])
             if not entry:
                 count += 1
-            elif len(entry) == 1 and entry[0][1]:
-                count += 1
-            elif len(entry) == 1 and not entry[0][1] and entry[0][4]:
+            elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
                 count += 1
             n += per_person
 
