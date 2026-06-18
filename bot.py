@@ -37,6 +37,8 @@ from database import (
     get_conn,
     update_countdown_settings,
     clear_prize_balance,
+    all_numbers_paid,
+    add_complete_sticker, get_complete_stickers, remove_complete_sticker_by_index,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -97,6 +99,38 @@ async def keep_typing(bot, chat_id: int, stop_event: asyncio.Event):
         except Exception:
             pass
         await asyncio.sleep(4)
+
+
+# ============================================================
+# ALL PAID CHECK + BOARD RESEND + STICKERS
+# ============================================================
+
+async def _check_all_paid_and_resend(bot, settings: dict, group_id: int):
+    game_id = settings["id"]
+    if not all_numbers_paid(game_id, settings):
+        return
+
+    taken = get_taken_numbers(game_id)
+    paid = get_paid_numbers(game_id)
+    board_text = build_board(settings, taken, paid)
+
+    board_msg_id = settings.get("board_message_id")
+    if board_msg_id:
+        try:
+            await bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+        except Exception:
+            pass
+
+    new_board = await bot.send_message(chat_id=group_id, text=board_text)
+    update_board_message_id(game_id, new_board.message_id)
+
+    stickers = get_complete_stickers()
+    for sticker in stickers:
+        await asyncio.sleep(2)
+        try:
+            await bot.send_sticker(chat_id=group_id, sticker=sticker["file_id"])
+        except Exception as e:
+            logging.warning(f"[CompleteSticker] Error: {e}")
 
 
 # ============================================================
@@ -295,6 +329,11 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
         nekay_numbers.pop(game_id, None)
         _stop_inactivity_tracker(game_id)
 
+    # ሁሉም paid ሆኑ ወይ check
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _check_all_paid_and_resend(bot, fresh, group_id)
+
 
 def _increment_counter(group_id: int) -> bool:
     msg_counter[group_id] = msg_counter.get(group_id, 0) + 1
@@ -354,7 +393,6 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
         for number, slots in unpaid:
             mark_nekay(game_id, number)
 
-        # snap ከ mark_nekay በኋላ እንደገና ይስራ — pending_upgrade ያላቸው is_half=TRUE ሆነዋል
         unpaid2 = get_unpaid_numbers(game_id)
         snap2 = {}
         for number, slots in unpaid2:
@@ -629,6 +667,65 @@ async def handle_setcountdown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# COMPLETE STICKER COMMANDS
+# ============================================================
+
+async def handle_setcompletesticker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_main_admin(update.effective_user.id):
+        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        return
+    ctx.user_data["awaiting_complete_sticker"] = True
+    await update.message.reply_text("✅ አሁን sticker ይላኩ (ሁሉም group ላይ ይሰራል)")
+
+
+async def handle_listcompletestickers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_main_admin(update.effective_user.id):
+        return
+    stickers = get_complete_stickers()
+    if not stickers:
+        await update.message.reply_text("📋 Complete sticker የለም።")
+        return
+    lines = ["📋 Complete Stickers:\n"]
+    for i, s in enumerate(stickers, 1):
+        added = s["added_at"].strftime("%m/%d %H:%M") if s["added_at"] else "?"
+        lines.append(f"{i}. file_id: {s['file_id'][:20]}... ({added})")
+    await update.message.reply_text("\n".join(lines))
+
+
+async def handle_removecompletesticker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_main_admin(update.effective_user.id):
+        return
+    parts = update.message.text.strip().split()
+    if len(parts) < 2:
+        await update.message.reply_text("❌ ምሳሌ: /removecompletesticker 1")
+        return
+    try:
+        index = int(parts[1])
+        success = remove_complete_sticker_by_index(index)
+        if success:
+            await update.message.reply_text(f"✅ Sticker #{index} ጠፋ!")
+        else:
+            await update.message.reply_text(f"❌ #{index} አልተገኘም!")
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+
+
+async def handle_complete_sticker_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not is_main_admin(update.effective_user.id):
+        return
+    if not ctx.user_data.get("awaiting_complete_sticker"):
+        return
+    msg = update.message
+    if not msg.sticker:
+        await msg.reply_text("❌ Sticker ብቻ ይላኩ!")
+        return
+    file_id = msg.sticker.file_id
+    add_complete_sticker(file_id)
+    ctx.user_data.pop("awaiting_complete_sticker", None)
+    await msg.reply_text("✅ Complete sticker ተቀምጧል!")
+
+
+# ============================================================
 # GROUP MESSAGE HANDLER
 # ============================================================
 
@@ -780,6 +877,10 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         update_remaining_message_id(game_id, None)
                         nekay_active.discard(game_id)
                         nekay_numbers.pop(game_id, None)
+                # all paid check
+                fresh2 = get_active_settings(group_id=group_id)
+                if fresh2:
+                    await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
         return
 
     if resp.get("type_change"):
@@ -866,15 +967,12 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                         update_board_message_id(game_id, new_msg.message_id)
 
-                # nekay snap update — pending_upgrade ሲሆን snap ይጠፋል (take ተደረገ)
                 snap_fresh = nekay_numbers.get(game_id, {})
                 for num in numbers:
                     actual_num = get_group_start(num, fresh["numbers_per_person"]) \
                         if fresh["numbers_per_person"] > 1 else num
                     if actual_num in snap_fresh:
                         if target == "full":
-                            # balance ይበቃል → snap ይጠፋል
-                            # balance አይበቃም (pending_upgrade) → snap ይጠፋል (take ተደረገ)
                             del snap_fresh[actual_num]
                         elif target == "half" and snap_fresh[actual_num] == 0:
                             snap_fresh[actual_num] = 2
@@ -931,6 +1029,11 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
                         active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
                         countdown_done.add(game_id)
+
+            # all paid check
+            fresh2 = get_active_settings(group_id=group_id)
+            if fresh2:
+                await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
         return
 
     if resp.get("change_number"):
@@ -962,6 +1065,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 fresh = get_active_settings(group_id=group_id)
                 if fresh:
                     await _refresh_board(ctx, fresh, group_id)
+                    await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
             else:
                 register_number(game_id, user_id, user_name, from_num, False)
                 await msg.reply_text(f"{to_num:02d} አልተቻለም 🙏")
@@ -1302,6 +1406,11 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
             countdown_done.add(game_id)
 
+    # all paid check
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
+
     try:
         check_and_rotate_db()
     except Exception:
@@ -1576,6 +1685,9 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 nekay_numbers.pop(game_id, None)
                 _stop_inactivity_tracker(game_id)
 
+        # all paid check
+        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
+
 
 # ============================================================
 # ADMIN COMMANDS
@@ -1613,6 +1725,11 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             errors.append(part)
 
     await _refresh_board(ctx, settings, group_id)
+
+    # all paid check
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
     msg = ""
     if removed:
@@ -1679,6 +1796,11 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             nekay_numbers.pop(settings["id"], None)
 
     await _refresh_board(ctx, settings, group_id)
+
+    # all paid check
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
     mark = "✅" if is_paid else "❌"
     updated_str = ", ".join(f"{format_number(n)}:{s}" for n, s in updated)
@@ -1768,6 +1890,11 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     await _refresh_board(ctx, settings, group_id)
+
+    # all paid check
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
     reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
     msg = f"✅ {reg_list} → {user_name} ተመዘገበ!"
@@ -2137,6 +2264,11 @@ async def handle_warnmedia_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     if not is_main_admin(update.effective_user.id):
         return
 
+    # complete sticker upload ቅድሚያ ይፈትሻል
+    if ctx.user_data.get("awaiting_complete_sticker"):
+        await handle_complete_sticker_upload(update, ctx)
+        return
+
     mins = ctx.user_data.get("setwarn_minutes")
     if not mins:
         return
@@ -2276,6 +2408,11 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     await q_msg.reply_text(f"{format_number(ambiguous_number)} ብቻ በግማሽ ነው? (አዎ/አይደለም)")
             else:
                 await process_registration(ctx, settings2, numbers, q_user_id, q_user_name, group_id, q_msg)
+
+        # all paid check after payment photo
+        fresh = get_active_settings(group_id=group_id)
+        if fresh:
+            await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
 
 async def _auto_newgame(bot, settings: dict, group_id: int = None):
@@ -2525,6 +2662,9 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "/setwarnmedia 2 — warning media ያስቀምጣል\n"
             "/listwarnmedia — warning media ዝርዝር\n"
             "/deletewarnmedia 2 — warning media ያጸዳል\n"
+            "/setcompletesticker — ሁሉም ✅ ሲሆን sticker ያስቀምጣል\n"
+            "/listcompletestickers — complete stickers ዝርዝር\n"
+            "/removecompletesticker N — sticker #N ያስወጣል\n"
         )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -2652,6 +2792,9 @@ def main():
     app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
     app.add_handler(CommandHandler("newgame", handle_newgame))
     app.add_handler(CommandHandler("setcountdown", handle_setcountdown))
+    app.add_handler(CommandHandler("setcompletesticker", handle_setcompletesticker))
+    app.add_handler(CommandHandler("listcompletestickers", handle_listcompletestickers))
+    app.add_handler(CommandHandler("removecompletesticker", handle_removecompletesticker))
     app.add_handler(send_conv)
 
     app.add_handler(CommandHandler("enable", handle_enable))
@@ -2675,6 +2818,10 @@ def main():
     app.add_handler(CommandHandler("deletewarnmedia", handle_deletewarnmedia))
 
     app.add_handler(MessageHandler(
+        filters.Sticker.ALL & filters.ChatType.PRIVATE,
+        handle_warnmedia_upload
+    ))
+    app.add_handler(MessageHandler(
         filters.PHOTO & filters.ChatType.PRIVATE,
         handle_warnmedia_upload
     ))
@@ -2684,10 +2831,6 @@ def main():
     ))
     app.add_handler(MessageHandler(
         filters.ANIMATION & filters.ChatType.PRIVATE,
-        handle_warnmedia_upload
-    ))
-    app.add_handler(MessageHandler(
-        filters.Sticker.ALL & filters.ChatType.PRIVATE,
         handle_warnmedia_upload
     ))
 
