@@ -75,10 +75,10 @@ def _format_entry(entry: list, paid_slots: set = None) -> str:
         name, is_half, slot, is_paid, pending_upgrade = entry[0]
         check = "✅" if slot in paid_slots else ""
         if is_half:
+            if pending_upgrade:
+                return f"{name}"
             return f"{name}{check}+"
         else:
-            if pending_upgrade:
-                return f"{name}{check}?"
             return f"{name}{check}"
 
     elif len(entry) == 2:
