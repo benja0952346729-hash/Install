@@ -1331,13 +1331,15 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
     conn.close()
 
 
+# ── FIX: telegram_id, number ጨምሯል (other fields untouched) ──
 def get_recent_winners(group_id: int, hours: int = 24) -> list:
     conn = get_conn()
     cur = conn.cursor()
     cutoff = datetime.now() - timedelta(hours=hours)
     cur.execute("""
         SELECT w.place, w.user_name, w.prize, w.created_at,
-               COALESCE(ub.balance, 0) as balance, w.sent
+               COALESCE(ub.balance, 0) as balance, w.sent,
+               w.telegram_id, w.number
         FROM winners w
         LEFT JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
         WHERE w.group_id=%s AND w.created_at >= %s
@@ -1348,7 +1350,8 @@ def get_recent_winners(group_id: int, hours: int = 24) -> list:
     conn.close()
     return [{
         "place": r[0], "user_name": r[1], "prize": float(r[2] or 0),
-        "created_at": r[3], "balance": float(r[4] or 0), "sent": r[5]
+        "created_at": r[3], "balance": float(r[4] or 0), "sent": r[5],
+        "telegram_id": r[6], "number": r[7]
     } for r in rows]
 
 
@@ -1809,6 +1812,26 @@ def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
     conn.close()
     return [{"number": r[0], "reason": r[1], "slot1_name": r[2], "slot2_name": r[3],
              "slot1_type": r[4], "slot2_type": r[5], "attempted_at": r[6]} for r in rows]
+
+
+# ============================================================
+# USER BALANCE — NEW FUNCTION
+# ============================================================
+
+def get_user_balance(group_id: int, telegram_id: int) -> float:
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT balance FROM user_balance
+            WHERE group_id=%s AND telegram_id=%s
+        """, (group_id, telegram_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return float(row[0]) if row else 0.0
+    except Exception:
+        return 0.0
 
 
 # ============================================================
