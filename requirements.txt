@@ -6,3 +6,4 @@ groq
 httpx
 regex
 pytz
+openai
