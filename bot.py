@@ -39,6 +39,7 @@ from database import (
     clear_prize_balance,
     all_numbers_paid,
     add_complete_sticker, get_complete_stickers, remove_complete_sticker_by_index,
+    get_user_balance,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -811,6 +812,10 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     user_numbers = get_user_numbers(game_id, user_id)
     recent_winners = get_recent_winners(group_id, hours=24)
 
+    # ── NEW: balance + failed attempts context ──
+    user_balance = get_user_balance(group_id, user_id)
+    user_failed_attempts = get_failed_attempts(game_id, user_id)
+
     resp = get_response(
         text=text,
         settings=settings,
@@ -823,6 +828,8 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         user_id=user_id,
         user_numbers=user_numbers,
         recent_winners=recent_winners,
+        user_balance=user_balance,
+        failed_attempts=user_failed_attempts,
     )
 
     if resp.get("my_numbers_query"):
@@ -2719,218 +2726,3 @@ async def handle_my_chat_member(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # SMS ENDPOINT
 # ============================================================
 
-async def sms_endpoint(request):
-    try:
-        group_id = request.match_info.get("group_id")
-        if group_id:
-            try:
-                group_id = int(group_id)
-            except ValueError:
-                group_id = None
-
-        raw = await request.text()
-        try:
-            parsed = json.loads(raw)
-            sms_text = parsed.get("sms", raw)
-        except Exception:
-            sms_text = raw
-
-        if not sms_text:
-            return web.json_response({"success": False, "reason": "empty_body"})
-
-        result = await handle_sms_webhook(
-            sms_text,
-            bot=_bot_instance,
-            nekay_cb=_make_nekay_cb(group_id),
-            group_id=group_id,
-        )
-        return web.json_response(result)
-    except Exception as e:
-        logging.error(f"[SMS Endpoint] Error: {e}", exc_info=True)
-        return web.json_response({"success": False, "reason": "server_error"}, status=500)
-
-
-async def health_check(request):
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return web.Response(text=f"🤖 Bot is running!\n🕐 Server time: {now}")
-
-
-_bot_instance = None
-
-
-def _make_nekay_cb(group_id: int = None):
-    async def _nekay_cb(confirmed):
-        settings = get_active_settings(group_id=group_id)
-        if settings and _bot_instance:
-            await nekay_payment_cb(_bot_instance, settings["id"], 0, confirmed)
-    return _nekay_cb
-
-
-async def start_server():
-    web_app = web.Application()
-    web_app.router.add_post("/sms/{group_id}", sms_endpoint)
-    web_app.router.add_get("/", health_check)
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    site = web.TCPSite(runner, "0.0.0.0", 8080)
-    await site.start()
-    print("🌐 SMS Server started on port 8080")
-    print("📱 SMS endpoint: /sms/{group_id}")
-
-
-# ============================================================
-# MAIN
-# ============================================================
-
-def main():
-    init_db()
-
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-
-    setup_conv = ConversationHandler(
-        entry_points=[CommandHandler("setgame", setgame_start)],
-        states={
-            ASK_TOTAL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_total)],
-            ASK_PER_PERSON: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_per_person)],
-            ASK_PRICE_FULL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_price_full)],
-            ASK_PRICE_HALF: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_price_half)],
-            ASK_PRIZE_1: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_1)],
-            ASK_PRIZE_2: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_2)],
-            ASK_PRIZE_3: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_prize_3)],
-            ASK_PAYMENT: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_payment)],
-            ASK_GAME_RULE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_game_rule)],
-            ASK_SLOT_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_slot_symbol)],
-            ASK_COUNTDOWN_ENABLED: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_countdown_enabled)],
-            ASK_COUNTDOWN_MINUTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_countdown_minutes)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_setup)],
-    )
-
-    send_conv = ConversationHandler(
-        entry_points=[CommandHandler("send", send_start)],
-        states={
-            ASK_SEND_PLACE: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, send_ask_place)],
-            ASK_SEND_AMOUNT: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.ChatType.PRIVATE, send_ask_amount)],
-        },
-        fallbacks=[CommandHandler("cancel", cancel_send)],
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(setup_conv)
-    app.add_handler(CommandHandler("status", handle_status))
-    app.add_handler(CommandHandler("register", handle_register))
-    app.add_handler(CommandHandler("remove", handle_remove))
-    app.add_handler(CommandHandler("paid", handle_paid_cmd))
-    app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
-    app.add_handler(CommandHandler("newgame", handle_newgame))
-    app.add_handler(CommandHandler("setcountdown", handle_setcountdown))
-    app.add_handler(CommandHandler("setcompletesticker", handle_setcompletesticker))
-    app.add_handler(CommandHandler("listcompletestickers", handle_listcompletestickers))
-    app.add_handler(CommandHandler("removecompletesticker", handle_removecompletesticker))
-    app.add_handler(send_conv)
-
-    app.add_handler(CommandHandler("enable", handle_enable))
-    app.add_handler(CommandHandler("disable", handle_disable))
-    app.add_handler(CommandHandler("enablelist", handle_enablelist))
-    app.add_handler(CommandHandler("addadmin", handle_addadmin))
-    app.add_handler(CommandHandler("removeadmin", handle_removeadmin))
-    app.add_handler(CommandHandler("activity", handle_activity))
-    app.add_handler(CommandHandler("dbstatus", handle_dbstatus))
-    app.add_handler(CommandHandler("dbclear", handle_dbclear))
-
-    app.add_handler(CommandHandler("userlist", handle_userlist))
-    app.add_handler(CommandHandler("clearusers", handle_clearusers))
-    app.add_handler(CommandHandler("winners", handle_winners))
-    app.add_handler(CommandHandler("on", handle_on))
-    app.add_handler(CommandHandler("off", handle_off))
-    app.add_handler(CommandHandler("clearbalance", handle_clearbalance))
-    app.add_handler(CommandHandler("report", handle_report))
-    app.add_handler(CommandHandler("setwarnmedia", handle_setwarnmedia))
-    app.add_handler(CommandHandler("listwarnmedia", handle_listwarnmedia))
-    app.add_handler(CommandHandler("deletewarnmedia", handle_deletewarnmedia))
-
-    app.add_handler(MessageHandler(
-        filters.Sticker.ALL & filters.ChatType.PRIVATE,
-        handle_warnmedia_upload
-    ))
-    app.add_handler(MessageHandler(
-        filters.PHOTO & filters.ChatType.PRIVATE,
-        handle_warnmedia_upload
-    ))
-    app.add_handler(MessageHandler(
-        filters.VIDEO & filters.ChatType.PRIVATE,
-        handle_warnmedia_upload
-    ))
-    app.add_handler(MessageHandler(
-        filters.ANIMATION & filters.ChatType.PRIVATE,
-        handle_warnmedia_upload
-    ))
-
-    app.add_handler(MessageHandler(
-        filters.PHOTO & filters.ChatType.GROUPS,
-        handle_group_photo
-    ))
-
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
-        handle_admin_board_reply
-    ), group=0)
-
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
-        handle_group_message
-    ), group=1)
-
-    from telegram.ext import ChatMemberHandler
-    app.add_handler(ChatMemberHandler(handle_my_chat_member, ChatMemberHandler.MY_CHAT_MEMBER))
-
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(start_server())
-
-    global _bot_instance
-    _bot_instance = app.bot
-
-    async def _daily_report_scheduler():
-        import pytz
-        et_tz = pytz.timezone("Africa/Addis_Ababa")
-        while True:
-            now = datetime.now(et_tz)
-            target = now.replace(hour=23, minute=0, second=0, microsecond=0)
-            if now >= target:
-                target = target + timedelta(days=1)
-            wait_secs = (target - now).total_seconds()
-            await asyncio.sleep(wait_secs)
-
-            try:
-                groups = get_enabled_groups()
-                for g in groups:
-                    gid = g["group_id"]
-                    if not is_group_active(gid):
-                        continue
-                    report = get_report(gid)
-                    lines = ["📊 የዛሬ Daily Report\n"]
-                    if report["games_count"] > 0:
-                        lines.append(
-                            f"🎮 ጨዋታዎች: {report['games_count']}\n"
-                            f"💰 Total bet: ETB {report['total_bet']:,.0f}\n"
-                            f"🏆 Prize: ETB {report['prize_total']:,.0f}\n"
-                            f"📈 Profit: ETB {report['profit']:,.0f}"
-                        )
-                    else:
-                        lines.append("🎮 ዛሬ ጨዋታ አልተጫወተም")
-                    try:
-                        await _bot_instance.send_message(chat_id=gid, text="\n".join(lines))
-                    except Exception:
-                        pass
-                cleanup_old_reports()
-            except Exception as e:
-                logging.warning(f"[Daily Report] Error: {e}")
-
-    loop.create_task(_daily_report_scheduler())
-
-    print("🤖 Bot started!")
-    app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
