@@ -28,14 +28,11 @@ DATABASE_URLS = [
     if url and url.strip()
 ]
 
-# Backward compat
 DATABASE_URL = DATABASE_URLS[0] if DATABASE_URLS else None
-
-# DB row limit before rotating (ምን ያህል rows ሲሞላ ይዞራል)
 DB_ROW_LIMIT = int(os.environ.get("DB_ROW_LIMIT", "10000"))
 
 # ============================================================
-# GROQ API KEYS — እስከ 10 ይቻላል (circular rotation 1→10→1)
+# GROQ API KEYS — እስከ 10 ይቻላል
 # ============================================================
 GROQ_API_KEYS = [
     key.strip()
@@ -47,7 +44,19 @@ GROQ_API_KEYS = [
 ]
 
 # ============================================================
-# GROUP — Legacy (single group backward compat)
+# NVIDIA API KEYS — እስከ 10 ይቻላል
+# ============================================================
+NVIDIA_API_KEYS = [
+    key.strip()
+    for key in [
+        os.environ.get(f"NVIDIA_API_KEY_{i}") or (os.environ.get("NVIDIA_API_KEY") if i == 1 else None)
+        for i in range(1, 11)
+    ]
+    if key and key.strip()
+]
+
+# ============================================================
+# GROUP — Legacy
 # ============================================================
 GROUP_ID = int(os.environ.get("GROUP_ID", "0"))
 GROUP_CHAT_ID = os.environ.get("GROUP_CHAT_ID", str(os.environ.get("GROUP_ID", "0")))
