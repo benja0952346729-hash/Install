@@ -394,7 +394,7 @@ Respond ONLY in JSON:
 
     try:
         response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="qwen/qwen3.6-27b",
             messages=[{
                 "role": "user",
                 "content": [
@@ -462,7 +462,7 @@ Only include places that have prizes. Numbers must be integers."""
 
     try:
         response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="meta-llama/llama-4-scout-17b-16e-instruct",
+            model="qwen/qwen3.6-27b",
             messages=[{
                 "role": "user",
                 "content": [
