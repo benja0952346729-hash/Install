@@ -8,7 +8,8 @@ from typing import Optional
 from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS
 import httpx
 from groq import Groq
-from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
+from telegram.ext import ContextTypes
 from database import (
     save_sms_payment,
     save_screenshot_payment,
@@ -533,7 +534,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
 
         _group_id = group_id or settings.get("group_id")
 
-        # Build preview text showing detected numbers before applying
         prize_map = {
             1: settings.get("prize_1st", 0),
             2: settings.get("prize_2nd"),
@@ -573,25 +573,28 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
         return False
 
 
-async def handle_winner_confirmation(bot, callback_query):
-    """Handles the Confirm/Cancel button press for winner results."""
+async def handle_winner_confirmation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Handles the Confirm/Cancel button press for winner results (CallbackQueryHandler)."""
+    query = update.callback_query
     try:
-        data = callback_query.data  # "winner_confirm:<token>" or "winner_cancel:<token>"
+        await query.answer()
+
+        data = query.data  # "winner_confirm:<token>" or "winner_cancel:<token>"
         action, token = data.split(":", 1)
 
         pending = _pending_winners.pop(token, None)
         if not pending:
-            await callback_query.answer("⚠️ ይህ ጥያቄ ጊዜው አልፎበታል ወይም ቀድሞ ተስተናግዷል።", show_alert=True)
+            await query.edit_message_text("⚠️ ይህ ጥያቄ ጊዜው አልፎበታል ወይም ቀድሞ ተስተናግዷል።")
             return
 
         if action == "winner_cancel":
-            await callback_query.message.edit_text("❌ Winner ውጤት ተሰርዟል።")
-            await callback_query.answer("ተሰርዟል")
+            await query.edit_message_text("❌ Winner ውጤት ተሰርዟል።")
             return
 
         winners = pending["winners"]
         settings = pending["settings"]
         _group_id = pending["group_id"]
+        bot = ctx.bot
 
         prize_map = {
             1: settings.get("prize_1st", 0),
@@ -641,7 +644,7 @@ async def handle_winner_confirmation(bot, callback_query):
                 logger.warning(f"[log_transaction] Error: {_log_err}")
 
         announcement = "\n".join(lines)
-        await callback_query.message.edit_text(announcement)
+        await query.edit_message_text(announcement)
 
         if _group_id:
             try:
@@ -649,12 +652,10 @@ async def handle_winner_confirmation(bot, callback_query):
             except Exception:
                 pass
 
-        await callback_query.answer("✅ ተረጋግጧል")
-
     except Exception as e:
         logger.error(f"[Winner Confirmation] Error: {e}", exc_info=True)
         try:
-            await callback_query.answer("❌ Error ተፈጥሯል", show_alert=True)
+            await query.edit_message_text("❌ Error ተፈጥሯል።")
         except Exception:
             pass
 
