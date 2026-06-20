@@ -1245,6 +1245,58 @@ def mark_nekay(game_id: int, number: int):
 
 
 # ============================================================
+# ADMIN MANUAL /nekay COMMAND — REPLACE-STYLE
+# ============================================================
+
+def admin_set_nekay(game_id: int, numbers: list) -> dict:
+    """
+    numbers: list of (number, is_half) tuples — admin-specified nekay list.
+    REPLACES the current nekay set entirely:
+      - All currently-nekay registrations (is_nekay=TRUE) are reset to is_nekay=FALSE.
+      - Each number in `numbers` is force-marked is_nekay=TRUE on its existing
+        registration row (paid or unpaid — NO refund, balance untouched).
+      - If a number has no registration row (empty/unclaimed slot), it is simply
+        reported back as "empty" so bot.py can add it to the in-memory nekay snap
+        (slot=0) without needing a DB row — board ✅/⏳ marks are never touched.
+    Returns: {"empty_numbers": [(number, is_half), ...]} for numbers with no row.
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # 1) ቀድሞ nekay የነበሩ ሁሉንም → is_nekay=FALSE (ኖርማል ይመለሳሉ)
+    cur.execute("""
+        UPDATE registrations
+        SET is_nekay=FALSE
+        WHERE game_id=%s AND is_nekay=TRUE
+    """, (game_id,))
+
+    empty_numbers = []
+
+    # 2) አዲሶቹን ቁጥሮች force is_nekay=TRUE (paid ቢሆኑም refund የለም)
+    for number, is_half in numbers:
+        cur.execute("""
+            SELECT id FROM registrations
+            WHERE game_id=%s AND number=%s
+        """, (game_id, number))
+        rows = cur.fetchall()
+
+        if not rows:
+            empty_numbers.append((number, is_half))
+            continue
+
+        cur.execute("""
+            UPDATE registrations
+            SET is_nekay=TRUE
+            WHERE game_id=%s AND number=%s
+        """, (game_id, number))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"empty_numbers": empty_numbers}
+
+
+# ============================================================
 # WINNER FUNCTIONS
 # ============================================================
 
