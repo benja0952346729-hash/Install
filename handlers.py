@@ -8,6 +8,7 @@ from typing import Optional
 from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS
 import httpx
 from groq import Groq
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from database import (
     save_sms_payment,
     save_screenshot_payment,
@@ -35,6 +36,10 @@ PAYMENT_SUCCESS_MESSAGES = [
     "መልካም ዕድል 🙏",
     "እሺ ቤተሰብ 🙏 መልካም ዕድል",
 ]
+
+# Pending winner results awaiting admin Confirm/Cancel
+_pending_winners = {}
+_pending_counter = 0
 
 # ============================================================
 # GROQ KEY ROTATION
@@ -440,16 +445,29 @@ async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
     if prize_3rd:
         prizes_desc += f", 3rd: {prize_3rd} ETB"
 
-    prompt = f"""You are analyzing a lottery/raffle winner result image.
+    prompt = f"""You are an expert at reading hand-stamped or engraved numbers on small printing blocks, tags, or lottery markers, often under imperfect lighting, glare, blur, or odd angles.
+
 Game prizes: {prizes_desc}
 Total numbers in game: {settings.get('total_numbers')}
 
-Extract the winning numbers from the image carefully.
+TASK: Extract the winning numbers from the image with maximum care and precision.
+
+HOW TO READ CAREFULLY:
+- Zoom your attention into each block/tag individually, one at a time.
+- Numbers may be engraved/embossed (raised) rather than flat-printed — trace the outline of each digit shape carefully, ignoring glare/reflection spots.
+- Distinguish similar-looking digits carefully by their exact shape: 0 vs 8 vs 6 vs 9, 1 vs 7, 3 vs 8, 5 vs 6, 2 vs 7.
+- If a digit is partly covered by glare or shadow, infer it from the visible curve/line segments and the overall digit pattern.
+- Ignore background patterns, textures, scratches, or decorations — focus only on the engraved/printed number itself.
 
 CRITICAL ORDER RULES:
 - If numbers are arranged VERTICALLY (top to bottom): TOP = 1st place, MIDDLE = 2nd place, BOTTOM = 3rd place
 - If numbers are arranged HORIZONTALLY (left to right): LEFT = 1st place, MIDDLE = 2nd place, RIGHT = 3rd place
 - Always assign 1st place to the first/top/left number, regardless of the number's value
+
+NEVER REFUSE OR RETURN NULL:
+- Even if the image is blurry, has glare, is rotated, or the numbers are partially obscured, you MUST still provide your BEST GUESS for each number.
+- Only use null if a position is truly EMPTY (no block/tag visible there at all) — never use null just because you are uncertain about the exact digit.
+- A confident best-guess is always better than refusing to answer.
 
 Respond ONLY in this exact JSON format with no extra text:
 {{
@@ -495,11 +513,12 @@ Only include places that have prizes. Numbers must be integers."""
 
 
 # ============================================================
-# WINNER PHOTO HANDLER
+# WINNER PHOTO HANDLER (with Confirm/Cancel)
 # ============================================================
 
 async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
-    """Returns True if winners found, False otherwise"""
+    """Detects winners and asks admin to Confirm/Cancel before applying prizes."""
+    global _pending_counter
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
@@ -512,6 +531,68 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
             return False
 
+        _group_id = group_id or settings.get("group_id")
+
+        # Build preview text showing detected numbers before applying
+        prize_map = {
+            1: settings.get("prize_1st", 0),
+            2: settings.get("prize_2nd"),
+            3: settings.get("prize_3rd"),
+        }
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        preview_lines = ["🔎 የተገኙ ቁጥሮች (አረጋግጥ):\n"]
+        for place in sorted(winners.keys()):
+            number = winners[place]
+            prize = prize_map.get(place)
+            medal = medals.get(place, "🎖️")
+            prize_text = f"ETB {prize}" if prize else "prize የለም"
+            preview_lines.append(f"{medal} {place}ኛ: #{number} ({prize_text})")
+        preview_text = "\n".join(preview_lines)
+
+        _pending_counter += 1
+        token = str(_pending_counter)
+        _pending_winners[token] = {
+            "winners": winners,
+            "settings": settings,
+            "group_id": _group_id,
+        }
+
+        keyboard = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton("✅ Confirm", callback_data=f"winner_confirm:{token}"),
+                InlineKeyboardButton("❌ Cancel", callback_data=f"winner_cancel:{token}"),
+            ]
+        ])
+
+        await msg.reply_text(preview_text, reply_markup=keyboard)
+        return True
+
+    except Exception as e:
+        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል።")
+        return False
+
+
+async def handle_winner_confirmation(bot, callback_query):
+    """Handles the Confirm/Cancel button press for winner results."""
+    try:
+        data = callback_query.data  # "winner_confirm:<token>" or "winner_cancel:<token>"
+        action, token = data.split(":", 1)
+
+        pending = _pending_winners.pop(token, None)
+        if not pending:
+            await callback_query.answer("⚠️ ይህ ጥያቄ ጊዜው አልፎበታል ወይም ቀድሞ ተስተናግዷል።", show_alert=True)
+            return
+
+        if action == "winner_cancel":
+            await callback_query.message.edit_text("❌ Winner ውጤት ተሰርዟል።")
+            await callback_query.answer("ተሰርዟል")
+            return
+
+        winners = pending["winners"]
+        settings = pending["settings"]
+        _group_id = pending["group_id"]
+
         prize_map = {
             1: settings.get("prize_1st", 0),
             2: settings.get("prize_2nd"),
@@ -520,8 +601,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         per_person = settings.get("numbers_per_person", 1)
         lines = ["🏆 Winners!\n"]
-
-        _group_id = group_id or settings.get("group_id")
 
         for place in sorted(winners.keys()):
             number = winners[place]
@@ -562,7 +641,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
                 logger.warning(f"[log_transaction] Error: {_log_err}")
 
         announcement = "\n".join(lines)
-        await msg.reply_text(announcement)
+        await callback_query.message.edit_text(announcement)
 
         if _group_id:
             try:
@@ -570,12 +649,14 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             except Exception:
                 pass
 
-        return True
+        await callback_query.answer("✅ ተረጋግጧል")
 
     except Exception as e:
-        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
-        await msg.reply_text("❌ Error ተፈጥሯል።")
-        return False
+        logger.error(f"[Winner Confirmation] Error: {e}", exc_info=True)
+        try:
+            await callback_query.answer("❌ Error ተፈጥሯል", show_alert=True)
+        except Exception:
+            pass
 
 
 # ============================================================
