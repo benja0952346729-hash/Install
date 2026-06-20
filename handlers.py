@@ -81,6 +81,40 @@ async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str
             raise
     raise RuntimeError("All Groq keys exhausted")
 
+async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str:
+    total_keys = len(_groq_clients)
+    max_attempts = total_keys * 2
+    for attempt in range(max_attempts):
+        client = _get_groq_client()
+        key_num = (_groq_index - 1) % total_keys + 1
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                    max_tokens=300,
+                    temperature=0.1,
+                )
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[Groq Vision] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                if (attempt + 1) % total_keys == 0:
+                    logger.info("[Groq Vision] All keys exhausted — waiting 10s...")
+                    await asyncio.sleep(10)
+                continue
+            logger.error(f"[Groq Vision] Non-rate error: {e}")
+            raise
+    raise RuntimeError("All Groq vision keys exhausted")
+
 
 # ============================================================
 # NVIDIA KEY ROTATION
@@ -384,7 +418,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
 
 # ============================================================
-# SCREENSHOT ANALYZER
+# SCREENSHOT ANALYZER — NVIDIA + Groq fallback
 # ============================================================
 
 async def analyze_screenshot(image_base64: str) -> dict:
@@ -401,10 +435,10 @@ RULES:
 - sender_name: name of sender/payer. null if not found.
 - ref: transaction ref (Telebirr only). null for others.
 - description: brief English description
+- lang: is the receipt text in "amharic" or "english"?
 
 CRITICAL:
 - ONLY return photoType = "other" if image is clearly NOT a bank receipt
-- Always try your best even if image quality is low
 
 Respond ONLY in JSON:
 {
@@ -412,10 +446,12 @@ Respond ONLY in JSON:
   "amount": <number or null>,
   "sender_name": "<name or null>",
   "ref": "<ref or null>",
-  "description": "<description>"
+  "description": "<description>",
+  "lang": "amharic" or "english"
 }"""
 
     try:
+        # ── Step 1: NVIDIA ሞክር ──
         text = await _call_nvidia_with_rotation(image_base64, prompt)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
@@ -425,6 +461,20 @@ Respond ONLY in JSON:
         for field in ("sender_name", "ref"):
             if parsed.get(field) in ("null", "None", "", "N/A"):
                 parsed[field] = None
+
+        lang = parsed.get("lang", "english")
+
+        # ── Step 2: አማርኛ ከሆነ → Groq fallback ──
+        if lang == "amharic":
+            logger.info("[Screenshot] አማርኛ detected → Groq fallback")
+            text2 = await _call_groq_vision_with_rotation(image_base64, prompt)
+            text2 = re.sub(r"^```json\s*", "", text2)
+            text2 = re.sub(r"^```\s*", "", text2)
+            text2 = re.sub(r"\s*```$", "", text2)
+            parsed = json.loads(text2.strip())
+            for field in ("sender_name", "ref"):
+                if parsed.get(field) in ("null", "None", "", "N/A"):
+                    parsed[field] = None
 
         return parsed
 
@@ -437,7 +487,7 @@ Respond ONLY in JSON:
 
 
 # ============================================================
-# WINNER PHOTO ANALYZER
+# WINNER PHOTO ANALYZER — Groq only (lottery tiles)
 # ============================================================
 
 async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
@@ -451,40 +501,41 @@ async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
     if prize_3rd:
         prizes_desc += f", 3rd: {prize_3rd} ETB"
 
-    prompt = f"""You are analyzing a lottery/raffle winner result image.
+    prompt = f"""You are a lottery ticket analyzer for Ethiopian lottery.
 Game prizes: {prizes_desc}
-Total numbers in game: {settings.get('total_numbers')}
 
-Extract the winning numbers from the image carefully.
+A REAL lottery ticket: small physical paper cubes with a series label (in Amharic or English) and numbers printed on them.
+NOT lottery → return type "other": bank receipts, screenshots, phone screens.
 
 CRITICAL ORDER RULES:
-- If numbers are arranged VERTICALLY (top to bottom): TOP = 1st place, MIDDLE = 2nd, BOTTOM = 3rd
-- If numbers are arranged HORIZONTALLY (left to right): LEFT = 1st place, MIDDLE = 2nd, RIGHT = 3rd
-- Always assign 1st place to the first/top/left number regardless of value
+- If numbers arranged VERTICALLY: TOP = 1st, MIDDLE = 2nd, BOTTOM = 3rd
+- If numbers arranged HORIZONTALLY: LEFT = 1st, MIDDLE = 2nd, RIGHT = 3rd
 
 Respond ONLY in this exact JSON format:
 {{
-  "1st": <winning number as integer or null>,
-  "2nd": <winning number as integer or null>,
-  "3rd": <winning number as integer or null>
-}}
-
-Only include places that have prizes. Numbers must be integers."""
+  "type": "lottery" or "other",
+  "first": <top number as integer or null>,
+  "second": <middle number as integer or null>,
+  "third": <bottom number as integer or null>
+}}"""
 
     try:
-        text = await _call_nvidia_with_rotation(image_base64, prompt)
+        text = await _call_groq_vision_with_rotation(image_base64, prompt)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         parsed = json.loads(text.strip())
 
+        if parsed.get("type") != "lottery":
+            return None
+
         result = {}
-        if parsed.get("1st") is not None:
-            result[1] = int(parsed["1st"])
-        if parsed.get("2nd") is not None:
-            result[2] = int(parsed["2nd"])
-        if parsed.get("3rd") is not None:
-            result[3] = int(parsed["3rd"])
+        if parsed.get("first") is not None:
+            result[1] = int(parsed["first"])
+        if parsed.get("second") is not None:
+            result[2] = int(parsed["second"])
+        if parsed.get("third") is not None:
+            result[3] = int(parsed["third"])
 
         return result if result else None
 
@@ -583,8 +634,6 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
     telegram_id = match_data["telegram_id"]
     amount = match_data["amount"]
-    pay_type = match_data.get("type", "Unknown")
-    sender_name = match_data.get("sender_name", "")
     _group_id = match_data.get("group_id") or chat_id or GROUP_CHAT_ID
 
     result = confirm_payment(telegram_id, amount, group_id=_group_id)
