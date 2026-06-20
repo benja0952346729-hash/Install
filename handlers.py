@@ -4,12 +4,12 @@ import json
 import base64
 import logging
 import random
+import asyncio
 from typing import Optional
-from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS
+from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS
 import httpx
 from groq import Groq
-from telegram import InlineKeyboardMarkup, InlineKeyboardButton, Update
-from telegram.ext import ContextTypes
+from openai import OpenAI
 from database import (
     save_sms_payment,
     save_screenshot_payment,
@@ -38,17 +38,12 @@ PAYMENT_SUCCESS_MESSAGES = [
     "እሺ ቤተሰብ 🙏 መልካም ዕድል",
 ]
 
-# Pending winner results awaiting admin Confirm/Cancel
-_pending_winners = {}
-_pending_counter = 0
-
 # ============================================================
 # GROQ KEY ROTATION
 # ============================================================
 
 _groq_index = 0
 _groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS else []
-
 
 def _get_groq_client() -> Groq:
     global _groq_index
@@ -58,26 +53,92 @@ def _get_groq_client() -> Groq:
     _groq_index = (_groq_index + 1) % len(_groq_clients)
     return client
 
-
-def _call_groq_with_rotation(call_fn, max_retries: int = None):
-    if max_retries is None:
-        max_retries = len(_groq_clients) if _groq_clients else 1
-    last_err = None
-    for _ in range(max_retries):
+async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str:
+    total_keys = len(_groq_clients)
+    max_attempts = total_keys * 2
+    for attempt in range(max_attempts):
+        client = _get_groq_client()
+        key_num = (_groq_index - 1) % total_keys + 1
         try:
-            client = _get_groq_client()
-            return call_fn(client)
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.1,
+                )
+            )
+            return response.choices[0].message.content.strip()
         except Exception as e:
             err_str = str(e).lower()
-            if "rate" in err_str or "limit" in err_str or "429" in err_str:
-                last_err = e
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[Groq] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                if (attempt + 1) % total_keys == 0:
+                    logger.info("[Groq] All keys exhausted — waiting 10s...")
+                    await asyncio.sleep(10)
                 continue
+            logger.error(f"[Groq] Non-rate error: {e}")
             raise
-    raise last_err or RuntimeError("All Groq keys exhausted")
+    raise RuntimeError("All Groq keys exhausted")
 
 
 # ============================================================
-# SMS PARSER — Groq based
+# NVIDIA KEY ROTATION
+# ============================================================
+
+_nvidia_index = 0
+_nvidia_clients = [
+    OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=key
+    ) for key in NVIDIA_API_KEYS
+] if NVIDIA_API_KEYS else []
+
+def _get_nvidia_client():
+    global _nvidia_index
+    if not _nvidia_clients:
+        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+    client = _nvidia_clients[_nvidia_index]
+    _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
+    return client
+
+async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
+    total_keys = len(_nvidia_clients)
+    max_attempts = total_keys * 2
+    for attempt in range(max_attempts):
+        client = _get_nvidia_client()
+        key_num = (_nvidia_index - 1) % total_keys + 1
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model="meta/llama-4-maverick-17b-128e-instruct",
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                    max_tokens=300,
+                    temperature=0.1,
+                )
+            )
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[NVIDIA] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                if (attempt + 1) % total_keys == 0:
+                    logger.info("[NVIDIA] All keys exhausted — waiting 10s...")
+                    await asyncio.sleep(10)
+                continue
+            logger.error(f"[NVIDIA] Non-rate error: {e}")
+            raise
+    raise RuntimeError("All NVIDIA keys exhausted")
+
+
+# ============================================================
+# SMS PARSER
 # ============================================================
 
 async def parse_sms(sms: str) -> Optional[dict]:
@@ -104,32 +165,24 @@ Respond ONLY in this exact JSON format with no extra text:
 }"""
 
     try:
-        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": prompt},
-                {"role": "user", "content": sms},
-            ],
-            max_tokens=300,
-            temperature=0.1,
-        ))
-        text = response.choices[0].message.content.strip()
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": sms},
+        ]
+        text = await _call_groq_with_rotation(messages)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         parsed = json.loads(text.strip())
 
-        if parsed.get("sender_name") in ("null", "None", "", "N/A"):
-            parsed["sender_name"] = None
-        if parsed.get("ref") in ("null", "None", "", "N/A"):
-            parsed["ref"] = None
-        if parsed.get("url") in ("null", "None", "", "N/A"):
-            parsed["url"] = None
+        for field in ("sender_name", "ref", "url"):
+            if parsed.get(field) in ("null", "None", "", "N/A"):
+                parsed[field] = None
 
         return parsed
 
     except Exception as e:
-        logger.error(f"[SMS Parse] Groq error: {e}", exc_info=True)
+        logger.error(f"[SMS Parse] error: {e}", exc_info=True)
         return None
 
 
@@ -230,16 +283,12 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
     chat_id = msg.chat.id
     telegram_id = msg.from_user.id
     username = msg.from_user.username or msg.from_user.first_name or "Unknown"
-
     _group_id = group_id or chat_id
 
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
-
-        # ወዲያው "እሺ ቤተሰብ 🙏" photo reply
         receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
-
         analysis = await analyze_screenshot(image_base64)
 
         if not analysis:
@@ -285,35 +334,21 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
         logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
 
-        # group_id ጋር match ይሞክር — ካልሆነ group_id=None ጋር ዳግም
         match = find_matching_sms(
-            telegram_id=telegram_id,
-            amount=amount,
-            sender_name=sender_name,
-            ref=ref,
-            pay_type=photo_type,
-            group_id=_group_id,
+            telegram_id=telegram_id, amount=amount, sender_name=sender_name,
+            ref=ref, pay_type=photo_type, group_id=_group_id,
         )
         if not match:
             match = find_matching_sms(
-                telegram_id=telegram_id,
-                amount=amount,
-                sender_name=sender_name,
-                ref=ref,
-                pay_type=photo_type,
-                group_id=None,
+                telegram_id=telegram_id, amount=amount, sender_name=sender_name,
+                ref=ref, pay_type=photo_type, group_id=None,
             )
 
         if not match:
-            # SMS ካልደረሰ — "እሺ ቤተሰብ 🙏" ይቀራል፣ silent save
             save_screenshot_payment(
-                telegram_id=telegram_id,
-                amount=amount,
-                sender_name=sender_name,
-                ref=ref,
-                pay_type=photo_type,
-                description=analysis.get("description", ""),
-                group_id=_group_id,
+                telegram_id=telegram_id, amount=amount, sender_name=sender_name,
+                ref=ref, pay_type=photo_type,
+                description=analysis.get("description", ""), group_id=_group_id,
             )
             return
 
@@ -327,13 +362,11 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
                 pass
             return
 
-        # approved — "እሺ ቤተሰብ 🙏" replace → random መልካም ዕድል
         mark_sms_as_used(match["id"])
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
-            msg.message_id,
-            _group_id,
+            msg.message_id, _group_id,
             nekay_cb=nekay_cb,
             success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
             receipt_msg_id=receipt_msg.message_id,
@@ -358,24 +391,8 @@ async def analyze_screenshot(image_base64: str) -> dict:
     prompt = """You are a payment receipt analyzer for Ethiopian banks.
 
 You must recognize ALL Ethiopian bank receipts including but not limited to:
-- CBE (Commercial Bank of Ethiopia)
-- Telebirr
-- Awash Bank / AwashPay
-- BOA (Bank of Abyssinia)
-- Dashen Bank
-- Abay Bank
-- Nib Bank
-- Wegagen Bank
-- United Bank
-- Lion Bank
-- Oromia Bank
-- Bunna Bank
-- Berhan Bank
-- Cooperative Bank of Oromia (Coopbank)
-- Enat Bank
-- Amhara Bank
-- ZemenBank
-- Any other Ethiopian bank
+- CBE, Telebirr, Awash, BOA, Dashen, Abay, Nib, Wegagen, United, Lion,
+  Oromia, Bunna, Berhan, Coopbank, Enat, Amhara, ZemenBank and any other Ethiopian bank.
 
 RULES:
 - If image is ANY Ethiopian bank receipt → extract info, never return "other"
@@ -399,19 +416,7 @@ Respond ONLY in JSON:
 }"""
 
     try:
-        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="qwen/qwen3.6-27b",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-            max_tokens=300,
-            temperature=0.1,
-        ))
-        text = response.choices[0].message.content.strip()
+        text = await _call_nvidia_with_rotation(image_base64, prompt)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -446,31 +451,18 @@ async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
     if prize_3rd:
         prizes_desc += f", 3rd: {prize_3rd} ETB"
 
-    prompt = f"""You are an expert at reading hand-stamped or engraved numbers on small printing blocks, tags, or lottery markers, often under imperfect lighting, glare, blur, or odd angles.
-
+    prompt = f"""You are analyzing a lottery/raffle winner result image.
 Game prizes: {prizes_desc}
 Total numbers in game: {settings.get('total_numbers')}
 
-TASK: Extract the winning numbers from the image with maximum care and precision.
-
-HOW TO READ CAREFULLY:
-- Zoom your attention into each block/tag individually, one at a time.
-- Numbers may be engraved/embossed (raised) rather than flat-printed — trace the outline of each digit shape carefully, ignoring glare/reflection spots.
-- Distinguish similar-looking digits carefully by their exact shape: 0 vs 8 vs 6 vs 9, 1 vs 7, 3 vs 8, 5 vs 6, 2 vs 7.
-- If a digit is partly covered by glare or shadow, infer it from the visible curve/line segments and the overall digit pattern.
-- Ignore background patterns, textures, scratches, or decorations — focus only on the engraved/printed number itself.
+Extract the winning numbers from the image carefully.
 
 CRITICAL ORDER RULES:
-- If numbers are arranged VERTICALLY (top to bottom): TOP = 1st place, MIDDLE = 2nd place, BOTTOM = 3rd place
-- If numbers are arranged HORIZONTALLY (left to right): LEFT = 1st place, MIDDLE = 2nd place, RIGHT = 3rd place
-- Always assign 1st place to the first/top/left number, regardless of the number's value
+- If numbers are arranged VERTICALLY (top to bottom): TOP = 1st place, MIDDLE = 2nd, BOTTOM = 3rd
+- If numbers are arranged HORIZONTALLY (left to right): LEFT = 1st place, MIDDLE = 2nd, RIGHT = 3rd
+- Always assign 1st place to the first/top/left number regardless of value
 
-NEVER REFUSE OR RETURN NULL:
-- Even if the image is blurry, has glare, is rotated, or the numbers are partially obscured, you MUST still provide your BEST GUESS for each number.
-- Only use null if a position is truly EMPTY (no block/tag visible there at all) — never use null just because you are uncertain about the exact digit.
-- A confident best-guess is always better than refusing to answer.
-
-Respond ONLY in this exact JSON format with no extra text:
+Respond ONLY in this exact JSON format:
 {{
   "1st": <winning number as integer or null>,
   "2nd": <winning number as integer or null>,
@@ -480,19 +472,7 @@ Respond ONLY in this exact JSON format with no extra text:
 Only include places that have prizes. Numbers must be integers."""
 
     try:
-        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="qwen/qwen3.6-27b",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                    {"type": "text", "text": prompt},
-                ],
-            }],
-            max_tokens=200,
-            temperature=0.1,
-        ))
-        text = response.choices[0].message.content.strip()
+        text = await _call_nvidia_with_rotation(image_base64, prompt)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -514,87 +494,19 @@ Only include places that have prizes. Numbers must be integers."""
 
 
 # ============================================================
-# WINNER PHOTO HANDLER (with Confirm/Cancel)
+# WINNER PHOTO HANDLER
 # ============================================================
 
 async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
-    """Detects winners and asks admin to Confirm/Cancel before applying prizes."""
-    global _pending_counter
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
-
         await msg.reply_text("⏳ Winner እየተለየ ነው...")
 
         winners = await analyze_winner_photo(image_base64, settings)
-
         if not winners:
             await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
             return False
-
-        _group_id = group_id or settings.get("group_id")
-
-        prize_map = {
-            1: settings.get("prize_1st", 0),
-            2: settings.get("prize_2nd"),
-            3: settings.get("prize_3rd"),
-        }
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        preview_lines = ["🔎 የተገኙ ቁጥሮች (አረጋግጥ):\n"]
-        for place in sorted(winners.keys()):
-            number = winners[place]
-            prize = prize_map.get(place)
-            medal = medals.get(place, "🎖️")
-            prize_text = f"ETB {prize}" if prize else "prize የለም"
-            preview_lines.append(f"{medal} {place}ኛ: #{number} ({prize_text})")
-        preview_text = "\n".join(preview_lines)
-
-        _pending_counter += 1
-        token = str(_pending_counter)
-        _pending_winners[token] = {
-            "winners": winners,
-            "settings": settings,
-            "group_id": _group_id,
-        }
-
-        keyboard = InlineKeyboardMarkup([
-            [
-                InlineKeyboardButton("✅ Confirm", callback_data=f"winner_confirm:{token}"),
-                InlineKeyboardButton("❌ Cancel", callback_data=f"winner_cancel:{token}"),
-            ]
-        ])
-
-        await msg.reply_text(preview_text, reply_markup=keyboard)
-        return True
-
-    except Exception as e:
-        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
-        await msg.reply_text("❌ Error ተፈጥሯል።")
-        return False
-
-
-async def handle_winner_confirmation(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Handles the Confirm/Cancel button press for winner results (CallbackQueryHandler)."""
-    query = update.callback_query
-    try:
-        await query.answer()
-
-        data = query.data  # "winner_confirm:<token>" or "winner_cancel:<token>"
-        action, token = data.split(":", 1)
-
-        pending = _pending_winners.pop(token, None)
-        if not pending:
-            await query.edit_message_text("⚠️ ይህ ጥያቄ ጊዜው አልፎበታል ወይም ቀድሞ ተስተናግዷል።")
-            return
-
-        if action == "winner_cancel":
-            await query.edit_message_text("❌ Winner ውጤት ተሰርዟል።")
-            return
-
-        winners = pending["winners"]
-        settings = pending["settings"]
-        _group_id = pending["group_id"]
-        bot = ctx.bot
 
         prize_map = {
             1: settings.get("prize_1st", 0),
@@ -604,6 +516,7 @@ async def handle_winner_confirmation(update: Update, ctx: ContextTypes.DEFAULT_T
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         per_person = settings.get("numbers_per_person", 1)
         lines = ["🏆 Winners!\n"]
+        _group_id = group_id or settings.get("group_id")
 
         for place in sorted(winners.keys()):
             number = winners[place]
@@ -631,6 +544,7 @@ async def handle_winner_confirmation(update: Update, ctx: ContextTypes.DEFAULT_T
             add_winner_balance(settings["id"], telegram_id, prize, group_id=_group_id)
             save_winner(settings["id"], place, telegram_id, user_name, number, prize, group_id=_group_id)
             lines.append(f"{medal} {place}ኛ: #{number} — {user_name} → ETB {prize} ✅")
+
             try:
                 from ai_fallback import log_transaction
                 if _group_id:
@@ -644,7 +558,7 @@ async def handle_winner_confirmation(update: Update, ctx: ContextTypes.DEFAULT_T
                 logger.warning(f"[log_transaction] Error: {_log_err}")
 
         announcement = "\n".join(lines)
-        await query.edit_message_text(announcement)
+        await msg.reply_text(announcement)
 
         if _group_id:
             try:
@@ -652,12 +566,12 @@ async def handle_winner_confirmation(update: Update, ctx: ContextTypes.DEFAULT_T
             except Exception:
                 pass
 
+        return True
+
     except Exception as e:
-        logger.error(f"[Winner Confirmation] Error: {e}", exc_info=True)
-        try:
-            await query.edit_message_text("❌ Error ተፈጥሯል።")
-        except Exception:
-            pass
+        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል።")
+        return False
 
 
 # ============================================================
@@ -682,7 +596,6 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     target_chat = _group_id
 
     if confirmed:
-        # "እሺ ቤተሰብ 🙏" → delete → random መልካም ዕድል photo reply
         final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
         if receipt_msg_id and receipt_chat_id:
             try:
@@ -695,7 +608,6 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
             else:
                 await bot.send_message(chat_id=target_chat, text=final_msg)
     else:
-        # ብር ደረሰ ግን ቁጥር ማይሸፍን — ቀሪ ብር ይናገር — receipt_msg replace
         settings_check = get_active_settings(group_id=_group_id)
         needed_msg = ""
         if settings_check:
@@ -791,19 +703,14 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
 async def describe_photo_in_amharic(description: str) -> str:
     try:
-        response = _call_groq_with_rotation(lambda client: client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[{
-                "role": "user",
-                "content": (
-                    f'ይህ ምስል "{description}" ነው። '
-                    "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
-                ),
-            }],
-            max_tokens=100,
-            temperature=0.3,
-        ))
-        return response.choices[0].message.content.strip()
+        messages = [{
+            "role": "user",
+            "content": (
+                f'ይህ ምስል "{description}" ነው። '
+                "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
+            ),
+        }]
+        return await _call_groq_with_rotation(messages, max_tokens=100)
     except Exception as e:
         logger.error(f"[Describe] Error: {e}")
         return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
