@@ -462,10 +462,8 @@ Respond ONLY in JSON:
             if parsed.get(field) in ("null", "None", "", "N/A"):
                 parsed[field] = None
 
-        lang = parsed.get("lang", "english")
-
         # ── Step 2: አማርኛ ከሆነ → Groq fallback ──
-        if lang == "amharic":
+        if parsed.get("lang") == "amharic":
             logger.info("[Screenshot] አማርኛ detected → Groq fallback")
             text2 = await _call_groq_vision_with_rotation(image_base64, prompt)
             text2 = re.sub(r"^```json\s*", "", text2)
@@ -487,7 +485,7 @@ Respond ONLY in JSON:
 
 
 # ============================================================
-# WINNER PHOTO ANALYZER — Groq only (lottery tiles)
+# WINNER PHOTO ANALYZER — Groq only
 # ============================================================
 
 async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
@@ -504,7 +502,7 @@ async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
     prompt = f"""You are a lottery ticket analyzer for Ethiopian lottery.
 Game prizes: {prizes_desc}
 
-A REAL lottery ticket: small physical paper cubes with a series label (in Amharic or English) and numbers printed on them.
+A REAL lottery ticket: small physical paper cubes with Amharic series label and numbers.
 NOT lottery → return type "other": bank receipts, screenshots, phone screens.
 
 CRITICAL ORDER RULES:
