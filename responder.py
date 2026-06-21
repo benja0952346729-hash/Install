@@ -726,7 +726,8 @@ def detect_intent(text: str) -> tuple:
 
 RESPONSES = {
     "booking_success_normal": [
-        "እሺ ገቢ 🙏", "እሺ ቤተሰብ 🙏", "እሺ ገቢ እንዳይረሳ 🙏", "እሺ ወዳጄ 🥰",
+        "እሺ ገቢ 🙏", "እሺ ገቢ እንዳይረሳ 🙏",
+        "እሺ ገቢ ቤተሰብ 🙏", "እሺ 🙏 ገቢ ይላክ",
     ],
     "booking_success_paid": [
         "እሺ ቤተሰብ 🙏", "እሺ ወዳጄ 🥰",
