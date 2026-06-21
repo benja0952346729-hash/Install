@@ -728,6 +728,9 @@ RESPONSES = {
     "booking_success_normal": [
         "እሺ ገቢ 🙏", "እሺ ቤተሰብ 🙏", "እሺ ገቢ እንዳይረሳ 🙏", "እሺ ወዳጄ 🥰",
     ],
+    "booking_success_paid": [
+        "እሺ ቤተሰብ 🙏", "እሺ ወዳጄ 🥰",
+    ],
     "booking_success_urgent": [
         "እሺ ቤተሰብ ይፍጠን 🙏", "ይዝሄልሃለው ቤተሰብ ይፍጠን 🙏",
         "እሺ ለጫወታው ድምቀት ይፍጠን 🙏", "እሺ ገቢ 🙏",
@@ -1048,6 +1051,7 @@ def get_response(
     # ── NEW params ──
     user_balance: float = None,
     failed_attempts: list = None,
+    is_paid: bool = None,
 ) -> dict:
 
     THRESHOLD_RESPOND  = 0.25
@@ -1068,7 +1072,12 @@ def get_response(
 
     if registration_result is not None:
         if registration_result in ("registered", "registered_half"):
-            if remaining_count <= 7:
+            if is_paid:
+                msg = random.choice(RESPONSES["booking_success_paid"])
+                if user_name and random.random() < 0.07:
+                    msg = msg.replace("🙏", f" {user_name} 🙏").replace("🥰", f" {user_name} 🥰")
+                result["reply"] = msg
+            elif remaining_count <= 7:
                 result["reply"] = random.choice(RESPONSES["booking_success_urgent"])
             else:
                 msg = random.choice(RESPONSES["booking_success_normal"])
