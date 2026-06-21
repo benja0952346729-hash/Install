@@ -293,6 +293,12 @@ INTENT_EXAMPLES = {
         "01 የማነው", "06 ለማን ያዘ", "ለማን ያዘ", "ለማን መዘገብክ",
         "ለማን ያዝከው", "ይህ ቁጥር ለማን ተያዘ",
         "ቁጥሩ ለማን ነው", "ቁጥሩ የማነው",
+        "ለማን ይዝክ", "ላይ ማነው የተመዘገበው", "ላይ ማነው የተጻፈው",
+        "የማን ቁጥር ነው", "የማነው ቁጥሩ",
+    ],
+    "claim_ownership": [
+        "11 የኔ ነው", "የኔ ነው", "11 የኔ ነው እንዴ", "የኔ ነው እንዴ",
+        "11 የኔ ነው አደለ", "የኔ ነው አደለ",
     ],
     "link_request": [
         "ሊንክ ላክልኝ", "ሊንክ ላክ", "link ላክልኝ", "link ላክ",
@@ -564,6 +570,14 @@ def detect_intent(text: str) -> tuple:
     if any(kw in latin for kw in MY_NUM_KW):
         return "my_numbers_query", 1.0
 
+    # ── claim ownership ("11 የኔ ነው") ────────────────────────────────
+    if numbers_in_text:
+        CLAIM_KW = [
+            normalize_to_latin("የኔ ነው"),
+        ]
+        if any(kw in latin for kw in CLAIM_KW):
+            return "claim_ownership", 1.0
+
     # ── number owner query ────────────────────────────────────────
     if numbers_in_text:
         OWNER_KW = [
@@ -704,7 +718,8 @@ def detect_intent(text: str) -> tuple:
                                 "players_query", "players_remaining_query",
                                 "result_query", "balance_query", "shortfall_query",
                                 "payment_not_received", "number_owner_query",
-                                "my_numbers_query", "winner_query", "i_won_query"):
+                                "my_numbers_query", "winner_query", "i_won_query",
+                                "claim_ownership"):
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
@@ -900,6 +915,12 @@ RESPONSES = {
         "ክፍት ነው ያዝ 🙏",
         "ምንም ሰው አልያዘውም ያዝ 🙏",
     ],
+    "claim_ownership_yes": [
+        "አዎ ቤተሰብ 🙏",
+    ],
+    "claim_ownership_no": [
+        "ቤተሰብ ያንተ አደለም የ {name} ነው 🙏",
+    ],
     "link_request": [
         "እሺ በውስጥ እልክልሃለሁ 🙏",
         "እሺ ቤተሰብ በውስጥ እልካለሁ 🙏",
@@ -958,6 +979,16 @@ RESPONSES = {
         "ቤተሰብ {num} {name} ቀድሞሃል 🙏",
     ],
 }
+
+
+# ================================================================
+# FIRST NAME HELPER
+# ================================================================
+
+def _first_name(full_name: str) -> str:
+    if not full_name:
+        return full_name
+    return full_name.strip().split()[0] if full_name.strip().split() else full_name
 
 
 # ================================================================
@@ -1233,13 +1264,18 @@ def get_response(
                 if not entry:
                     result["reply"] = random.choice(RESPONSES["number_owner_free"])
                 else:
-                    owner_name = entry[0][0]
+                    slot1 = next((e for e in entry if e[2] == 1), entry[0])
+                    owner_name = _first_name(slot1[0])
+                    is_half_owner = slot1[1]
+                    half_suffix = " (በግማሽ)" if is_half_owner else ""
                     if user_name and any(name == user_name for name, _, _, _, _ in entry):
-                        result["reply"] = random.choice(RESPONSES["number_owner_yours"])
+                        msg = random.choice(RESPONSES["number_owner_yours"])
+                        result["reply"] = msg + half_suffix
                     else:
-                        result["reply"] = random.choice(RESPONSES["number_owner_show"]).format(
+                        msg = random.choice(RESPONSES["number_owner_show"]).format(
                             name=owner_name
                         )
+                        result["reply"] = msg + half_suffix
             else:
                 lines = []
                 for n_str in numbers_found:
@@ -1248,14 +1284,38 @@ def get_response(
                     if not entry:
                         lines.append(f"{num:02d} — ክፍት ነው")
                     else:
-                        owner_name = entry[0][0]
+                        slot1 = next((e for e in entry if e[2] == 1), entry[0])
+                        owner_name = _first_name(slot1[0])
+                        is_half_owner = slot1[1]
+                        half_suffix = " (በግማሽ)" if is_half_owner else ""
                         if user_name and any(name == user_name for name, _, _, _, _ in entry):
-                            lines.append(f"{num:02d} — ያንተ ነው")
+                            lines.append(f"{num:02d} — ያንተ ነው{half_suffix}")
                         else:
-                            lines.append(f"{num:02d} — ለ {owner_name}")
+                            lines.append(f"{num:02d} — ለ {owner_name}{half_suffix}")
                 owners_text = "\n".join(lines)
                 result["reply"] = random.choice(RESPONSES["number_owner_multi"]).format(
                     owners_text=owners_text
+                )
+        return result
+
+    # ── claim_ownership ──────────────────────────────────────────
+    if intent == "claim_ownership":
+        numbers_found = re.findall(r"\d+", text)
+        if numbers_found:
+            num = int(numbers_found[0])
+            entry = taken.get(num, [])
+            if not entry:
+                # ባዶ ቦታ — ሌላ intent ሊሆን ይችላል፣ ምንም አትመልስ
+                return result
+            slot1 = next((e for e in entry if e[2] == 1), entry[0])
+            is_half_owner = slot1[1]
+            half_suffix = " (በግማሽ)" if is_half_owner else ""
+            if user_name and any(name == user_name for name, _, _, _, _ in entry):
+                result["reply"] = random.choice(RESPONSES["claim_ownership_yes"]) + half_suffix
+            else:
+                owner_name = _first_name(slot1[0])
+                result["reply"] = random.choice(RESPONSES["claim_ownership_no"]).format(
+                    name=owner_name
                 )
         return result
 
