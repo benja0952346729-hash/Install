@@ -6,7 +6,7 @@ import logging
 import random
 import asyncio
 from typing import Optional
-from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS
+from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS, JINA_API_KEYS
 import httpx
 from groq import Groq
 from openai import OpenAI
@@ -114,6 +114,21 @@ async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str
             logger.error(f"[Groq Vision] Non-rate error: {e}")
             raise
     raise RuntimeError("All Groq vision keys exhausted")
+
+
+# ============================================================
+# JINA KEY ROTATION
+# ============================================================
+
+_jina_index = 0
+
+def _get_jina_key() -> str:
+    global _jina_index
+    if not JINA_API_KEYS:
+        return None
+    key = JINA_API_KEYS[_jina_index]
+    _jina_index = (_jina_index + 1) % len(JINA_API_KEYS)
+    return key
 
 
 # ============================================================
@@ -227,11 +242,16 @@ Respond ONLY in this exact JSON format with no extra text:
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
     try:
         jina_url = f"https://r.jina.ai/{url}"
+        headers = {
+            "Accept": "text/plain",
+            "User-Agent": "Mozilla/5.0",
+        }
+        jina_key = _get_jina_key()
+        if jina_key:
+            headers["Authorization"] = f"Bearer {jina_key}"
+
         async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.get(jina_url, headers={
-                "Accept": "text/plain",
-                "User-Agent": "Mozilla/5.0",
-            })
+            res = await client.get(jina_url, headers=headers)
             if res.status_code != 200:
                 return None
             text = res.text
