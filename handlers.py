@@ -221,10 +221,14 @@ Respond ONLY in this exact JSON format with no extra text:
 
 
 # ============================================================
-# JINA — URL ላይ ስም ማውጣት
+# FIX 4 — JINA URL → full payment data
 # ============================================================
 
-async def fetch_sender_name_from_url(url: str) -> Optional[str]:
+async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
+    """
+    Returns: {"amount": float, "sender_name": str, "ref": str, "bank": str} or None
+    FIX 4: fetch_sender_name_from_url → fetch_payment_data_from_url (full payment extraction)
+    """
     try:
         jina_url = f"https://r.jina.ai/{url}"
         async with httpx.AsyncClient(timeout=20) as client:
@@ -236,22 +240,19 @@ async def fetch_sender_name_from_url(url: str) -> Optional[str]:
                 return None
             text = res.text
 
-        patterns = [
-            r"Payer\s*[:\-]\s*([A-Za-z\s]+)",
-            r"Sender\s*[:\-]\s*([A-Za-z\s]+)",
-            r"From\s*[:\-]\s*([A-Za-z\s]+)",
-            r"Customer Name\s*[:\-]\s*([A-Za-z\s]+)",
+        messages = [
+            {"role": "system", "content": """Extract payment info from this Ethiopian bank receipt page text.
+Respond ONLY in JSON:
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<CBE/Telebirr/Awash/etc>"}"""},
+            {"role": "user", "content": text[:2000]},
         ]
-        for pattern in patterns:
-            m = re.search(pattern, text, re.IGNORECASE)
-            if m:
-                name = m.group(1).strip()
-                if name:
-                    return name
-        return None
-
+        result_text = await _call_groq_with_rotation(messages)
+        result_text = re.sub(r"^```json\s*", "", result_text)
+        result_text = re.sub(r"^```\s*", "", result_text)
+        result_text = re.sub(r"\s*```$", "", result_text)
+        return json.loads(result_text.strip())
     except Exception as e:
-        logger.error(f"[Jina] Error: {e}")
+        logger.error(f"[URL Fetch] Error: {e}")
         return None
 
 
@@ -279,11 +280,23 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
     if not amount:
         return {"success": False, "reason": "no_amount"}
 
+    # FIX 4 — fetch_payment_data_from_url ተጠቀም
     if url and (not sender_name or len(sender_name.split()) < 2):
         logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
-        sender_name = await fetch_sender_name_from_url(url)
+        url_data = await fetch_payment_data_from_url(url)
+        if url_data:
+            if url_data.get("sender_name"):
+                sender_name = url_data["sender_name"]
+            if url_data.get("amount") and not amount:
+                amount = url_data["amount"]
+            if url_data.get("ref") and not ref:
+                ref = url_data["ref"]
 
     logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref} | group={group_id}")
+
+    # FIX 1 — game_id አስተላልፍ
+    settings = get_active_settings(group_id=group_id)
+    game_id = settings["id"] if settings else None
 
     result = save_sms_payment(
         amount=amount,
@@ -292,6 +305,7 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
         sms_type=sms_type,
         raw_sms=raw_sms,
         group_id=group_id,
+        game_id=game_id,
     )
 
     if result.get("matched") and bot:
@@ -368,14 +382,20 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
         logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
 
+        # FIX 1 — game_id አስተላልፍ
+        settings = get_active_settings(group_id=_group_id)
+        game_id = settings["id"] if settings else None
+
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount, sender_name=sender_name,
             ref=ref, pay_type=photo_type, group_id=_group_id,
+            game_id=game_id,
         )
         if not match:
             match = find_matching_sms(
                 telegram_id=telegram_id, amount=amount, sender_name=sender_name,
                 ref=ref, pay_type=photo_type, group_id=None,
+                game_id=game_id,
             )
 
         if not match:
@@ -383,6 +403,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
                 telegram_id=telegram_id, amount=amount, sender_name=sender_name,
                 ref=ref, pay_type=photo_type,
                 description=analysis.get("description", ""), group_id=_group_id,
+                game_id=game_id,
             )
             return
 
@@ -415,6 +436,63 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
     except Exception as e:
         logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
         await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
+
+
+# ============================================================
+# FIX 4 — Receipt URL handler
+# ============================================================
+
+async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int, nekay_cb=None):
+    """
+    Ethiopian bank receipt URL ሲላክ payment process ያደርጋል።
+    FIX 4: አዲስ function
+    """
+    try:
+        await msg.reply_text("⏳ ደረሰኝ እየተመረመረ ነው...")
+
+        payment_data = await fetch_payment_data_from_url(url)
+        if not payment_data or not payment_data.get("amount"):
+            await msg.reply_text("⚠️ ደረሰኙ ሊነበብ አልቻለም።")
+            return
+
+        amount = payment_data["amount"]
+        sender_name = payment_data.get("sender_name")
+        ref = payment_data.get("ref")
+        bank = payment_data.get("bank", "Bank")
+
+        settings = get_active_settings(group_id=group_id)
+        game_id = settings["id"] if settings else None
+
+        match = find_matching_sms(
+            telegram_id=telegram_id, amount=amount,
+            sender_name=sender_name, ref=ref,
+            pay_type=bank, group_id=group_id,
+            game_id=game_id,
+        )
+
+        if not match:
+            save_screenshot_payment(
+                telegram_id=telegram_id, amount=amount,
+                sender_name=sender_name, ref=ref,
+                pay_type=bank, description=f"Receipt URL: {url}",
+                group_id=group_id, game_id=game_id,
+            )
+            return
+
+        if is_sms_already_used(match["id"]):
+            await msg.reply_text("⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።")
+            return
+
+        mark_sms_as_used(match["id"])
+        await notify_match(
+            bot,
+            {**match, "telegram_id": telegram_id, "group_id": group_id},
+            msg.message_id, group_id,
+            nekay_cb=nekay_cb,
+            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
+        )
+    except Exception as e:
+        logger.error(f"[Receipt URL] Error: {e}", exc_info=True)
 
 
 # ============================================================
@@ -451,7 +529,6 @@ Respond ONLY in JSON:
 }"""
 
     try:
-        # ── Step 1: NVIDIA ሞክር ──
         text = await _call_nvidia_with_rotation(image_base64, prompt)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
@@ -462,7 +539,6 @@ Respond ONLY in JSON:
             if parsed.get(field) in ("null", "None", "", "N/A"):
                 parsed[field] = None
 
-        # ── Step 2: አማርኛ ከሆነ → Groq fallback ──
         if parsed.get("lang") == "amharic":
             logger.info("[Screenshot] አማርኛ detected → Groq fallback")
             text2 = await _call_groq_vision_with_rotation(image_base64, prompt)
