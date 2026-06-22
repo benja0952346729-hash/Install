@@ -225,10 +225,6 @@ Respond ONLY in this exact JSON format with no extra text:
 # ============================================================
 
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
-    """
-    Returns: {"amount": float, "sender_name": str, "ref": str, "bank": str} or None
-    FIX 4: fetch_sender_name_from_url → fetch_payment_data_from_url (full payment extraction)
-    """
     try:
         jina_url = f"https://r.jina.ai/{url}"
         async with httpx.AsyncClient(timeout=20) as client:
@@ -280,7 +276,6 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
     if not amount:
         return {"success": False, "reason": "no_amount"}
 
-    # FIX 4 — fetch_payment_data_from_url ተጠቀም
     if url and (not sender_name or len(sender_name.split()) < 2):
         logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
         url_data = await fetch_payment_data_from_url(url)
@@ -294,7 +289,6 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
 
     logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref} | group={group_id}")
 
-    # FIX 1 — game_id አስተላልፍ
     settings = get_active_settings(group_id=group_id)
     game_id = settings["id"] if settings else None
 
@@ -382,7 +376,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
         logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
 
-        # FIX 1 — game_id አስተላልፍ
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
@@ -439,20 +432,26 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
 
 # ============================================================
-# FIX 4 — Receipt URL handler
+# FIX — Receipt URL handler (ሙሉ የ screenshot logic)
 # ============================================================
 
 async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int, nekay_cb=None):
-    """
-    Ethiopian bank receipt URL ሲላክ payment process ያደርጋል።
-    FIX 4: አዲስ function
-    """
+    chat_id = msg.chat.id
+    _group_id = group_id or chat_id
+
     try:
-        await msg.reply_text("⏳ ደረሰኝ እየተመረመረ ነው...")
+        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
 
         payment_data = await fetch_payment_data_from_url(url)
+
         if not payment_data or not payment_data.get("amount"):
-            await msg.reply_text("⚠️ ደረሰኙ ሊነበብ አልቻለም።")
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ ደረሰኙ ሊነበብ አልቻለም።"
+                )
+            except Exception:
+                pass
             return
 
         amount = payment_data["amount"]
@@ -460,39 +459,73 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         ref = payment_data.get("ref")
         bank = payment_data.get("bank", "Bank")
 
-        settings = get_active_settings(group_id=group_id)
+        logger.info(f"[Receipt URL] bank={bank} | amount={amount} | sender={sender_name} | ref={ref} | group={_group_id}")
+
+        settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
+        # SMS match ፈልግ
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount,
             sender_name=sender_name, ref=ref,
-            pay_type=bank, group_id=group_id,
+            pay_type=bank, group_id=_group_id,
             game_id=game_id,
         )
+        if not match:
+            match = find_matching_sms(
+                telegram_id=telegram_id, amount=amount,
+                sender_name=sender_name, ref=ref,
+                pay_type=bank, group_id=None,
+                game_id=game_id,
+            )
 
+        # Match ካልተገኘ — screenshot save ብቻ (confirm አይደረግም)
         if not match:
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount,
                 sender_name=sender_name, ref=ref,
-                pay_type=bank, description=f"Receipt URL: {url}",
-                group_id=group_id, game_id=game_id,
+                pay_type=bank,
+                description=f"Receipt URL: {url}",
+                group_id=_group_id,
+                game_id=game_id,
             )
+            # Receipt msg ያጸዳ (ምንም ባይሆን)
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=receipt_msg.message_id)
+            except Exception:
+                pass
             return
 
+        # ቀድሞ used ነው?
         if is_sms_already_used(match["id"]):
-            await msg.reply_text("⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።")
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።"
+                )
+            except Exception:
+                pass
             return
 
         mark_sms_as_used(match["id"])
         await notify_match(
             bot,
-            {**match, "telegram_id": telegram_id, "group_id": group_id},
-            msg.message_id, group_id,
+            {**match, "telegram_id": telegram_id, "group_id": _group_id},
+            msg.message_id, _group_id,
             nekay_cb=nekay_cb,
             success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
+            receipt_msg_id=receipt_msg.message_id,
+            receipt_chat_id=chat_id,
         )
+
+        try:
+            log_activity(_group_id, payments=1)
+        except Exception:
+            pass
+
     except Exception as e:
         logger.error(f"[Receipt URL] Error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል።")
 
 
 # ============================================================
