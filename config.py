@@ -56,6 +56,18 @@ NVIDIA_API_KEYS = [
 ]
 
 # ============================================================
+# JINA API KEYS — እስከ 10 ይቻላል
+# ============================================================
+JINA_API_KEYS = [
+    key.strip()
+    for key in [
+        os.environ.get(f"JINA_API_KEY_{i}") or (os.environ.get("JINA_API_KEY") if i == 1 else None)
+        for i in range(1, 11)
+    ]
+    if key and key.strip()
+]
+
+# ============================================================
 # GROUP — Legacy
 # ============================================================
 GROUP_ID = int(os.environ.get("GROUP_ID", "0"))
