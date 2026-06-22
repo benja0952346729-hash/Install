@@ -95,6 +95,65 @@ def _extract_account_lines(payment_info: str) -> str:
 
 
 # ================================================================
+# FIX 3 — Payment info account parser helpers
+# ================================================================
+
+def _parse_payment_info_accounts(payment_info: str) -> list:
+    """
+    payment_info ውስጥ ያሉ account numbers ያወጣል።
+    Returns: [{"bank": "CBE", "account": "1000641057146"}, ...]
+    FIX 3: አዲስ helper function
+    """
+    lines = payment_info.strip().split("\n")
+    accounts = []
+    bank_patterns = [
+        (r"CBE", "CBE"),
+        (r"Telebirr|Tele|ቴሌብር", "Telebirr"),
+        (r"Awash|አዋሽ", "Awash"),
+        (r"Dashen|ዳሽን", "Dashen"),
+        (r"BOA|Abyssinia|አቢሲኒያ", "BOA"),
+        (r"Wegagen|ወጋገን", "Wegagen"),
+        (r"Nib|ንብ", "Nib"),
+        (r"United|ዩናይትድ", "United"),
+        (r"Oromia|ኦሮሚያ", "Oromia"),
+        (r"Amhara|አማራ", "Amhara"),
+        (r"Coopbank|ኮፕ", "Coopbank"),
+        (r"Bunna|ቡና", "Bunna"),
+        (r"Berhan|ብርሃን", "Berhan"),
+        (r"Zemen|ዘመን", "Zemen"),
+    ]
+    for line in lines:
+        nums = re.findall(r'\d{8,}', line)
+        if not nums:
+            continue
+        bank_name = "Bank"
+        for pattern, name in bank_patterns:
+            if re.search(pattern, line, re.IGNORECASE):
+                bank_name = name
+                break
+        for num in nums:
+            accounts.append({"bank": bank_name, "account": num})
+    return accounts
+
+
+def _fuzzy_account_match(user_num: str, known_num: str) -> str:
+    """
+    Returns: "exact", "close", "no_match"
+    close = 2 digit ወይም በታች ልዩነት
+    FIX 3: አዲስ helper function
+    """
+    if user_num == known_num:
+        return "exact"
+    if abs(len(user_num) - len(known_num)) > 2:
+        return "no_match"
+    if len(user_num) == len(known_num):
+        diff = sum(1 for a, b in zip(user_num, known_num) if a != b)
+        if diff <= 2:
+            return "close"
+    return "no_match"
+
+
+# ================================================================
 # CHANGE NUMBER / TYPE CHANGE DETECTORS
 # ================================================================
 
@@ -282,7 +341,7 @@ INTENT_EXAMPLES = {
     "my_numbers_query": [
         "ምን ቁጥር ያዝክልኝ", "ስንት ቁጥሮችን ነው የያዝኩት",
         "ምን ቁጥሮች ያዝኩ", "ስንት ቁጥር ያዝኩ",
-        "ስንት ቁጥሮች መዘገብክልኝ", "ምን ቁጥሮች ናቸው ያዘዝኩት",
+        "ስንት ቁጥሮች መዘገብክልኝ", "ምን ቁጥሮች ናቸው ያዘዘዝኩት",
         "የያዝኩት ቁጥሮች ምን ምን ናቸው", "ቁጥሬ ምን ምን ነው",
         "ያዘዝኩት ቁጥር ምን ነው", "ምን ቁጥሮች ጻፍክልኝ",
         "ቁጥሮቼ ምን ምን ናቸው", "ምን ቁጥሮች ነው ያዘዝኩት",
@@ -309,7 +368,6 @@ INTENT_EXAMPLES = {
         "ቶሎ ቶሎ አጫውተን", "speed", "ፈጠን",
         "ቶሎ ቶሎ", "ይፍጠን", "ፍጠን",
     ],
-    # ── NEW INTENTS ──
     "balance_query": [
         "ስንት ብር አለኝ", "ስንት ቀሪ አለኝ", "ስንት ብር ይቀረኛል",
         "አንተጋ ስንት አለኝ", "ስንት አለኝ", "ብሬ ስንት ነው",
@@ -446,7 +504,7 @@ def detect_intent(text: str) -> tuple:
     latin = normalize_to_latin(text)
     numbers_in_text = re.findall(r"\d+", text)
 
-    # ── 9+ digit account number detection (FIX 2) ────────────────
+    # ── FIX 2 — 9+ digit account number detection (ከሁሉም በፊት) ──────
     _continuous_nums = re.findall(r'\b\d{9,}\b', text)
     if _continuous_nums:
         return "account_query", 1.0
@@ -934,7 +992,6 @@ RESPONSES = {
         "እሺ 🙏 እየሞከርኩ ነው",
         "እሺ ቤተሰብ 🙏 እየሞከርኩ ነው",
     ],
-    # ── NEW RESPONSES ──
     "balance_show": [
         "{balance} ብር እኔጋ አለክ ቤተሰብ 🙏",
         "ቤተሰብ {balance} ብር አለህ 🙏",
@@ -994,53 +1051,6 @@ def _first_name(full_name: str) -> str:
     if not full_name:
         return full_name
     return full_name.strip().split()[0] if full_name.strip().split() else full_name
-
-
-def _parse_payment_info_accounts(payment_info: str) -> list:
-    """payment_info ውስጥ ያሉ account numbers ያወጣል"""
-    lines = payment_info.strip().split("\n")
-    accounts = []
-    bank_patterns = [
-        (r"CBE", "CBE"),
-        (r"Telebirr|Tele|ቴሌብር", "Telebirr"),
-        (r"Awash|አዋሽ", "Awash"),
-        (r"Dashen|ዳሽን", "Dashen"),
-        (r"BOA|Abyssinia|አቢሲኒያ", "BOA"),
-        (r"Wegagen|ወጋገን", "Wegagen"),
-        (r"Nib|ንብ", "Nib"),
-        (r"United|ዩናይትድ", "United"),
-        (r"Oromia|ኦሮሚያ", "Oromia"),
-        (r"Amhara|አማራ", "Amhara"),
-        (r"Coopbank|ኮፕ", "Coopbank"),
-        (r"Bunna|ቡና", "Bunna"),
-        (r"Berhan|ብርሃን", "Berhan"),
-        (r"Zemen|ዘመን", "Zemen"),
-    ]
-    for line in lines:
-        nums = re.findall(r'\d{8,}', line)
-        if not nums:
-            continue
-        bank_name = "Bank"
-        for pattern, name in bank_patterns:
-            if re.search(pattern, line, re.IGNORECASE):
-                bank_name = name
-                break
-        for num in nums:
-            accounts.append({"bank": bank_name, "account": num})
-    return accounts
-
-
-def _fuzzy_account_match(user_num: str, known_num: str) -> str:
-    """Returns: 'exact', 'close', or 'no_match'. close = 2 digit ወይም በታች ልዩነት"""
-    if user_num == known_num:
-        return "exact"
-    if abs(len(user_num) - len(known_num)) > 2:
-        return "no_match"
-    if len(user_num) == len(known_num):
-        diff = sum(1 for a, b in zip(user_num, known_num) if a != b)
-        if diff <= 2:
-            return "close"
-    return "no_match"
 
 
 # ================================================================
@@ -1132,7 +1142,6 @@ def get_response(
     recent_winners: list = None,
     user_unpaid_balance: float = None,
     user_numbers: list = None,
-    # ── NEW params ──
     user_balance: float = None,
     failed_attempts: list = None,
     is_paid: bool = None,
@@ -1236,7 +1245,6 @@ def get_response(
         if not recent_winners:
             result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
             return result
-        # user recent_winners ውስጥ ካለ
         user_place = None
         for w in recent_winners:
             if w.get("telegram_id") == user_id:
@@ -1261,7 +1269,6 @@ def get_response(
         numbers_found = re.findall(r"\d+", text)
         if numbers_found and failed_attempts:
             num = int(numbers_found[0])
-            # ያ ቁጥር failed_attempts ውስጥ ካለ
             attempt = next((a for a in failed_attempts if a["number"] == num), None)
             if attempt and attempt["reason"] == "taken" and attempt.get("slot1_name"):
                 name = attempt["slot1_name"]
@@ -1269,16 +1276,15 @@ def get_response(
                     num=f"{num:02d}",
                     name=name,
                 )
-            # failed_attempts ከሌለ → ignore
         return result
 
-    # ── account_query ─────────────────────────────────────────────
+    # ── FIX 3 — account_query smart match ────────────────────────
     if intent == "account_query":
         payment_info = settings.get("payment_info", "")
-        numbers_in_text_9 = re.findall(r'\d{9,}', text)
+        numbers_in_text = re.findall(r'\d{9,}', text)
 
-        if numbers_in_text_9 and payment_info:
-            user_num = numbers_in_text_9[0]
+        if numbers_in_text and payment_info:
+            user_num = numbers_in_text[0]
             known_accounts = _parse_payment_info_accounts(payment_info)
 
             best_match = None
@@ -1302,6 +1308,7 @@ def get_response(
                 result["reply"] = "እሺ ለአጫዋቹ በውስጥ ላክለት ቤተሰብ 🙏"
         elif payment_info:
             result["reply"] = _extract_account_lines(payment_info)
+
         return result
 
     # ── link_request ──────────────────────────────────────────────
@@ -1375,14 +1382,13 @@ def get_response(
                 )
         return result
 
-    # ── claim_ownership ──────────────────────────────────────────
+    # ── claim_ownership ───────────────────────────────────────────
     if intent == "claim_ownership":
         numbers_found = re.findall(r"\d+", text)
         if numbers_found:
             num = int(numbers_found[0])
             entry = taken.get(num, [])
             if not entry:
-                # ባዶ ቦታ — ሌላ intent ሊሆን ይችላል፣ ምንም አትመልስ
                 return result
             slot1 = next((e for e in entry if e[2] == 1), entry[0])
             is_half_owner = slot1[1]
