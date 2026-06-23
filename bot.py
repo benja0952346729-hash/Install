@@ -3070,7 +3070,48 @@ def main():
 
         _bot_instance = app.bot
 
-        # Daily report scheduler
+        # Daily report scheduler — fix
+        async def _daily_report_scheduler():
+            import pytz
+            et_tz = pytz.timezone("Africa/Addis_Ababa")
+            while True:
+                now = datetime.now(et_tz)
+                target = now.replace(hour=23, minute=0, second=0, microsecond=0)
+                if now >= target:
+                    target = target + timedelta(days=1)
+                wait_secs = (target - now).total_seconds()
+                await asyncio.sleep(wait_secs)
+
+                try:
+                    groups = get_enabled_groups()
+                    for g in groups:
+                        gid = g["group_id"]
+                        if not is_group_active(gid):
+                            continue
+                        report = get_report(gid)
+                        lines = ["📊 የዛሬ Daily Report\n"]
+                        if report["games_count"] > 0:
+                            lines.append(
+                                f"🎮 ጨዋታዎች: {report['games_count']}\n"
+                                f"💰 Total bet: ETB {report['total_bet']:,.0f}\n"
+                                f"🏆 Prize: ETB {report['prize_total']:,.0f}\n"
+                                f"📈 Profit: ETB {report['profit']:,.0f}"
+                            )
+                        else:
+                            lines.append("🎮 ዛሬ ጨዋታ አልተጫወተም")
+                        try:
+                            admins = get_group_admins(gid)
+                            for admin_id in admins:
+                                try:
+                                    await _bot_instance.send_message(chat_id=admin_id, text="\n".join(lines))
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                    cleanup_old_reports()
+                except Exception as e:
+                    logging.warning(f"[Daily Report] Error: {e}")
+
         asyncio.create_task(_daily_report_scheduler())
 
         # Bot ይጀምራል
@@ -3082,9 +3123,3 @@ def main():
 
         # ለዘለዓለም ይሰራ
         await asyncio.Event().wait()
-
-    asyncio.run(main_async())
-
-
-if __name__ == "__main__":
-    main()
