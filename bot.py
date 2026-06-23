@@ -2954,7 +2954,15 @@ async def start_server():
 def main():
     init_db()
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    async def post_init(application):
+        from jina_brain import init_jina_brain
+        from config import JINA_API_KEYS
+        try:
+            await init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
+        except Exception as e:
+            logging.warning(f"⚠️ Jina failed: {e}")
+
+    app = ApplicationBuilder().token(BOT_TOKEN).post_init(post_init).build()
 
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setgame", setgame_start)],
@@ -3059,17 +3067,6 @@ def main():
 
     global _bot_instance
     _bot_instance = app.bot
-
-    # Jina background ላይ ይጀምራል — bot አያቆምም
-    async def _init_jina_background():
-        from jina_brain import init_jina_brain
-        from config import JINA_API_KEYS
-        try:
-            await init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
-        except Exception as e:
-            logging.warning(f"⚠️ Jina failed: {e}")
-
-    loop.create_task(_init_jina_background())
 
     async def _daily_report_scheduler():
         import pytz
