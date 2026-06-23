@@ -56,6 +56,7 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
 
+from responder import get_response, RESPONSES, INTENT_EXAMPLES
 import random
 
 (
