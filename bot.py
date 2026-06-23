@@ -3065,12 +3065,10 @@ def main():
     async def main_async():
         global _bot_instance
 
-        # SMS server ይጀምራል
         await start_server()
 
         _bot_instance = app.bot
 
-        # Daily report scheduler — fix
         async def _daily_report_scheduler():
             import pytz
             et_tz = pytz.timezone("Africa/Addis_Ababa")
@@ -3103,7 +3101,10 @@ def main():
                             admins = get_group_admins(gid)
                             for admin_id in admins:
                                 try:
-                                    await _bot_instance.send_message(chat_id=admin_id, text="\n".join(lines))
+                                    await _bot_instance.send_message(
+                                        chat_id=admin_id,
+                                        text="\n".join(lines)
+                                    )
                                 except Exception:
                                     pass
                         except Exception:
@@ -3114,12 +3115,16 @@ def main():
 
         asyncio.create_task(_daily_report_scheduler())
 
-        # Bot ይጀምራል
         await app.initialize()
         await app.start()
         await app.updater.start_polling()
 
         print("🤖 Bot started!", flush=True)
 
-        # ለዘለዓለም ይሰራ
         await asyncio.Event().wait()
+
+    asyncio.run(main_async())
+
+
+if __name__ == "__main__":
+    main()
