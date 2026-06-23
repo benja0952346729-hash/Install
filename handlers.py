@@ -21,6 +21,7 @@ from database import (
     get_active_settings,
     get_taken_numbers,
     get_user_by_number,
+    get_users_by_number,
     add_winner_balance,
     save_winner,
     log_activity,
@@ -452,7 +453,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
 
 
 # ============================================================
-# FIX — Receipt URL handler (ሙሉ የ screenshot logic)
+# Receipt URL handler
 # ============================================================
 
 async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int, nekay_cb=None):
@@ -484,7 +485,6 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # SMS match ፈልግ
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount,
             sender_name=sender_name, ref=ref,
@@ -499,7 +499,6 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 game_id=game_id,
             )
 
-        # Match ካልተገኘ — screenshot save ብቻ (confirm አይደረግም)
         if not match:
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount,
@@ -509,14 +508,12 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 group_id=_group_id,
                 game_id=game_id,
             )
-            # Receipt msg ያጸዳ (ምንም ባይሆን)
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=receipt_msg.message_id)
             except Exception:
                 pass
             return
 
-        # ቀድሞ used ነው?
         if is_sms_already_used(match["id"]):
             try:
                 await bot.edit_message_text(
@@ -672,7 +669,7 @@ Respond ONLY in this exact JSON format:
 
 
 # ============================================================
-# WINNER PHOTO HANDLER
+# WINNER PHOTO HANDLER — FIX: split prize for half-slot winners
 # ============================================================
 
 async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
@@ -711,29 +708,50 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             else:
                 lookup_number = number
 
-            user = get_user_by_number(settings["id"], lookup_number)
-            if not user:
+            # ── FIX: ሁሉንም slot holders ይምጣ (split prize) ──────────
+            users = get_users_by_number(settings["id"], lookup_number)
+
+            if not users:
                 lines.append(f"{medal} {place}ኛ: #{number} — user አልተገኘም")
                 continue
 
-            telegram_id = user["telegram_id"]
-            user_name = user["user_name"]
+            # Prize per person — ለሁሉም እኩል ይካፈላል
+            split_prize = round(prize / len(users), 2)
 
-            add_winner_balance(settings["id"], telegram_id, prize, group_id=_group_id)
-            save_winner(settings["id"], place, telegram_id, user_name, number, prize, group_id=_group_id)
-            lines.append(f"{medal} {place}ኛ: #{number} — {user_name} → ETB {prize} ✅")
+            winner_parts = []
+            for u in users:
+                telegram_id = u["telegram_id"]
+                user_name = u["user_name"]
+                is_half = u["is_half"]
 
-            try:
-                from ai_fallback import log_transaction
-                if _group_id:
-                    log_transaction(
-                        group_id=_group_id, game_id=settings["id"],
-                        telegram_id=telegram_id, amount=prize,
-                        reason="winner_prize", number=number,
-                        done_by="system", balance_after=prize,
-                    )
-            except Exception as _log_err:
-                logger.warning(f"[log_transaction] Error: {_log_err}")
+                add_winner_balance(settings["id"], telegram_id, split_prize, group_id=_group_id)
+                save_winner(
+                    settings["id"], place, telegram_id, user_name,
+                    number, split_prize, group_id=_group_id
+                )
+
+                half_label = " (በግማሽ)" if is_half else ""
+                winner_parts.append(f"{user_name}{half_label} → ETB {split_prize} ✅")
+
+                try:
+                    from ai_fallback import log_transaction
+                    if _group_id:
+                        log_transaction(
+                            group_id=_group_id, game_id=settings["id"],
+                            telegram_id=telegram_id, amount=split_prize,
+                            reason="winner_prize", number=number,
+                            done_by="system", balance_after=split_prize,
+                        )
+                except Exception as _log_err:
+                    logger.warning(f"[log_transaction] Error: {_log_err}")
+
+            # ── Line format: 1 winner ወይም 2 winners ──────────────
+            if len(users) == 1:
+                lines.append(f"{medal} {place}ኛ: #{number} — {winner_parts[0]}")
+            else:
+                lines.append(f"{medal} {place}ኛ: #{number} (prize ÷ {len(users)})")
+                for part in winner_parts:
+                    lines.append(f"   • {part}")
 
         announcement = "\n".join(lines)
         await msg.reply_text(announcement)
