@@ -1427,6 +1427,270 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         log_activity(group_id, registrations=1)
     except Exception:
         pass
+async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
+    pending = pending_ambiguous.get(user_id)
+    if not pending:
+        return
+
+    text_lower = text.lower()
+    yes = text_lower in ["አዎ", "awo", "yes", "aha", "አዎን"]
+    no = text_lower in ["አይደለም", "aydelem", "no", "የለም"]
+    if not yes and not no:
+        no = True
+
+    numbers = pending["numbers"]
+    ambiguous = pending["ambiguous"]
+    ambiguous_number = pending["ambiguous_number"]
+    settings = pending["settings"]
+
+    if ambiguous == "all_half":
+        if yes:
+            numbers = [(n, True, nm) for n, _, nm in numbers]
+    elif ambiguous == "last_half":
+        if not yes:
+            numbers = [(n, False, nm) for n, _, nm in numbers]
+
+    del pending_ambiguous[user_id]
+    await process_registration(ctx, settings, numbers, user_id, user_name, group_id, update.message)
+
+
+async def process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg, skip_board_update=False):
+    game_id = settings["id"]
+    per_person = settings["numbers_per_person"]
+
+    taken_before = get_taken_numbers(game_id)
+    remaining_before = count_remaining(settings, taken_before)
+
+    registered = []
+    all_taken = []
+    no_change_reply = False
+
+    allow_toggle = (len(numbers) == 1)
+
+    for num, is_half, parsed_name in numbers:
+        actual_num = get_group_start(num, per_person) if per_person > 1 else num
+
+        nekay_snap_value = None
+        if game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {}):
+            nekay_snap_value = nekay_numbers[game_id][actual_num]
+
+        is_nekay = (nekay_snap_value is not None)
+        is_nekay_force = (nekay_snap_value == 0)
+
+        if is_nekay_force:
+            actual_name = parsed_name if parsed_name else user_name
+        elif parsed_name:
+            actual_name = parsed_name
+        elif actual_num in taken_before:
+            existing_slots = taken_before[actual_num]
+            slot1 = next((s for s in existing_slots if s[2] == 1), None)
+            if slot1 and slot1[0] != user_name and slot1[1]:
+                actual_name = user_name
+            else:
+                actual_name = slot1[0] if slot1 else user_name
+        else:
+            actual_name = user_name
+
+        if actual_num < 1 or actual_num > settings["total_numbers"]:
+            all_taken.append(actual_num)
+            continue
+
+        if user_owns_number(game_id, user_id, actual_num) and not is_nekay:
+            target_type = "half" if is_half else "full"
+            result_tc = change_number_type(game_id, user_id, actual_num, target_type)
+            if result_tc["status"] == "ok":
+                actual_is_half = is_half
+                if result_tc.get("pending_upgrade"):
+                    actual_is_half = True
+                registered.append((actual_num, actual_is_half))
+            elif result_tc["status"] == "no_change":
+                no_change_reply = True
+            elif result_tc["status"] == "conflict":
+                all_taken.append(actual_num)
+            continue
+
+        result = register_number(
+            game_id, user_id, actual_name, actual_num, is_half,
+            force=is_nekay_force, allow_toggle=allow_toggle,
+            is_parsed_name=bool(parsed_name)
+        )
+        if result in ["registered", "registered_half"]:
+            registered.append((actual_num, is_half))
+        elif isinstance(result, dict) and result.get("status") == "ok":
+            new_is_half = get_user_numbers(game_id, user_id)
+            actual_is_half = is_half
+            for n_num, n_half, n_slot, n_paid in new_is_half:
+                if n_num == actual_num and n_slot == 1:
+                    actual_is_half = n_half
+                    break
+            registered.append((actual_num, actual_is_half))
+        elif isinstance(result, dict) and result.get("status") == "no_change":
+            no_change_reply = True
+        else:
+            all_taken.append(actual_num)
+
+    taken = get_taken_numbers(game_id)
+    paid = get_paid_numbers(game_id)
+    remaining_count = count_remaining(settings, taken)
+    snap = nekay_numbers.get(game_id, {})
+    nekay_list = _build_nekay_from_snap(snap)
+
+    if not registered and not all_taken and no_change_reply:
+        await msg.reply_text("እሺ 🙏")
+        return
+
+    reg_result = "registered" if registered else ("taken" if all_taken else None)
+
+    is_paid_result = None
+    if registered:
+        is_paid_result = all(
+            num in paid and 1 in paid[num]
+            for num, _is_half in registered
+        )
+
+    resp = get_response(
+        text=msg.text or "",
+        settings=settings,
+        taken=taken,
+        paid=paid,
+        nekay_list=nekay_list,
+        remaining_count=remaining_count,
+        countdown_seconds=0,
+        user_name=user_name,
+        registration_result=reg_result,
+        is_paid=is_paid_result,
+    )
+
+    if resp["reply"]:
+        await msg.reply_text(resp["reply"])
+
+    if not registered:
+        return
+
+    if skip_board_update:
+        return
+
+    board_text = build_board(settings, taken, paid)
+    board_msg_id = settings.get("board_message_id")
+
+    should_resend = _increment_counter(group_id)
+
+    crossed_into_low = (remaining_before > 7) and (remaining_count <= 7)
+    if crossed_into_low and game_id not in nekay_active:
+        should_resend = True
+
+    if remaining_count > 7 and game_id not in nekay_active:
+        should_resend = False
+
+    if game_id in nekay_active:
+        if should_resend:
+            if board_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_board.message_id)
+        else:
+            if board_msg_id:
+                try:
+                    await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+                except Exception:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                    except Exception:
+                        pass
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
+            else:
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
+
+        for num, is_half in registered:
+            if num in snap:
+                if is_half and snap[num] == 0:
+                    snap[num] = 2
+                else:
+                    del snap[num]
+        nekay_numbers[game_id] = snap
+
+        rem_msg_id = settings.get("remaining_message_id")
+        if rem_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+            except Exception:
+                pass
+        if snap:
+            nekay_list2 = _build_nekay_from_snap(snap)
+            nekay_text = build_nekay(nekay_list2)
+            new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+            update_remaining_message_id(game_id, new_nekay.message_id)
+        else:
+            update_remaining_message_id(game_id, None)
+            nekay_active.discard(game_id)
+            nekay_numbers.pop(game_id, None)
+            _stop_inactivity_tracker(game_id)
+
+        _reset_inactivity_tracker(ctx.bot, game_id, group_id)
+
+    elif remaining_count <= 7:
+        if should_resend:
+            if board_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                except Exception:
+                    pass
+            new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(game_id, new_board.message_id)
+        else:
+            if board_msg_id:
+                try:
+                    await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+                except Exception:
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(game_id, new_board.message_id)
+        await _send_remaining(ctx, settings, group_id)
+        _reset_inactivity_tracker(ctx.bot, game_id, group_id)
+
+    else:
+        if board_msg_id:
+            try:
+                await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
+            except Exception:
+                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(game_id, new_board.message_id)
+
+    if remaining_count == 0 and game_id not in active_countdowns and game_id not in countdown_done:
+        _stop_inactivity_tracker(game_id)
+
+        fresh_settings_for_resend = get_active_settings(group_id=group_id)
+        if fresh_settings_for_resend:
+            final_board_msg_id = fresh_settings_for_resend.get("board_message_id")
+            if final_board_msg_id:
+                try:
+                    await ctx.bot.delete_message(chat_id=group_id, message_id=final_board_msg_id)
+                except Exception:
+                    pass
+            final_board_text = build_board(fresh_settings_for_resend, get_taken_numbers(game_id), get_paid_numbers(game_id))
+            final_new_board = await ctx.bot.send_message(chat_id=group_id, text=final_board_text)
+            update_board_message_id(game_id, final_new_board.message_id)
+
+        countdown_enabled = settings.get("countdown_enabled", True)
+        if countdown_enabled:
+            countdown_mins = settings.get("countdown_minutes") or 2
+            warn_secs = int(float(countdown_mins) * 60)
+            task = asyncio.create_task(_countdown_task(ctx.bot, game_id, group_id, warn_seconds=warn_secs))
+            active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
+            countdown_done.add(game_id)
+
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
+
+    try:
+        check_and_rotate_db()
+    except Exception:
+        pass    
 # ============================================================
 # HELPERS
 # ============================================================
