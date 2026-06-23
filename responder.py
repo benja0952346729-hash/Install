@@ -2,6 +2,7 @@ import re
 import math
 import random
 from collections import defaultdict
+from jina_brain import jina_detect_intent, jina_is_ready, JINA_FALLBACK_THRESHOLD
 
 # ================================================================
 # AMHARIC → LATIN TRANSLITERATOR
@@ -1126,7 +1127,7 @@ def _calculate_shortfall(user_numbers: list, settings: dict, user_balance: float
 # MAIN RESPONDER
 # ================================================================
 
-def get_response(
+async def get_response(
     text: str,
     settings: dict,
     taken: dict,
@@ -1147,7 +1148,7 @@ def get_response(
     is_paid: bool = None,
 ) -> dict:
 
-    THRESHOLD_RESPOND  = 0.25
+    THRESHOLD_RESPOND  = 0.40
     THRESHOLD_CONFUSED = 0.12
 
     result = {
@@ -1182,6 +1183,9 @@ def get_response(
         return result
 
     intent, score = detect_intent(text)
+
+    if score < JINA_FALLBACK_THRESHOLD and jina_is_ready():
+        intent, score = await jina_detect_intent(text)
 
     if score < THRESHOLD_CONFUSED:
         return result
