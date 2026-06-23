@@ -2,7 +2,7 @@
 jina_brain.py
 =============
 Jina embedding fallback brain ለ responder.py intent detection።
-TF-IDF score ዝቅ ሲሆን (< 0.40) ብቻ ይጠራል።
+TF-IDF score ዝቅ ሲሆን (< 0.75) ብቻ ይጠራል።
 Multi-key rotation ይደግፋል።
 DB caching + hash-based auto re-embed ይደግፋል።
 
@@ -32,10 +32,10 @@ JINA_TASK       = "text-matching"
 JINA_BATCH_SIZE = 500
 
 # TF-IDF score ከዚህ በታች ሲሆን ብቻ Jina ይጠራል
-JINA_FALLBACK_THRESHOLD = 0.40
+JINA_FALLBACK_THRESHOLD = 0.75
 
 # Jina minimum similarity score
-JINA_MIN_SCORE = 0.45
+JINA_MIN_SCORE = 0.35
 
 # ================================================================
 # KEY ROTATION
@@ -239,7 +239,6 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
     _jina_index = 0
     logger.info(f"🔑 Jina keys loaded: {len(api_keys)} key(s)")
 
-    # Table ይፈጥራል — timeout ጋር
     try:
         await asyncio.wait_for(
             asyncio.to_thread(_ensure_table),
@@ -250,7 +249,6 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
     except Exception as e:
         logger.warning(f"⚠️ DB ensure_table error: {e}")
 
-    # Hash ያወዳድራል — timeout ጋር
     current_hash = _compute_hash(intent_examples)
     db_hash = None
     try:
@@ -285,7 +283,6 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
         else:
             logger.info("⚠️ DB cache incomplete — re-embedding...")
 
-    # Re-embed
     logger.info(f"🧠 Jina brain initializing... embedding {sum(len(v) for v in intent_examples.values())} texts")
 
     try:
@@ -316,7 +313,6 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
         _intent_embeddings = new_embeddings
         _is_ready = True
 
-        # DB ላይ background ይቀምጣል — block አያደርግም
         asyncio.create_task(_save_to_db_background(current_hash))
 
         total = sum(len(v) for v in _intent_embeddings.values())
@@ -330,7 +326,6 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
 
 
 async def _save_to_db_background(current_hash: str):
-    """Background ላይ DB ያስቀምጣል — bot አያዘገምም"""
     try:
         await asyncio.to_thread(_save_embeddings_to_db, _intent_embeddings)
         await asyncio.to_thread(_save_hash_to_db, current_hash)
