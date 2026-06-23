@@ -255,10 +255,7 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
     logger.info(f"🔑 Jina keys loaded: {len(api_keys)} key(s)")
 
     # Table ይፈጥራል
-    try:
-        _ensure_table()
-    except Exception as e:
-        logger.warning(f"⚠️  DB table error: {e}")
+    _ensure_table()
 
     # Hash ያወዳድራል
     current_hash = _compute_hash(intent_examples)
