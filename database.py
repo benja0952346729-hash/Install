@@ -432,6 +432,23 @@ def init_db():
                     added_at TIMESTAMP DEFAULT NOW()
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS jina_embeddings (
+                    id SERIAL PRIMARY KEY,
+                    intent TEXT NOT NULL,
+                    example_index INTEGER NOT NULL,
+                    embedding JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(intent, example_index)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS jina_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
 
             conn.commit()
             cur.close()
