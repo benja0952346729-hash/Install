@@ -1231,41 +1231,11 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         return
 
     # ── account_query early return (9+ digit) ────────────────────
+    # parse_numbers ከመጠራቱ በፊት account intent ከሆነ ቀድሞ ምልሽ ይስጥ
     import re as _re
     if _re.findall(r'\b\d{9,}\b', text):
         if resp["reply"]:
             await msg.reply_text(resp["reply"])
-        return
-
-    # ── should_parse check ────────────────────────────────────────
-    if not resp.get("should_parse"):
-        if resp["reply"]:
-            await msg.reply_text(resp["reply"])
-        if resp["resend_remaining"]:
-            if game_id in nekay_active:
-                rem_msg_id = settings.get("remaining_message_id")
-                if rem_msg_id:
-                    try:
-                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                    except Exception:
-                        pass
-                if snap:
-                    nekay_text_r = build_nekay(nekay_list)
-                    new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_r)
-                    update_remaining_message_id(game_id, new_nekay.message_id)
-            else:
-                await _send_remaining(ctx, settings, group_id)
-        if resp["resend_nekay"]:
-            if snap:
-                nekay_text = build_nekay(nekay_list)
-                rem_msg_id = settings.get("remaining_message_id")
-                if rem_msg_id:
-                    try:
-                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                    except Exception:
-                        pass
-                new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
-                update_remaining_message_id(game_id, new_nekay.message_id)
         return
 
     price_full = float(settings.get("price_full") or 0)
