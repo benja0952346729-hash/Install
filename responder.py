@@ -1607,7 +1607,8 @@ def get_response(
 async def get_response_async(text: str, **kwargs) -> dict:
     """
     get_response() async version — TF-IDF score < 0.75 ሲሆን
-    Jina embedding fallback ይጠቀማል፣ ከዛ sync get_response() ይጠራል።
+    Jina embedding fallback ይጠቀማል።
+    Jina intent ካዘ → detect_intent() bypass አርጎ directly ይሄዳል።
     """
     from jina_brain import jina_detect_intent, jina_is_ready, JINA_FALLBACK_THRESHOLD
 
@@ -1617,32 +1618,265 @@ async def get_response_async(text: str, **kwargs) -> dict:
     if score < JINA_FALLBACK_THRESHOLD and jina_is_ready():
         try:
             jina_intent, jina_score = await jina_detect_intent(text)
-            if jina_intent != "unknown" and jina_score > 0.35:
+            if jina_intent != "unknown" and jina_score > 0.10:
                 import logging as _log
                 _log.getLogger(__name__).info(
                     f"[Jina] '{text[:40]}' → {jina_intent} ({jina_score:.2f}) "
                     f"[TF-IDF was: {intent} ({score:.2f})]"
                 )
-                intent = jina_intent
-                score = jina_score
+                # detect_intent() bypass — directly intent inject
+                return _get_response_with_intent(
+                    text=text,
+                    intent=jina_intent,
+                    score=jina_score,
+                    **kwargs
+                )
         except Exception as e:
             import logging as _log
             _log.getLogger(__name__).warning(f"[Jina fallback] Error: {e}")
 
-    # ── score thresholds (sync get_response logic ይደግፋል) ──────────
+    return get_response(text=text, **kwargs)
+
+
+def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) -> dict:
+    """
+    detect_intent() ሳይጠራ — inject የተደረገ intent ተጠቅሞ response ይሰጣል።
+    get_response() logic ሙሉ ለሙሉ ይደግፋል።
+    """
+    import re
+
     THRESHOLD_RESPOND  = 0.25
     THRESHOLD_CONFUSED = 0.12
 
+    settings         = kwargs.get("settings", {})
+    taken            = kwargs.get("taken", {})
+    paid             = kwargs.get("paid", {})
+    nekay_list       = kwargs.get("nekay_list", [])
+    remaining_count  = kwargs.get("remaining_count", 0)
+    countdown_seconds = kwargs.get("countdown_seconds", 0)
+    user_name        = kwargs.get("user_name", "")
+    user_id          = kwargs.get("user_id", 0)
+    registration_result = kwargs.get("registration_result", None)
+    registered_numbers  = kwargs.get("registered_numbers", None)
+    failed_numbers      = kwargs.get("failed_numbers", None)
+    recent_winners      = kwargs.get("recent_winners", None)
+    user_unpaid_balance = kwargs.get("user_unpaid_balance", None)
+    user_numbers        = kwargs.get("user_numbers", None)
+    user_balance        = kwargs.get("user_balance", None)
+    failed_attempts     = kwargs.get("failed_attempts", None)
+    is_paid             = kwargs.get("is_paid", None)
+
+    result = {
+        "reply": None,
+        "resend_board": False,
+        "resend_nekay": False,
+        "resend_remaining": False,
+        "cancel_number": None,
+        "change_number": None,
+        "type_change": None,
+        "why_not_registered": None,
+        "my_numbers_query": False,
+        "number_owner_query": None,
+    }
+
     if score < THRESHOLD_CONFUSED:
-        return {
-            "reply": None, "resend_board": False, "resend_nekay": False,
-            "resend_remaining": False, "cancel_number": None,
-            "change_number": None, "type_change": None,
-            "why_not_registered": None, "my_numbers_query": False,
-            "number_owner_query": None,
-        }
+        return result
+    if score < THRESHOLD_RESPOND:
+        return result
 
-    # Jina score ከ THRESHOLD_RESPOND በታች ከሆነ sync get_response ይጠራ
-    # (ያ threshold logic ይይዛዋል)
+    # ── registration_result ──────────────────────────────────────
+    if registration_result is not None:
+        return get_response(text=text, **kwargs)
+
+    # ── balance_query ─────────────────────────────────────────────
+    if intent == "balance_query":
+        bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
+        if bal > 0:
+            result["reply"] = random.choice(RESPONSES["balance_show"]).format(balance=int(bal))
+        else:
+            result["reply"] = random.choice(RESPONSES["balance_zero"])
+        return result
+
+    # ── shortfall_query ───────────────────────────────────────────
+    if intent == "shortfall_query":
+        if not user_numbers:
+            result["reply"] = random.choice(RESPONSES["shortfall_no_numbers"])
+            return result
+        bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
+        sf = _calculate_shortfall(user_numbers, settings, bal)
+        if sf["all_paid"]:
+            result["reply"] = random.choice(RESPONSES["shortfall_all_paid"])
+        else:
+            result["reply"] = random.choice(RESPONSES["shortfall_show"]).format(
+                numbers_text=sf["unpaid_text"], shortfall=int(sf["shortfall"])
+            )
+        return result
+
+    # ── winner_query ──────────────────────────────────────────────
+    if intent == "winner_query":
+        if not recent_winners:
+            result["reply"] = random.choice(RESPONSES["winner_none"])
+            return result
+        w = recent_winners
+        def fmt_winner(w_item):
+            return f"{w_item['user_name']} ({w_item['number']:02d})" if w_item.get("number") else w_item.get("user_name", "—")
+        if len(w) == 1:
+            result["reply"] = random.choice(RESPONSES["winner_show_one"]).format(first=fmt_winner(w[0]))
+        elif len(w) == 2:
+            result["reply"] = random.choice(RESPONSES["winner_show_two"]).format(first=fmt_winner(w[0]), second=fmt_winner(w[1]))
+        else:
+            result["reply"] = random.choice(RESPONSES["winner_show"]).format(
+                first=fmt_winner(w[0]),
+                second=fmt_winner(w[1]) if len(w) > 1 else "—",
+                third=fmt_winner(w[2]) if len(w) > 2 else "—",
+            )
+        return result
+
+    # ── i_won_query ───────────────────────────────────────────────
+    if intent == "i_won_query":
+        if not recent_winners:
+            result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
+            return result
+        user_place = None
+        for w in recent_winners:
+            if w.get("telegram_id") == user_id:
+                user_place = w["place"]
+                break
+        if user_place:
+            place_label = {1: "1", 2: "2", 3: "3"}.get(user_place, str(user_place))
+            result["reply"] = random.choice(RESPONSES["i_won_yes"]).format(place=place_label)
+        else:
+            def fmt_w(w_item):
+                return f"{w_item['user_name']} ({w_item['number']:02d})" if w_item.get("number") else w_item.get("user_name", "—")
+            w = recent_winners
+            result["reply"] = random.choice(RESPONSES["i_won_no"]).format(
+                first=fmt_w(w[0]) if len(w) > 0 else "—",
+                second=fmt_w(w[1]) if len(w) > 1 else "—",
+                third=fmt_w(w[2]) if len(w) > 2 else "—",
+            )
+        return result
+
+    # ── my_numbers_query ──────────────────────────────────────────
+    if intent == "my_numbers_query":
+        if user_numbers is not None:
+            if not user_numbers:
+                result["reply"] = random.choice(RESPONSES["my_numbers_none"])
+            else:
+                numbers_text = _format_my_numbers(user_numbers)
+                if numbers_text:
+                    result["reply"] = random.choice(RESPONSES["my_numbers_show"]).format(numbers_text=numbers_text)
+                else:
+                    result["reply"] = random.choice(RESPONSES["my_numbers_none"])
+        else:
+            result["my_numbers_query"] = True
+        return result
+
+    # ── greeting ──────────────────────────────────────────────────
+    if intent == "greeting":
+        msg = random.choice(RESPONSES["greeting"])
+        if random.random() < 0.20:
+            msg += " " + random.choice(RESPONSES["greeting_help"])
+        result["reply"] = msg
+        return result
+
+    # ── price_query ───────────────────────────────────────────────
+    if intent == "price_query":
+        price_full = settings.get("price_full", 0)
+        price_half = settings.get("price_half")
+        if price_half:
+            result["reply"] = random.choice(RESPONSES["price_query_full_and_half"]).format(
+                price_full=price_full, price_half=price_half)
+        else:
+            result["reply"] = random.choice(RESPONSES["price_query_full_only"]).format(price_full=price_full)
+        return result
+
+    # ── prize_query ───────────────────────────────────────────────
+    if intent == "prize_query":
+        prize_1st = settings.get("prize_1st", 0)
+        result["reply"] = random.choice(RESPONSES["prize_query"]).format(prize_1st=prize_1st)
+        return result
+
+    # ── remaining_query ───────────────────────────────────────────
+    if intent == "remaining_query":
+        result["resend_remaining"] = True
+        return result
+
+    # ── remaining_send ────────────────────────────────────────────
+    if intent == "remaining_send":
+        result["reply"] = random.choice(RESPONSES["remaining_send_ack"])
+        result["resend_remaining"] = True
+        return result
+
+    # ── nekay_query ───────────────────────────────────────────────
+    if intent == "nekay_query":
+        if nekay_list:
+            result["reply"] = random.choice(RESPONSES["nekay_exists"])
+            result["resend_nekay"] = True
+        elif remaining_count > 0:
+            result["reply"] = random.choice(RESPONSES["nekay_none_remaining"])
+            result["resend_remaining"] = True
+        else:
+            result["reply"] = random.choice(RESPONSES["nekay_all_done"])
+        return result
+
+    # ── payment_not_received ──────────────────────────────────────
+    if intent == "payment_not_received":
+        result["reply"] = random.choice(RESPONSES["payment_not_received"])
+        return result
+
+    # ── result_query ──────────────────────────────────────────────
+    if intent == "result_query":
+        if recent_winners:
+            w = recent_winners
+            first  = f"{w[0]['number']:02d}" if len(w) > 0 and w[0].get("number") else "—"
+            second = f"{w[1]['number']:02d}" if len(w) > 1 and w[1].get("number") else "—"
+            third  = f"{w[2]['number']:02d}" if len(w) > 2 and w[2].get("number") else "—"
+            result["reply"] = random.choice(RESPONSES["result_query_show"]).format(
+                first=first, second=second, third=third)
+        else:
+            result["reply"] = random.choice(RESPONSES["result_query_none"])
+        return result
+
+    # ── speed_request ─────────────────────────────────────────────
+    if intent == "speed_request":
+        result["reply"] = random.choice(RESPONSES["speed_request"])
+        return result
+
+    # ── link_request ──────────────────────────────────────────────
+    if intent == "link_request":
+        result["reply"] = random.choice(RESPONSES["link_request"])
+        return result
+
+    # ── players_query ─────────────────────────────────────────────
+    if intent == "players_query":
+        total_numbers = settings.get("total_numbers", 0)
+        numbers_per_person = settings.get("numbers_per_person", 1)
+        players_count = total_numbers // numbers_per_person if numbers_per_person else total_numbers
+        result["reply"] = random.choice(RESPONSES["players_query"]).format(players_count=players_count)
+        return result
+
+    # ── players_remaining_query ───────────────────────────────────
+    if intent == "players_remaining_query":
+        numbers_per_person = settings.get("numbers_per_person", 1)
+        players_remaining = remaining_count // numbers_per_person if numbers_per_person else remaining_count
+        result["reply"] = random.choice(RESPONSES["players_remaining_query"]).format(players_remaining=players_remaining)
+        return result
+
+    # ── complaint intents ─────────────────────────────────────────
+    if intent == "complaint_removed":
+        result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
+        return result
+
+    if intent == "complaint_why_sold":
+        result["reply"] = random.choice(RESPONSES["complaint_why_sold"])
+        return result
+
+    if intent == "complaint_paid_removed":
+        result["reply"] = random.choice(RESPONSES["complaint_paid_removed"])
+        return result
+
+    # ── intents that need number context → sync get_response ──────
+    # (cancel_number, change_number, type_change, specific_number_query,
+    #  number_owner_query, claim_ownership, why_not_registered,
+    #  not_registered_complaint, account_query, booking)
     return get_response(text=text, **kwargs)
-
