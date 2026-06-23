@@ -927,7 +927,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     user_balance = get_user_balance(group_id, user_id)
     user_failed_attempts = get_failed_attempts(game_id, user_id)
 
-    resp = get_response(
+    resp = await get_response(
         text=text,
         settings=settings,
         taken=taken,
@@ -1453,7 +1453,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             for num, _is_half in registered
         )
 
-    resp = get_response(
+    resp = await get_response(
         text=msg.text or "",
         settings=settings,
         taken=taken,
@@ -2953,6 +2953,12 @@ async def start_server():
 def main():
     init_db()
 
+    from jina_brain import init_jina_brain
+    from config import JINA_API_KEYS
+    asyncio.get_event_loop().run_until_complete(
+        init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
+    )
+
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     setup_conv = ConversationHandler(
@@ -3104,7 +3110,3 @@ def main():
 
     print("🤖 Bot started!")
     app.run_polling()
-
-
-if __name__ == "__main__":
-    main()
