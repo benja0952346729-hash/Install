@@ -298,6 +298,31 @@ def init_db():
             cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_nekay BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS pending_upgrade BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS greeted BOOLEAN DEFAULT FALSE;")
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'winners_game_id_place_key'
+                    ) THEN
+                        ALTER TABLE winners DROP CONSTRAINT winners_game_id_place_key;
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'winners_game_id_place_telegram_id_key'
+                    ) THEN
+                        ALTER TABLE winners ADD CONSTRAINT winners_game_id_place_telegram_id_key
+                        UNIQUE (game_id, place, telegram_id);
+                    END IF;
+                END
+                $$;
+            """)
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS sent BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS group_id BIGINT;")
@@ -1419,9 +1444,8 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
     cur.execute("""
         INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize, group_id)
         VALUES (%s, %s, %s, %s, %s, %s, %s)
-        ON CONFLICT (game_id, place) DO UPDATE
-            SET telegram_id=EXCLUDED.telegram_id,
-                user_name=EXCLUDED.user_name,
+        ON CONFLICT (game_id, place, telegram_id) DO UPDATE
+            SET user_name=EXCLUDED.user_name,
                 number=EXCLUDED.number,
                 prize=EXCLUDED.prize,
                 group_id=EXCLUDED.group_id
