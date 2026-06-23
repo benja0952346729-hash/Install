@@ -3,21 +3,21 @@ jina_brain.py
 =============
 Jina embedding fallback brain ለ responder.py intent detection።
 TF-IDF score ዝቅ ሲሆን (< 0.40) ብቻ ይጠራል።
-Multi-key rotation ይደግፋል — config.py ውስጥ ካለው JINA_API_KEYS ይጠቀማል።
+Multi-key rotation ይደግፋል።
+DB caching + hash-based auto re-embed ይደግፋል።
 
 Setup:
     pip install httpx
-
-.env ውስጥ ጨምር:
-    JINA_API_KEY_1=jina_xxxxxxxxxxxx
-    JINA_API_KEY_2=jina_xxxxxxxxxxxx   ← optional
-    ...እስከ 10
 """
 
 import math
+import hashlib
+import json
 import logging
 
 import httpx
+
+from database import get_conn
 
 logger = logging.getLogger(__name__)
 
@@ -25,25 +25,25 @@ logger = logging.getLogger(__name__)
 # CONFIG
 # ================================================================
 
-JINA_MODEL = "jina-embeddings-v3"
-JINA_URL   = "https://api.jina.ai/v1/embeddings"
-JINA_TASK  = "text-matching"
+JINA_MODEL      = "jina-embeddings-v3"
+JINA_URL        = "https://api.jina.ai/v1/embeddings"
+JINA_TASK       = "text-matching"
+JINA_BATCH_SIZE = 500
 
 # TF-IDF score ከዚህ በታች ሲሆን ብቻ Jina ይጠራል
 JINA_FALLBACK_THRESHOLD = 0.40
 
-# Jina minimum similarity score — ከዚህ በታች ከሆነ "unknown" ይመልሳል
+# Jina minimum similarity score
 JINA_MIN_SCORE = 0.45
 
 # ================================================================
-# KEY ROTATION — payment.py ያለውን style ይጠቀማል
+# KEY ROTATION
 # ================================================================
 
 _jina_keys: list[str] = []
 _jina_index = 0
 
 def _next_key() -> str:
-    """Round-robin ሆኖ ቀጣዩን key ይመልሳል — payment.py style።"""
     global _jina_index
     if not _jina_keys:
         raise RuntimeError("Jina brain not initialized — await init_jina_brain() first")
@@ -71,13 +71,142 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 # ================================================================
-# JINA API CALL — ASYNC (httpx)
+# HASH — INTENT_EXAMPLES ተቀይሯል?
+# ================================================================
+
+def _compute_hash(intent_examples: dict) -> str:
+    """INTENT_EXAMPLES content hash ይሰራል።"""
+    content = json.dumps(intent_examples, ensure_ascii=False, sort_keys=True)
+    return hashlib.md5(content.encode("utf-8")).hexdigest()
+
+# ================================================================
+# DB — CREATE TABLE
+# ================================================================
+
+def _ensure_table():
+    """jina_embeddings table ካልሆነ ይፈጥራል።"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS jina_embeddings (
+            id SERIAL PRIMARY KEY,
+            intent TEXT NOT NULL,
+            example_index INTEGER NOT NULL,
+            embedding JSONB NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(intent, example_index)
+        )
+    """)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS jina_meta (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    conn.commit()
+    cur.close()
+    conn.close()
+
+# ================================================================
+# DB — LOAD / SAVE / CLEAR
+# ================================================================
+
+def _load_hash_from_db() -> str | None:
+    """DB ላይ የተቀመጠውን hash ያወጣል።"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT value FROM jina_meta WHERE key='intent_hash'")
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return row[0] if row else None
+    except Exception as e:
+        logger.warning(f"[JinaBrain] Hash load error: {e}")
+        return None
+
+def _save_hash_to_db(hash_str: str):
+    """Hash ን DB ላይ ይቀምጣል።"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            INSERT INTO jina_meta (key, value, updated_at)
+            VALUES ('intent_hash', %s, NOW())
+            ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()
+        """, (hash_str, hash_str))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"[JinaBrain] Hash save error: {e}")
+
+def _load_embeddings_from_db(intent_examples: dict) -> dict[str, list[list[float]]] | None:
+    """DB ከ embeddings ያወጣል።"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT intent, example_index, embedding
+            FROM jina_embeddings
+            ORDER BY intent, example_index
+        """)
+        rows = cur.fetchall()
+        cur.close()
+        conn.close()
+
+        if not rows:
+            return None
+
+        result = {}
+        for intent, idx, emb in rows:
+            if intent not in result:
+                result[intent] = []
+            result[intent].append(emb)
+
+        # ሁሉም intents አሉ?
+        for intent in intent_examples:
+            if intent not in result:
+                return None
+
+        return result
+    except Exception as e:
+        logger.warning(f"[JinaBrain] Load from DB error: {e}")
+        return None
+
+def _save_embeddings_to_db(intent_embeddings: dict[str, list[list[float]]]):
+    """Embeddings ን DB ላይ ይቀምጣል።"""
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+
+        # አስቀድሞ ያሉትን ያጸዳል
+        cur.execute("DELETE FROM jina_embeddings")
+
+        for intent, embeddings in intent_embeddings.items():
+            for idx, emb in enumerate(embeddings):
+                cur.execute("""
+                    INSERT INTO jina_embeddings (intent, example_index, embedding)
+                    VALUES (%s, %s, %s)
+                    ON CONFLICT (intent, example_index) DO UPDATE SET embedding=%s
+                """, (intent, idx, json.dumps(emb), json.dumps(emb)))
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        logger.info("✅ Embeddings saved to DB")
+    except Exception as e:
+        logger.warning(f"[JinaBrain] Save to DB error: {e}")
+
+# ================================================================
+# JINA API CALL — ASYNC BATCH
 # ================================================================
 
 async def _get_embeddings_async(texts: list[str]) -> list[list[float]]:
     """
     Jina API ን ጠርቶ embeddings ያመጣል።
-    Key rotation ተጠቅሞ ይጠራል — rate limit ሲደርስ ቀጣዩ key ይጠቀማል።
+    Key rotation ተጠቅሞ ይጠራል።
     """
     api_key = _next_key()
 
@@ -91,10 +220,9 @@ async def _get_embeddings_async(texts: list[str]) -> list[list[float]]:
         "task": JINA_TASK,
     }
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=60) as client:
         resp = await client.post(JINA_URL, json=payload, headers=headers)
 
-        # Rate limit ሲደርስ ቀጣዩ key ሞክር
         if resp.status_code == 429:
             logger.warning("⚠️  Jina rate limit — rotating key...")
             api_key = _next_key()
@@ -108,19 +236,13 @@ async def _get_embeddings_async(texts: list[str]) -> list[list[float]]:
     return [item["embedding"] for item in items]
 
 # ================================================================
-# INITIALIZE — bot start ላይ አንድ ጊዜ ብቻ ይጠራል
+# INITIALIZE
 # ================================================================
 
 async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
     """
-    INTENT_EXAMPLES ን ተጠቅሞ embeddings ይሠራል።
     Bot start ላይ አንድ ጊዜ ብቻ ይጠራ።
-
-    Usage (bot.py ወይም main.py ውስጥ):
-        from jina_brain import init_jina_brain
-        from responder import INTENT_EXAMPLES
-        from config import JINA_API_KEYS
-        await init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
+    Hash ተቀይሯል? → re-embed። አልተቀየረም? → DB load።
     """
     global _intent_embeddings, _is_ready, _jina_keys, _jina_index
 
@@ -131,19 +253,74 @@ async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
     _jina_keys = api_keys
     _jina_index = 0
     logger.info(f"🔑 Jina keys loaded: {len(api_keys)} key(s)")
-    logger.info("🧠 Jina brain initializing...")
+
+    # Table ይፈጥራል
+    try:
+        _ensure_table()
+    except Exception as e:
+        logger.warning(f"⚠️  DB table error: {e}")
+
+    # Hash ያወዳድራል
+    current_hash = _compute_hash(intent_examples)
+    db_hash = _load_hash_from_db()
+
+    if db_hash == current_hash:
+        # DB ካ load ያደርጋል
+        logger.info("✅ Intent examples unchanged — loading from DB...")
+        cached = _load_embeddings_from_db(intent_examples)
+        if cached:
+            _intent_embeddings = cached
+            _is_ready = True
+            total = sum(len(v) for v in _intent_embeddings.values())
+            import sys
+            emb_size = total * 1024 * 4
+            logger.info(f"💾 Embedding RAM: ~{emb_size / 1024:.1f} KB ({total} embeddings)")
+            logger.info(f"🎉 Jina brain ready (from DB) — {len(_intent_embeddings)} intents, {total} embeddings")
+            return True
+        else:
+            logger.info("⚠️  DB cache incomplete — re-embedding...")
+
+    # Re-embed
+    logger.info(f"🧠 Jina brain initializing... embedding {sum(len(v) for v in intent_examples.values())} texts")
 
     try:
+        # ሁሉም texts + intent map
+        all_texts = []
+        intent_map = []
         for intent, examples in intent_examples.items():
-            if not examples:
-                continue
+            for ex in examples:
+                all_texts.append(ex)
+                intent_map.append(intent)
 
-            embeddings = await _get_embeddings_async(examples)
-            _intent_embeddings[intent] = embeddings
-            logger.info(f"  ✅ {intent}: {len(embeddings)} examples embedded")
+        total_texts = len(all_texts)
+        all_embeddings = []
+        processed = 0
 
+        # Batch processing
+        for i in range(0, total_texts, JINA_BATCH_SIZE):
+            batch = all_texts[i:i + JINA_BATCH_SIZE]
+            batch_embeddings = await _get_embeddings_async(batch)
+            all_embeddings.extend(batch_embeddings)
+            processed += len(batch)
+            logger.info(f"  📦 {processed}/{total_texts} embedded...")
+
+        # Intent map ላይ ያስቀምጣል
+        new_embeddings: dict[str, list[list[float]]] = {}
+        for idx, (intent, emb) in enumerate(zip(intent_map, all_embeddings)):
+            if intent not in new_embeddings:
+                new_embeddings[intent] = []
+            new_embeddings[intent].append(emb)
+
+        _intent_embeddings = new_embeddings
         _is_ready = True
+
+        # DB ላይ ይቀምጣል
+        _save_embeddings_to_db(_intent_embeddings)
+        _save_hash_to_db(current_hash)
+
         total = sum(len(v) for v in _intent_embeddings.values())
+        emb_size = total * 1024 * 4
+        logger.info(f"💾 Embedding RAM: ~{emb_size / 1024:.1f} KB ({total} embeddings)")
         logger.info(f"🎉 Jina brain ready — {len(_intent_embeddings)} intents, {total} embeddings")
         return True
 
@@ -160,11 +337,6 @@ async def jina_detect_intent(text: str) -> tuple[str, float]:
     """
     Jina embedding ተጠቅሞ intent ይመርጣል።
     Returns: (intent, score)
-
-    ከ responder.py detect_intent() ጋር እንዴት ያጣምሩታል:
-        intent, score = detect_intent(text)
-        if score < 0.40 and jina_is_ready():
-            intent, score = await jina_detect_intent(text)
     """
     if not _is_ready or not _intent_embeddings:
         return "unknown", 0.0
