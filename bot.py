@@ -2952,20 +2952,8 @@ async def start_server():
 # ============================================================
 
 def main():
-    print("🚀 Step 1: Starting...", flush=True)
     init_db()
-    print("✅ Step 2: DB OK", flush=True)
 
-    from jina_brain import init_jina_brain
-    from config import JINA_API_KEYS
-    print(f"✅ Step 3: Jina keys = {len(JINA_API_KEYS)}", flush=True)
-    try:
-        asyncio.get_event_loop().run_until_complete(
-            init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
-        )
-    except Exception as e:
-        print(f"⚠️ Jina failed: {e}", flush=True)
-    print("✅ Step 4: Building app...", flush=True)
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     setup_conv = ConversationHandler(
@@ -3072,6 +3060,17 @@ def main():
     global _bot_instance
     _bot_instance = app.bot
 
+    # Jina background ላይ ይጀምራል — bot አያቆምም
+    async def _init_jina_background():
+        from jina_brain import init_jina_brain
+        from config import JINA_API_KEYS
+        try:
+            await init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
+        except Exception as e:
+            logging.warning(f"⚠️ Jina failed: {e}")
+
+    loop.create_task(_init_jina_background())
+
     async def _daily_report_scheduler():
         import pytz
         et_tz = pytz.timezone("Africa/Addis_Ababa")
@@ -3115,5 +3114,5 @@ def main():
 
     loop.create_task(_daily_report_scheduler())
 
-    print("🤖 Bot started!")
+    print("🤖 Bot started!", flush=True)
     app.run_polling()
