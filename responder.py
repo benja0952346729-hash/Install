@@ -1115,7 +1115,6 @@ def _calculate_shortfall(user_numbers: list, settings: dict, user_balance: float
 # ================================================================
 # MAIN RESPONDER
 # ================================================================
-
 def get_response(
     text: str,
     settings: dict,
@@ -1132,7 +1131,6 @@ def get_response(
     recent_winners: list = None,
     user_unpaid_balance: float = None,
     user_numbers: list = None,
-    # ── NEW params ──
     user_balance: float = None,
     failed_attempts: list = None,
     is_paid: bool = None,
@@ -1152,6 +1150,7 @@ def get_response(
         "why_not_registered": None,
         "my_numbers_query": False,
         "number_owner_query": None,
+        "should_parse": False,
     }
 
     if registration_result is not None:
@@ -1236,7 +1235,6 @@ def get_response(
         if not recent_winners:
             result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
             return result
-        # user recent_winners ውስጥ ካለ
         user_place = None
         for w in recent_winners:
             if w.get("telegram_id") == user_id:
@@ -1261,7 +1259,6 @@ def get_response(
         numbers_found = re.findall(r"\d+", text)
         if numbers_found and failed_attempts:
             num = int(numbers_found[0])
-            # ያ ቁጥር failed_attempts ውስጥ ካለ
             attempt = next((a for a in failed_attempts if a["number"] == num), None)
             if attempt and attempt["reason"] == "taken" and attempt.get("slot1_name"):
                 name = attempt["slot1_name"]
@@ -1269,7 +1266,6 @@ def get_response(
                     num=f"{num:02d}",
                     name=name,
                 )
-            # failed_attempts ከሌለ → ignore
         return result
 
     # ── account_query ─────────────────────────────────────────────
@@ -1375,14 +1371,13 @@ def get_response(
                 )
         return result
 
-    # ── claim_ownership ──────────────────────────────────────────
+    # ── claim_ownership ───────────────────────────────────────────
     if intent == "claim_ownership":
         numbers_found = re.findall(r"\d+", text)
         if numbers_found:
             num = int(numbers_found[0])
             entry = taken.get(num, [])
             if not entry:
-                # ባዶ ቦታ — ሌላ intent ሊሆን ይችላል፣ ምንም አትመልስ
                 return result
             slot1 = next((e for e in entry if e[2] == 1), entry[0])
             is_half_owner = slot1[1]
@@ -1440,6 +1435,7 @@ def get_response(
                 result["reply"] = f"ቲንሽ ይጠብቁ {mins} ደቂቃ ቀርቱዋል ያልከፈለ ሊወጣ 🙏"
             else:
                 result["reply"] = f"{secs} ሴኮንድ ቀርቱዋል ቲንሽ ይጠብቁ ነቃይ ካለ አሳውቃለው 🙏"
+        result["should_parse"] = True
         return result
 
     # ── specific_number_query ─────────────────────────────────────
@@ -1598,7 +1594,8 @@ def get_response(
         return result
 
     return result
-
+            
+            
 
 # ================================================================
 # ASYNC WRAPPER — Jina fallback when TF-IDF score is low
