@@ -55,7 +55,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 )
-from responder import get_response, RESPONSES, INTENT_EXAMPLES
+
 import random
 
 (
@@ -2951,16 +2951,20 @@ async def start_server():
 # ============================================================
 
 def main():
+    print("🚀 Step 1: Starting...", flush=True)
     init_db()
+    print("✅ Step 2: DB OK", flush=True)
 
     from jina_brain import init_jina_brain
     from config import JINA_API_KEYS
+    print(f"✅ Step 3: Jina keys = {len(JINA_API_KEYS)}", flush=True)
     try:
         asyncio.get_event_loop().run_until_complete(
             init_jina_brain(INTENT_EXAMPLES, JINA_API_KEYS)
         )
     except Exception as e:
-        logging.warning(f"⚠️ Jina init failed: {e} — bot continues without Jina")
+        print(f"⚠️ Jina failed: {e}", flush=True)
+    print("✅ Step 4: Building app...", flush=True)
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     setup_conv = ConversationHandler(
