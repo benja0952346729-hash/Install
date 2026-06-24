@@ -82,6 +82,21 @@ def init_userbot_db():
         )
     """)
 
+    # ✅ FIX — አሮጌ userbot_accounts table ላይ label እና flood_until columns ካልሆኑ ይጨምራቸዋል
+    cur.execute("""
+        ALTER TABLE userbot_accounts
+        ADD COLUMN IF NOT EXISTS label CHAR(1) UNIQUE
+    """)
+    cur.execute("""
+        ALTER TABLE userbot_accounts
+        ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
+    """)
+    # ✅ FIX — አሮጌ userbot_groups table username column ካለ group_id ይጨምራል
+    cur.execute("""
+        ALTER TABLE userbot_groups
+        ADD COLUMN IF NOT EXISTS group_id BIGINT UNIQUE
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -232,7 +247,7 @@ def db_add_group(group_id: int):
 def db_list_groups():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, group_id FROM userbot_groups ORDER BY id")
+    cur.execute("SELECT id, group_id FROM userbot_groups WHERE group_id IS NOT NULL ORDER BY id")
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -367,7 +382,6 @@ async def _get_client(account: dict) -> TelegramClient:
 # ============================================================
 
 async def _send_to_group(account: dict, group_id: int, message=None, media=None):
-    """Group ውስጥ message ወይም media ይልካል"""
     client = await _get_client(account)
     try:
         if media:
@@ -379,12 +393,10 @@ async def _send_to_group(account: dict, group_id: int, message=None, media=None)
 
 
 async def _contact_and_add(account: dict, user_id: int, target_group_id: int):
-    """User contact ያደርጋል እና target group ይጨምረዋል"""
     client = await _get_client(account)
     try:
         user = await client.get_entity(user_id)
 
-        # Contact
         if not db_is_user_contacted(user_id, account["label"]):
             try:
                 await client(AddContactRequest(
@@ -402,7 +414,6 @@ async def _contact_and_add(account: dict, user_id: int, target_group_id: int):
             except Exception as e:
                 logger.warning(f"[Contact] {user_id}: {e}")
 
-        # Add to group
         if not db_is_user_added(user_id, target_group_id):
             try:
                 group = await client.get_entity(target_group_id)
@@ -413,20 +424,18 @@ async def _contact_and_add(account: dict, user_id: int, target_group_id: int):
                 logger.warning(f"[Add] Flood {account['label']}: {e.seconds}s")
             except Exception as e:
                 logger.warning(f"[Add] {user_id}: {e}")
-
     finally:
         await client.disconnect()
 
 
 # ============================================================
-# TELETHON EVENT LISTENERS (auto add)
+# TELETHON EVENT LISTENERS
 # ============================================================
 
 _telethon_clients = []
 
 
 async def start_listeners():
-    """ሁሉም accounts ላይ event listener ያስጀምራል"""
     global _telethon_clients
     accounts = db_get_all_accounts()
 
@@ -456,22 +465,17 @@ async def start_listeners():
                         return
 
                     user_id = sender.id
-
-                    # Recent message ለ broadcast ይቀምጣል
                     db_record_message(user_id, chat_id)
 
-                    # Target group
                     target_str = db_get_setting("target_group_id")
                     if not target_str:
                         return
 
                     target_group_id = int(target_str)
 
-                    # Already added?
                     if db_is_user_added(user_id, target_group_id):
                         return
 
-                    # Round robin account
                     chosen = get_next_account()
                     if not chosen:
                         return
@@ -648,7 +652,6 @@ async def cmd_deleteaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_setactivegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/setactivegroup -100xxxxxxx"""
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split(maxsplit=1)
@@ -660,11 +663,10 @@ async def cmd_setactivegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         db_set_setting("active_group_id", str(group_id))
         await update.message.reply_text(f"✅ Active group set: {group_id}")
     except ValueError:
-        await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት! ምሳሌ: -1001234567890")
+        await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
 
 
 async def cmd_settargetgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/settargetgroup -100xxxxxxx"""
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split(maxsplit=1)
@@ -680,7 +682,6 @@ async def cmd_settargetgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/addgroup -100xxxxxxx"""
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split(maxsplit=1)
@@ -732,7 +733,6 @@ async def cmd_deletegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _handle_usend(update: Update, label: str):
-    """/a, /b, /c, /d handler"""
     if not _is_admin(update.effective_user.id):
         return
 
@@ -755,10 +755,8 @@ async def _handle_usend(update: Update, label: str):
     try:
         client = await _get_client(account)
         try:
-            # Media support
             if msg.photo:
-                photo = msg.photo[-1]
-                file = await msg.bot.get_file(photo.file_id)
+                file = await msg.bot.get_file(msg.photo[-1].file_id)
                 bio = await file.download_as_bytearray()
                 import io
                 await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=msg.caption or "")
@@ -778,7 +776,6 @@ async def _handle_usend(update: Update, label: str):
                 import io
                 await client.send_file(group_id, io.BytesIO(bytes(bio)))
             elif msg.text:
-                # /a ሰላም → "ሰላም" ብቻ
                 text_parts = msg.text.split(maxsplit=1)
                 text = text_parts[1] if len(text_parts) > 1 else ""
                 if not text:
@@ -812,15 +809,15 @@ async def cmd_e(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await _handle_usend(update, "e")
 
 
-# ============================================================
-# ADMIN DM → BROADCAST (last 2 hours active users)
-# ============================================================
-
 async def handle_admin_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """Admin bot ላይ DM ሲልክ → ባለፉት 2 ሰዓት active users ሁሉ ይላካል"""
     if not _is_admin(update.effective_user.id):
         return
     if update.effective_chat.type != "private":
+        return
+
+    # ✅ FIX — command ከሆነ userbot/bot handlers ይይዙታል
+    if update.message and update.message.text and update.message.text.startswith("/"):
         return
 
     recent_users = db_get_recent_users(hours=2)
@@ -835,8 +832,6 @@ async def handle_admin_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     msg = update.message
     success = failed = 0
-
-    # Delay በ total users ተከፋፍሎ 2 ሰዓት ውስጥ ይጨርሳል
     delay = (2 * 3600) / max(total, 1)
 
     for i, user_id in enumerate(recent_users):
@@ -890,10 +885,6 @@ async def handle_admin_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
-# ============================================================
-# STATUS / HELP
-# ============================================================
-
 async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -918,7 +909,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         tags = []
         if str(group_id) == active_group:
             tags.append("🟢")
-        if str(group_id) == str(db_get_setting("target_group_id")):
+        if str(group_id) == target_group:
             tags.append("🎯")
         grp_lines.append(f"  🔹{group_id} {''.join(tags)}")
 
@@ -932,7 +923,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "\n\n🏠 Groups:\n" +
         ("\n".join(grp_lines) if grp_lines else "  📭 የለም") +
         "\n\n━━━━━━━━━━━━━━━━\n"
-        "⚙️ Setup Commands:\n"
+        "⚙️ Setup:\n"
         "/addaccount a api_id api_hash +phone\n"
         "/startsession +phone\n"
         "/verifycode +phone code\n"
@@ -947,11 +938,9 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/settargetgroup -100xxxxxxx\n"
         "  → Auto add ለሚሄድበት group\n\n"
         "━━━━━━━━━━━━━━━━\n"
-        "⚡ Send Commands:\n"
+        "⚡ Send:\n"
         "/a መልዕክት (ወይም photo/video/sticker)\n"
-        "/b መልዕክት\n"
-        "/c መልዕክት\n"
-        "/d መልዕክት\n\n"
+        "/b /c /d /e መልዕክት\n\n"
         "📢 Broadcast:\n"
         "Bot ላይ DM ይላኩ → ባለፉት 2 ሰዓት\n"
         "active users ሁሉ ይደርሳቸዋል\n"
@@ -959,37 +948,35 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text)
 
 
+async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await cmd_ubothelp(update, ctx)
+
+
 # ============================================================
 # REGISTER ALL HANDLERS
 # ============================================================
 
 def register_userbot_handlers(app):
-    # Account management
     app.add_handler(CommandHandler("addaccount", cmd_addaccount))
     app.add_handler(CommandHandler("startsession", cmd_startsession))
     app.add_handler(CommandHandler("verifycode", cmd_verifycode))
     app.add_handler(CommandHandler("verify2fa", cmd_verify2fa))
     app.add_handler(CommandHandler("listaccounts", cmd_listaccounts))
     app.add_handler(CommandHandler("deleteaccount", cmd_deleteaccount))
-
-    # Group management
     app.add_handler(CommandHandler("addgroup", cmd_addgroup))
     app.add_handler(CommandHandler("listgroups", cmd_listgroups))
     app.add_handler(CommandHandler("deletegroup", cmd_deletegroup))
     app.add_handler(CommandHandler("setactivegroup", cmd_setactivegroup))
     app.add_handler(CommandHandler("settargetgroup", cmd_settargetgroup))
-
-    # Send shortcuts
     app.add_handler(CommandHandler("a", cmd_a))
     app.add_handler(CommandHandler("b", cmd_b))
     app.add_handler(CommandHandler("c", cmd_c))
     app.add_handler(CommandHandler("d", cmd_d))
     app.add_handler(CommandHandler("e", cmd_e))
-
-    # Help
     app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
+    app.add_handler(CommandHandler("status2", cmd_status2))
 
-    # Admin DM broadcast
+    # ✅ FIX — command check አለው ስለዚህ /listaccounts ወዘተ አይጠልፈውም
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.User(ADMIN_IDS),
         handle_admin_dm
