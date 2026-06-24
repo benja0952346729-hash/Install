@@ -649,6 +649,38 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# STATUS2 — ሁሉንም userbot commands ያሳያል
+# ============================================================
+
+async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    text = (
+        "🤖 Userbot Commands:\n\n"
+        "👤 *Accounts*\n"
+        "/addaccount api\\_id api\\_hash \\+phone — account ይጨምራል\n"
+        "/startsession \\+phone — session ይጀምራል \\(code ይልካል\\)\n"
+        "/verifycode \\+phone code — code ያረጋግጣል\n"
+        "/verify2fa \\+phone password — 2FA password ያረጋግጣል\n"
+        "/listaccounts — accounts ዝርዝር\n"
+        "/deleteaccount \\+phone — account ይሰርዛል\n\n"
+        "🏠 *Groups*\n"
+        "/addgroup @username — group ይጨምራል\n"
+        "/listgroups — groups ዝርዝር\n"
+        "/deletegroup @username — group ይሰርዛል\n\n"
+        "⚡ *Actions*\n"
+        "/addcontacts \\+phone @group — group members contact ያደርጋቸዋል\n"
+        "/inviteall \\+phone @group — contacts group ይጨምራቸዋል\n"
+        "/ubroadcast \\+phone @group መልዕክት — members ሁሉ DM ይልካቸዋል\n"
+        "/usend \\+phone @group መልዕክት — group ውስጥ message ይልካል\n\n"
+        "ℹ️ *Help*\n"
+        "/ubothelp — userbot help\n"
+        "/status2 — ይህ ዝርዝር\n"
+    )
+    await update.message.reply_text(text, parse_mode="MarkdownV2")
+
+
+# ============================================================
 # REGISTER ALL HANDLERS — main.py ውስጥ አንድ ጊዜ ይጠራል
 # ============================================================
 
@@ -667,4 +699,5 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("ubroadcast", cmd_ubroadcast))
     app.add_handler(CommandHandler("usend", cmd_usend))
     app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
+    app.add_handler(CommandHandler("status2", cmd_status2))
     logger.info("✅ Userbot handlers registered")
