@@ -836,6 +836,51 @@ async def handle_complete_sticker_upload(update: Update, ctx: ContextTypes.DEFAU
 # GROUP MESSAGE HANDLER
 # ============================================================
 
+async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    msg = update.message
+    if not msg or not msg.text:
+        return
+
+    user = msg.from_user
+    user_id = user.id
+    user_name = user.first_name or "Unknown"
+    text = msg.text.strip()
+    group_id = update.effective_chat.id
+
+    if not is_group_enabled(group_id):
+        return
+
+    if not is_group_active(group_id):
+        return
+
+    if is_admin(user_id, group_id):
+        return
+
+    if user.username:
+        try:
+            track_username(group_id, user.username)
+        except Exception:
+            pass
+
+    try:
+        log_activity(group_id, messages=1)
+    except Exception:
+        pass
+
+    stop_typing = asyncio.Event()
+    typing_task = asyncio.create_task(keep_typing(ctx.bot, group_id, stop_typing))
+
+    try:
+        await _handle_group_message_inner(update, ctx, msg, user_id, user_name, text, group_id)
+    finally:
+        stop_typing.set()
+        typing_task.cancel()
+        try:
+            await typing_task
+        except asyncio.CancelledError:
+            pass
+
+
 async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text, group_id):
     if user_id in pending_ambiguous:
         await handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id)
@@ -878,6 +923,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     user_numbers = get_user_numbers(game_id, user_id)
     recent_winners = get_recent_winners(group_id, hours=24)
 
+    # ── NEW: balance + failed attempts context ──
     user_balance = get_user_balance(group_id, user_id)
     user_failed_attempts = get_failed_attempts(game_id, user_id)
 
@@ -897,159 +943,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         failed_attempts=user_failed_attempts,
     )
 
-    # ── NEW: non-booking intent ከሆነ parse_numbers አይጠራ ──────────
-    from responder import detect_intent
-    _intent, _score = detect_intent(text)
-
-    NON_BOOKING_INTENTS = {
-        "specific_number_query", "number_owner_query",
-        "nekay_query", "remaining_query", "price_query",
-        "prize_query", "players_query", "result_query",
-        "players_remaining_query", "why_not_registered",
-        "complaint_removed", "complaint_why_sold",
-        "complaint_paid_removed", "greeting",
-        "balance_query", "shortfall_query",
-        "winner_query", "i_won_query", "account_query",
-        "link_request", "speed_request", "my_numbers_query",
-        "claim_ownership", "payment_not_received",
-        "not_registered_complaint", "cancel_number",
-        "all_taken_query", "remaining_send",
-    }
-
-    if _intent in NON_BOOKING_INTENTS and _score > 0.25:
-        if resp.get("my_numbers_query"):
-            from responder import _format_my_numbers, RESPONSES as RESP
-            if not user_numbers:
-                await msg.reply_text(random.choice(RESP["my_numbers_none"]))
-            else:
-                numbers_text = _format_my_numbers(user_numbers)
-                if numbers_text:
-                    await msg.reply_text(
-                        random.choice(RESP["my_numbers_show"]).format(numbers_text=numbers_text)
-                    )
-                else:
-                    await msg.reply_text(random.choice(RESP["my_numbers_none"]))
-            return
-
-        if resp.get("number_owner_query") is not None:
-            return
-
-        if resp.get("cancel_number"):
-            num = resp["cancel_number"]
-            if not user_owns_number(game_id, user_id, num):
-                await msg.reply_text("ቁጥሩ የእርስዎ አይደለም 🙏")
-                return
-            removed = remove_number(game_id, user_id, num)
-            if removed:
-                if resp["reply"]:
-                    await msg.reply_text(resp["reply"])
-                try:
-                    price_full_r = float(settings.get("price_full") or 0)
-                    log_transaction(
-                        group_id=group_id, game_id=game_id,
-                        telegram_id=user_id, amount=price_full_r,
-                        reason="number_removed_refund", number=num,
-                        done_by="user",
-                    )
-                except Exception as _log_err:
-                    logging.warning(f"[log_transaction] Error: {_log_err}")
-                if game_id in nekay_active:
-                    fresh_nekay = get_nekay_numbers(game_id)
-                    rebuilt_snap = {}
-                    for n, slots in fresh_nekay:
-                        rebuilt_snap[n] = 2 if slots == {2} else 0
-                    nekay_numbers[game_id] = rebuilt_snap
-                fresh = get_active_settings(group_id=group_id)
-                if fresh:
-                    await _refresh_board(ctx, fresh, group_id)
-                    if game_id in nekay_active:
-                        snap2 = nekay_numbers.get(game_id, {})
-                        rem_msg_id = fresh.get("remaining_message_id")
-                        if rem_msg_id:
-                            try:
-                                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                            except Exception:
-                                pass
-                        if snap2:
-                            nekay_list2 = _build_nekay_from_snap(snap2)
-                            nekay_text2 = build_nekay(nekay_list2)
-                            new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text2)
-                            update_remaining_message_id(game_id, new_nekay.message_id)
-                        else:
-                            update_remaining_message_id(game_id, None)
-                            nekay_active.discard(game_id)
-                            nekay_numbers.pop(game_id, None)
-                    fresh2 = get_active_settings(group_id=group_id)
-                    if fresh2:
-                        await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
-            return
-
-        if resp.get("why_not_registered") is not None:
-            target_num = resp["why_not_registered"]["number"]
-            attempts = get_failed_attempts(game_id, user_id, target_num)
-            if not attempts:
-                await msg.reply_text(random.choice(RESPONSES["why_not_registered_none"]))
-                return
-            lines = []
-            for a in attempts:
-                num = f"{a['number']:02d}"
-                t = a["attempted_at"].strftime("%I:%M %p")
-                if a["reason"] == "taken":
-                    if a["slot2_name"]:
-                        line = random.choice(RESPONSES["why_not_registered_taken_both"]).format(
-                            num=num, name1=a["slot1_name"], type1=a["slot1_type"],
-                            name2=a["slot2_name"], time=t
-                        )
-                    else:
-                        line = random.choice(RESPONSES["why_not_registered_taken"]).format(
-                            num=num, name=a["slot1_name"], type=a["slot1_type"], time=t
-                        )
-                elif a["reason"] == "range":
-                    line = random.choice(RESPONSES["why_not_registered_range"]).format(num=num)
-                else:
-                    line = f"{num} — ምክንያት ታወቀ 🙏"
-                lines.append(line)
-            await msg.reply_text("\n".join(lines))
-            return
-
-        import re as _re
-        if _re.findall(r'\b\d{9,}\b', text):
-            if resp["reply"]:
-                await msg.reply_text(resp["reply"])
-            return
-
-        if resp["reply"]:
-            await msg.reply_text(resp["reply"])
-
-        if resp.get("resend_remaining"):
-            if game_id in nekay_active:
-                rem_msg_id = settings.get("remaining_message_id")
-                if rem_msg_id:
-                    try:
-                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                    except Exception:
-                        pass
-                if snap:
-                    nekay_text_r = build_nekay(nekay_list)
-                    new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text_r)
-                    update_remaining_message_id(game_id, new_nekay.message_id)
-            else:
-                await _send_remaining(ctx, settings, group_id)
-
-        if resp.get("resend_nekay"):
-            if snap:
-                nekay_text = build_nekay(nekay_list)
-                rem_msg_id = settings.get("remaining_message_id")
-                if rem_msg_id:
-                    try:
-                        await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
-                    except Exception:
-                        pass
-                new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
-                update_remaining_message_id(game_id, new_nekay.message_id)
-        return
-
-    # ── change_number / type_change ── (ከዚህ በታች አልተነካም)
     if resp.get("my_numbers_query"):
         from responder import _format_my_numbers, RESPONSES as RESP
         if not user_numbers:
@@ -1112,6 +1005,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         update_remaining_message_id(game_id, None)
                         nekay_active.discard(game_id)
                         nekay_numbers.pop(game_id, None)
+                # all paid check
                 fresh2 = get_active_settings(group_id=group_id)
                 if fresh2:
                     await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
@@ -1264,6 +1158,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
                         countdown_done.add(game_id)
 
+            # all paid check
             fresh2 = get_active_settings(group_id=group_id)
             if fresh2:
                 await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
@@ -1307,9 +1202,11 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     if resp.get("why_not_registered") is not None:
         target_num = resp["why_not_registered"]["number"]
         attempts = get_failed_attempts(game_id, user_id, target_num)
+
         if not attempts:
             await msg.reply_text(random.choice(RESPONSES["why_not_registered_none"]))
             return
+
         lines = []
         for a in attempts:
             num = f"{a['number']:02d}"
@@ -1329,9 +1226,12 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             else:
                 line = f"{num} — ምክንያት ታወቀ 🙏"
             lines.append(line)
+
         await msg.reply_text("\n".join(lines))
         return
 
+    # ── account_query early return (9+ digit) ────────────────────
+    # parse_numbers ከመጠራቱ በፊት account intent ከሆነ ቀድሞ ምልሽ ይስጥ
     import re as _re
     if _re.findall(r'\b\d{9,}\b', text):
         if resp["reply"]:
@@ -1427,6 +1327,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         log_activity(group_id, registrations=1)
     except Exception:
         pass
+
 async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
     pending = pending_ambiguous.get(user_id)
     if not pending:
@@ -1470,6 +1371,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
+        # ✅ nekay snap value ይለይ
         nekay_snap_value = None
         if game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {}):
             nekay_snap_value = nekay_numbers[game_id][actual_num]
@@ -1477,6 +1379,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_nekay = (nekay_snap_value is not None)
         is_nekay_force = (nekay_snap_value == 0)
 
+        # ✅ FIX: force-replace ጊዜ parsed_name ካለ እሱን ተጠቀም፣ ካልሆነ telegram name
         if is_nekay_force:
             actual_name = parsed_name if parsed_name else user_name
         elif parsed_name:
@@ -1495,6 +1398,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             all_taken.append(actual_num)
             continue
 
+        # ✅ user የራሱ ቁጥር ከሆነ directly change_number_type ጠራ
         if user_owns_number(game_id, user_id, actual_num) and not is_nekay:
             target_type = "half" if is_half else "full"
             result_tc = change_number_type(game_id, user_id, actual_num, target_type)
@@ -1541,6 +1445,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     reg_result = "registered" if registered else ("taken" if all_taken else None)
 
+    # ✅ NEW: ይህ turn የተመዘገቡ ቁጥሮች ሁሉም paid መሆናቸውን (auto-paid balance) ይፈትሻል
     is_paid_result = None
     if registered:
         is_paid_result = all(
@@ -1663,6 +1568,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     if remaining_count == 0 and game_id not in active_countdowns and game_id not in countdown_done:
         _stop_inactivity_tracker(game_id)
 
+        # ቁጥር ሲያልቅ ባንድ ጨዋታ 1 ጊዜ ብቻ — board ሁልጊዜ delete+resend (duplicate እንዳይፈጠር)
         fresh_settings_for_resend = get_active_settings(group_id=group_id)
         if fresh_settings_for_resend:
             final_board_msg_id = fresh_settings_for_resend.get("board_message_id")
@@ -1690,7 +1596,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     try:
         check_and_rotate_db()
     except Exception:
-        pass    
+        pass
+
 # ============================================================
 # HELPERS
 # ============================================================
