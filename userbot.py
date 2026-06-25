@@ -1335,9 +1335,13 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         name_str = f" — {group_name}" if group_name else ""
         grp_lines.append(f"  ✅ {group_id}{name_str} {''.join(tags)}")
 
+    auto_add_on = (db_get_setting("auto_add_enabled") or "true") == "true"
+    auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
+
     text = (
         "🤖 Userbot Status & Commands\n"
         "━━━━━━━━━━━━━━━━\n\n"
+        f"🤖 Auto-Add: {auto_status}\n"
         f"🟢 Active Group: {active_group}\n"
         f"🎯 Target Group: {target_group}\n\n"
         "👤 Accounts:\n" +
