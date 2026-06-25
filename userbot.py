@@ -649,6 +649,9 @@ async def start_listeners():
                     if db_is_user_added(user_id, target_group_id):
                         return
 
+                    if (db_get_setting("auto_add_enabled") or "true") == "false":
+                        return
+
                     chosen = get_next_account()
                     if not chosen:
                         return
@@ -911,6 +914,7 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
     rows = db_list_groups()
     active_group = db_get_setting("active_group_id")
     target_group = db_get_setting("target_group_id")
+    auto_add_on = (db_get_setting("auto_add_enabled") or "true") == "true"
 
     if not rows:
         text = "📭 Group የለም\n\n/syncgroups — userbot ያለባቸውን ሁሉ ያምጣ"
@@ -929,28 +933,30 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
     start = page * PAGE_SIZE
     page_rows = rows[start: start + PAGE_SIZE]
 
-    lines = [f"📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"]
+    auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
+    lines = [f"🤖 Auto-Add: {auto_status}\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"]
     keyboard = []
 
-    for gid, group_id, group_name, is_source in page_rows:
+    for i, (gid, group_id, group_name, is_source) in enumerate(page_rows):
+        num = start + i + 1
         tags = []
         if str(group_id) == active_group:
             tags.append("🟢")
         if str(group_id) == target_group:
             tags.append("🎯")
         tag_str = " ".join(tags)
-        name_str = (group_name or str(group_id))[:25]
+        name_str = (group_name or str(group_id))[:22]
         source_icon = "✅" if is_source else "⬜"
-        lines.append(f"{source_icon} {name_str} {tag_str}")
+        lines.append(f"#{num} {source_icon} {name_str} {tag_str}")
 
         if is_source:
             connect_btn = InlineKeyboardButton(
-                "🔴 Disconnect",
+                f"#{num} 🔴 Disconnect",
                 callback_data=f"grp_disconnect:{group_id}:{page}"
             )
         else:
             connect_btn = InlineKeyboardButton(
-                "✅ Connect",
+                f"#{num} ✅ Connect",
                 callback_data=f"grp_connect:{group_id}:{page}"
             )
         remove_btn = InlineKeyboardButton(
@@ -966,7 +972,13 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
     if page < total_pages - 1:
         nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grp_page:{page+1}"))
     keyboard.append(nav_row)
-    keyboard.append([InlineKeyboardButton("🔄 Sync Groups", callback_data="grp_sync")])
+
+    # Auto-add toggle + sync row
+    toggle_btn = InlineKeyboardButton(
+        "🔴 Pause Auto-Add" if auto_add_on else "🟢 Resume Auto-Add",
+        callback_data="grp_autoadd_toggle"
+    )
+    keyboard.append([InlineKeyboardButton("🔄 Sync", callback_data="grp_sync"), toggle_btn])
 
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "\n".join(lines)
@@ -996,6 +1008,12 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "grp_sync":
         await query.edit_message_text("🔄 Syncing...")
         await _sync_all_account_groups()
+        await _show_groups_list(query.message, edit=True, page=0)
+        return
+
+    if data == "grp_autoadd_toggle":
+        current = (db_get_setting("auto_add_enabled") or "true") == "true"
+        db_set_setting("auto_add_enabled", "false" if current else "true")
         await _show_groups_list(query.message, edit=True, page=0)
         return
 
