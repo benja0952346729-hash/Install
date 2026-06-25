@@ -52,7 +52,7 @@ def init_userbot_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS userbot_groups (
             id SERIAL PRIMARY KEY,
-            group_id BIGINT NOT NULL UNIQUE,
+            group_id BIGINT UNIQUE,
             added_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -82,7 +82,7 @@ def init_userbot_db():
         )
     """)
 
-    # ✅ FIX — አሮጌ userbot_accounts table ላይ label እና flood_until columns ካልሆኑ ይጨምራቸዋል
+    # ✅ FIX 1 — label column ካልሆነ ይጨምራል
     cur.execute("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS label CHAR(1) UNIQUE
@@ -91,7 +91,19 @@ def init_userbot_db():
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
     """)
-    # ✅ FIX — አሮጌ userbot_groups table username column ካለ group_id ይጨምራል
+
+    # ✅ FIX 2 — አሮጌ username column ካለ ያስወጣል፣ group_id ይጨምራል
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF EXISTS (
+                SELECT 1 FROM information_schema.columns
+                WHERE table_name='userbot_groups' AND column_name='username'
+            ) THEN
+                ALTER TABLE userbot_groups DROP COLUMN username;
+            END IF;
+        END $$;
+    """)
     cur.execute("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS group_id BIGINT UNIQUE
@@ -512,7 +524,6 @@ def _is_admin(user_id: int) -> bool:
 # ============================================================
 
 async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/addaccount a api_id api_hash +phone"""
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split(maxsplit=4)
@@ -537,15 +548,18 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_startsession(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/startsession +phone"""
     if not _is_admin(update.effective_user.id):
         return
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
+    args = update.message.text.split()
+    phone = None
+    for arg in args[1:]:
+        if arg.startswith("+"):
+            phone = arg
+            break
+    if not phone:
         await update.message.reply_text("❌ Format: /startsession +phone")
         return
 
-    phone = args[1]
     account = db_get_account_by_phone(phone)
     if not account:
         await update.message.reply_text(f"❌ {phone} አልተገኘም!")
@@ -568,7 +582,6 @@ async def cmd_startsession(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_verifycode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/verifycode +phone code"""
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split(maxsplit=2)
@@ -597,7 +610,6 @@ async def cmd_verifycode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_verify2fa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """/verify2fa +phone password"""
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split(maxsplit=2)
@@ -810,13 +822,12 @@ async def cmd_e(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_admin_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Admin bot ላይ DM ሲልክ → ባለፉት 2 ሰዓት active users ሁሉ ይላካል"""
     if not _is_admin(update.effective_user.id):
         return
     if update.effective_chat.type != "private":
         return
 
-    # ✅ FIX — command ከሆነ userbot/bot handlers ይይዙታል
+    # ✅ FIX — command ከሆነ ይዘለላል
     if update.message and update.message.text and update.message.text.startswith("/"):
         return
 
@@ -885,6 +896,29 @@ async def handle_admin_dm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def cmd_myapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT label, api_id, api_hash, phone FROM userbot_accounts")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    if not rows:
+        await update.message.reply_text("📭 Account የለም")
+        return
+    lines = ["🔑 Account Details:\n"]
+    for label, api_id, api_hash, phone in rows:
+        lines.append(
+            f"📱 {phone}\n"
+            f"🏷 Label: {label}\n"
+            f"🆔 API_ID: {api_id}\n"
+            f"🔑 API_HASH: {api_hash}"
+        )
+    await update.message.reply_text("\n".join(lines))
+
+
 async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -929,7 +963,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/verifycode +phone code\n"
         "/verify2fa +phone password\n"
         "/listaccounts\n"
-        "/deleteaccount +phone\n\n"
+        "/deleteaccount +phone\n"
+        "/myapi — API credentials ያሳያል\n\n"
         "/addgroup -100xxxxxxx\n"
         "/listgroups\n"
         "/deletegroup -100xxxxxxx\n\n"
@@ -973,10 +1008,11 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("c", cmd_c))
     app.add_handler(CommandHandler("d", cmd_d))
     app.add_handler(CommandHandler("e", cmd_e))
+    app.add_handler(CommandHandler("myapi", cmd_myapi))
     app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
     app.add_handler(CommandHandler("status2", cmd_status2))
 
-    # ✅ FIX — command check አለው ስለዚህ /listaccounts ወዘተ አይጠልፈውም
+    # ✅ FIX — command check አለው
     app.add_handler(MessageHandler(
         filters.ChatType.PRIVATE & filters.User(ADMIN_IDS),
         handle_admin_dm
