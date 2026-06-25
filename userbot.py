@@ -92,7 +92,7 @@ def init_userbot_db():
         ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
     """)
 
-    # ✅ FIX 2 — አሮጌ username column ካለ ያስወጣል፣ group_id ይጨምራል
+    # ✅ FIX 2 — አሮጌ username column ካለ ያስወጣል
     cur.execute("""
         DO $$
         BEGIN
@@ -404,18 +404,19 @@ async def _send_to_group(account: dict, group_id: int, message=None, media=None)
         await client.disconnect()
 
 
-async def _contact_and_add(account: dict, user_id: int, target_group_id: int):
+# ✅ FIX — sender object ቀጥታ ይጠቀማል
+async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int):
     client = await _get_client(account)
     try:
-        user = await client.get_entity(user_id)
+        user_id = sender.id
 
         if not db_is_user_contacted(user_id, account["label"]):
             try:
                 await client(AddContactRequest(
-                    id=user_id,
-                    first_name=user.first_name or "User",
-                    last_name=user.last_name or "",
-                    phone=user.phone or "",
+                    id=sender,
+                    first_name=sender.first_name or "User",
+                    last_name=sender.last_name or "",
+                    phone=sender.phone or "",
                     add_phone_privacy_exception=False
                 ))
                 db_mark_user_contacted(user_id, account["label"])
@@ -429,8 +430,9 @@ async def _contact_and_add(account: dict, user_id: int, target_group_id: int):
         if not db_is_user_added(user_id, target_group_id):
             try:
                 group = await client.get_entity(target_group_id)
-                await client(InviteToChannelRequest(channel=group, users=[user_id]))
+                await client(InviteToChannelRequest(channel=group, users=[sender]))
                 db_mark_user_added(user_id, target_group_id)
+                logger.info(f"✅ Added {user_id} → {target_group_id}")
             except FloodWaitError as e:
                 db_set_flood(account["phone"], e.seconds)
                 logger.warning(f"[Add] Flood {account['label']}: {e.seconds}s")
@@ -472,6 +474,7 @@ async def start_listeners():
                     if chat_id not in group_ids:
                         return
 
+                    # ✅ FIX — sender ቀጥታ ከ event ውሰድ
                     sender = await event.get_sender()
                     if not sender or sender.bot:
                         return
@@ -493,7 +496,9 @@ async def start_listeners():
                         return
 
                     await asyncio.sleep(random.uniform(2, 5))
-                    await _contact_and_add(chosen, user_id, target_group_id)
+
+                    # ✅ FIX — sender object ቀጥታ pass አርግ
+                    await _contact_and_add_by_sender(chosen, sender, target_group_id)
 
                 except Exception as e:
                     logger.warning(f"[AutoAdd] {e}")
@@ -954,7 +959,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎯 Target Group: {target_group}\n\n"
         "👤 Accounts:\n" +
         ("\n".join(acc_lines) if acc_lines else "  📭 የለም") +
-        "\n\n🏠 Groups:\n" +
+        "\n\n🏠 Source Groups:\n" +
         ("\n".join(grp_lines) if grp_lines else "  📭 የለም") +
         "\n\n━━━━━━━━━━━━━━━━\n"
         "⚙️ Setup:\n"
@@ -965,7 +970,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/listaccounts\n"
         "/deleteaccount +phone\n"
         "/myapi — API credentials ያሳያል\n\n"
-        "/addgroup -100xxxxxxx\n"
+        "/addgroup -100xxxxxxx  → source group\n"
         "/listgroups\n"
         "/deletegroup -100xxxxxxx\n\n"
         "/setactivegroup -100xxxxxxx\n"
