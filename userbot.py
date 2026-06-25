@@ -113,6 +113,13 @@ def init_userbot_db():
         ADD COLUMN IF NOT EXISTS group_name TEXT DEFAULT NULL
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS userbot_blocked_users (
+            user_id BIGINT PRIMARY KEY,
+            blocked_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -354,6 +361,42 @@ def db_get_recent_users(hours: int = 2):
     cur.close()
     conn.close()
     return [r[0] for r in rows]
+
+
+# ============================================================
+# BLOCKED USERS HELPERS
+# ============================================================
+
+def db_mark_user_blocked(user_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO userbot_blocked_users (user_id) VALUES (%s)
+        ON CONFLICT DO NOTHING
+    """, (user_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_is_user_blocked(user_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM userbot_blocked_users WHERE user_id=%s", (user_id,))
+    exists = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    return exists
+
+
+def db_get_all_blocked() -> set:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id FROM userbot_blocked_users")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return {r[0] for r in rows}
 
 
 # ============================================================
@@ -826,6 +869,15 @@ async def _handle_usend(update: Update, label: str):
     group_id = int(active_group_str)
     msg = update.message
 
+    # caption ከ command ያጸዳል (ለምሳሌ "/a ሰላም" → "ሰላም")
+    def clean_caption(text):
+        if not text:
+            return ""
+        if text.startswith("/"):
+            parts = text.split(maxsplit=1)
+            return parts[1] if len(parts) > 1 else ""
+        return text
+
     try:
         client = await _get_client(account)
         try:
@@ -833,17 +885,17 @@ async def _handle_usend(update: Update, label: str):
                 file = await msg.bot.get_file(msg.photo[-1].file_id)
                 bio = await file.download_as_bytearray()
                 import io
-                await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=msg.caption or "")
+                await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=clean_caption(msg.caption))
             elif msg.video:
                 file = await msg.bot.get_file(msg.video.file_id)
                 bio = await file.download_as_bytearray()
                 import io
-                await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=msg.caption or "")
+                await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=clean_caption(msg.caption))
             elif msg.document:
                 file = await msg.bot.get_file(msg.document.file_id)
                 bio = await file.download_as_bytearray()
                 import io
-                await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=msg.caption or "")
+                await client.send_file(group_id, io.BytesIO(bytes(bio)), caption=clean_caption(msg.caption))
             elif msg.sticker:
                 file = await msg.bot.get_file(msg.sticker.file_id)
                 bio = await file.download_as_bytearray()
@@ -926,7 +978,12 @@ async def _do_broadcast(msg, users: list, status_msg):
             db_set_flood(account["phone"], e.seconds)
             failed += 1
         except Exception as e:
-            logger.warning(f"[Broadcast] {user_id}: {e}")
+            err = str(e).lower()
+            if "blocked" in err or "user is blocked" in err or "privacy" in err:
+                db_mark_user_blocked(user_id)
+                logger.info(f"[Broadcast] {user_id} blocked → marked")
+            else:
+                logger.warning(f"[Broadcast] {user_id}: {e}")
             failed += 1
 
         if (i + 1) % 10 == 0:
@@ -953,18 +1010,56 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 ባለፉት 2 ሰዓት message የላኩ users የሉም")
         return
 
+    # blocked users ወዲያው skip
+    blocked = db_get_all_blocked()
+    recent_users = [u for u in recent_users if u not in blocked]
+    if not recent_users:
+        await update.message.reply_text("📭 Broadcast ላኪ users የሉም")
+        return
+
+    # target እና active group IDs ያወጣል
+    target_str = db_get_setting("target_group_id")
+    active_str = db_get_setting("active_group_id")
+    target_group_id = int(target_str) if target_str else None
+    active_group_id = int(active_str) if active_str else None
+
+    # target/active group members ያወጣል → skip ይደረጋሉ
+    skip_user_ids = set()
+    check_acc = get_next_account()
+    if check_acc and (target_group_id or active_group_id):
+        try:
+            check_client = await _get_client(check_acc)
+            try:
+                for gid in [target_group_id, active_group_id]:
+                    if not gid:
+                        continue
+                    try:
+                        async for member in check_client.iter_participants(gid):
+                            skip_user_ids.add(member.id)
+                    except Exception as e:
+                        logger.warning(f"[Broadcast filter] group {gid}: {e}")
+            finally:
+                await check_client.disconnect()
+        except Exception as e:
+            logger.warning(f"[Broadcast filter] {e}")
+
     filtered_users = []
     check_groups = db_list_groups()
     check_group_ids = [g[1] for g in check_groups]
 
     for user_id in recent_users:
+        # target/active group member ከሆነ skip
+        if user_id in skip_user_ids:
+            continue
+
+        # admin/owner ከሆነ skip
         is_admin_user = False
         for gid in check_group_ids:
-            check_acc = get_next_account()
-            if not check_acc:
+            check_acc2 = get_next_account()
+            if not check_acc2:
                 break
             try:
-                check_client = await _get_client(check_acc)
+                check_client = await _get_client(check_acc2)
                 try:
                     if await _is_admin_or_owner(check_client, user_id, gid):
                         is_admin_user = True
@@ -977,7 +1072,7 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             filtered_users.append(user_id)
 
     if not filtered_users:
-        await update.message.reply_text("📭 Broadcast ላኪ users የሉም (ሁሉም admin/owner ናቸው)")
+        await update.message.reply_text("📭 Broadcast ላኪ users የሉም")
         return
 
     total = len(filtered_users)
@@ -1102,6 +1197,15 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("c", cmd_c))
     app.add_handler(CommandHandler("d", cmd_d))
     app.add_handler(CommandHandler("e", cmd_e))
+
+    # photo/video/document caption ላይ /a /b /c /d /e ሲጻፍ
+    for _label, _handler in [("a", cmd_a), ("b", cmd_b), ("c", cmd_c), ("d", cmd_d), ("e", cmd_e)]:
+        app.add_handler(MessageHandler(
+            filters.ChatType.PRIVATE & filters.User(ADMIN_IDS) &
+            (filters.PHOTO | filters.VIDEO | filters.Document.ALL) &
+            filters.CaptionRegex(f"^/{_label}(\s|$)"),
+            _handler
+        ))
     app.add_handler(CommandHandler("myapi", cmd_myapi))
     app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
     app.add_handler(CommandHandler("status2", cmd_status2))
