@@ -11,8 +11,8 @@ from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.channels import InviteToChannelRequest
 from telethon.errors import FloodWaitError
-from telegram import Update
-from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
 from database import get_conn
 from config import ADMIN_IDS
@@ -53,6 +53,8 @@ def init_userbot_db():
         CREATE TABLE IF NOT EXISTS userbot_groups (
             id SERIAL PRIMARY KEY,
             group_id BIGINT UNIQUE,
+            group_name TEXT DEFAULT NULL,
+            is_source BOOLEAN DEFAULT FALSE,
             added_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -82,7 +84,13 @@ def init_userbot_db():
         )
     """)
 
-    # ✅ FIX 1 — label column ካልሆነ ይጨምራል
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS userbot_blocked_users (
+            user_id BIGINT PRIMARY KEY,
+            blocked_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
     cur.execute("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS label CHAR(1) UNIQUE
@@ -92,7 +100,6 @@ def init_userbot_db():
         ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
     """)
 
-    # ✅ FIX 2 — አሮጌ username column ካለ ያስወጣል
     cur.execute("""
         DO $$
         BEGIN
@@ -104,6 +111,7 @@ def init_userbot_db():
             END IF;
         END $$;
     """)
+
     cur.execute("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS group_id BIGINT UNIQUE
@@ -112,12 +120,16 @@ def init_userbot_db():
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS group_name TEXT DEFAULT NULL
     """)
-
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS userbot_blocked_users (
-            user_id BIGINT PRIMARY KEY,
-            blocked_at TIMESTAMP DEFAULT NOW()
-        )
+        ALTER TABLE userbot_groups
+        ADD COLUMN IF NOT EXISTS is_source BOOLEAN DEFAULT FALSE
+    """)
+
+    # ✅ INDEX
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_groups_source
+        ON userbot_groups(group_id)
+        WHERE is_source = TRUE
     """)
 
     conn.commit()
@@ -255,13 +267,16 @@ def db_get_setting(key: str):
     return row[0] if row else None
 
 
-def db_add_group(group_id: int, group_name: str = None):
+def db_add_group(group_id: int, group_name: str = None, is_source: bool = False):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        INSERT INTO userbot_groups (group_id, group_name) VALUES (%s, %s)
-        ON CONFLICT (group_id) DO UPDATE SET group_name=EXCLUDED.group_name
-    """, (group_id, group_name))
+        INSERT INTO userbot_groups (group_id, group_name, is_source)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (group_id) DO UPDATE SET
+            group_name=COALESCE(EXCLUDED.group_name, userbot_groups.group_name),
+            is_source=CASE WHEN EXCLUDED.is_source THEN TRUE ELSE userbot_groups.is_source END
+    """, (group_id, group_name, is_source))
     conn.commit()
     cur.close()
     conn.close()
@@ -270,11 +285,20 @@ def db_add_group(group_id: int, group_name: str = None):
 def db_list_groups():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, group_id, group_name FROM userbot_groups WHERE group_id IS NOT NULL ORDER BY id")
+    cur.execute("SELECT id, group_id, group_name, is_source FROM userbot_groups WHERE group_id IS NOT NULL ORDER BY id")
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return rows
+
+
+def db_set_group_source(group_id: int, is_source: bool):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE userbot_groups SET is_source=%s WHERE group_id=%s", (is_source, group_id))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def db_delete_group(group_id: int):
@@ -399,6 +423,19 @@ def db_get_all_blocked() -> set:
     return {r[0] for r in rows}
 
 
+# ✅ NEW — cleanup old messages
+def db_cleanup_old_messages(hours: int = 24):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM userbot_recent_messages
+        WHERE sent_at < NOW() - INTERVAL '%s hours'
+    """, (hours,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 # ============================================================
 # ROUND ROBIN
 # ============================================================
@@ -425,7 +462,7 @@ def get_next_account():
 # ADMIN CACHE
 # ============================================================
 
-_admin_cache: dict = {}  # {(user_id, group_id): True/False}
+_admin_cache: dict = {}
 
 
 async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
@@ -471,7 +508,6 @@ async def _send_to_group(account: dict, group_id: int, message=None, media=None)
         await client.disconnect()
 
 
-# ✅ FIX — sender object ቀጥታ ይጠቀማል
 async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int):
     client = await _get_client(account)
     try:
@@ -510,6 +546,41 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 
 
 # ============================================================
+# AUTO-DETECT GROUPS
+# ============================================================
+
+async def _auto_detect_groups(account: dict):
+    client = await _get_client(account)
+    try:
+        async for dialog in client.iter_dialogs():
+            if dialog.is_group or dialog.is_channel:
+                db_add_group(dialog.id, dialog.name, is_source=False)
+        logger.info(f"✅ Auto-detected groups for [{account['label']}]")
+    except Exception as e:
+        logger.warning(f"[AutoDetect] {account['label']}: {e}")
+    finally:
+        await client.disconnect()
+
+
+async def _sync_all_account_groups():
+    accounts = db_get_all_accounts()
+    for account in accounts:
+        if account.get("session"):
+            await _auto_detect_groups(account)
+
+
+# ============================================================
+# CLEANUP LOOP
+# ============================================================
+
+async def _cleanup_loop():
+    while True:
+        await asyncio.sleep(3600)
+        db_cleanup_old_messages(24)
+        logger.info("✅ Old messages cleaned up")
+
+
+# ============================================================
 # TELETHON EVENT LISTENERS
 # ============================================================
 
@@ -519,6 +590,12 @@ _telethon_clients = []
 async def start_listeners():
     global _telethon_clients
     accounts = db_get_all_accounts()
+
+    # ✅ Auto-detect groups on start
+    await _sync_all_account_groups()
+
+    # ✅ Start cleanup loop
+    asyncio.create_task(_cleanup_loop())
 
     for account in accounts:
         if not account.get("session"):
@@ -535,24 +612,34 @@ async def start_listeners():
             async def handler(event, acc=account):
                 try:
                     chat_id = event.chat_id
+
+                    # ✅ Auto-save new group
                     groups = db_list_groups()
                     group_ids = [g[1] for g in groups]
-
                     if chat_id not in group_ids:
+                        try:
+                            entity = await event.get_chat()
+                            group_name = getattr(entity, "title", str(chat_id))
+                            db_add_group(chat_id, group_name, is_source=False)
+                            logger.info(f"✅ Auto-added: {group_name} ({chat_id})")
+                        except Exception:
+                            db_add_group(chat_id, is_source=False)
+
+                    # ✅ Source group ብቻ ያዳምጣል
+                    groups = db_list_groups()
+                    source_ids = [g[1] for g in groups if g[3]]
+                    if chat_id not in source_ids:
                         return
 
-                    # ✅ FIX — sender ቀጥታ ከ event ውሰድ
                     sender = await event.get_sender()
                     if not sender or sender.bot:
                         return
 
-                    # ✅ NEW — userbot ራሱ ከሆነ skip
                     if sender.is_self:
                         return
 
                     user_id = sender.id
 
-                    # ✅ NEW — admin/owner ከሆነ skip (cache ጋር)
                     check_client = await _get_client(acc)
                     try:
                         if await _is_admin_or_owner(check_client, user_id, chat_id):
@@ -576,8 +663,6 @@ async def start_listeners():
                         return
 
                     await asyncio.sleep(random.uniform(2, 5))
-
-                    # ✅ FIX — sender object ቀጥታ pass አርግ
                     await _contact_and_add_by_sender(chosen, sender, target_group_id)
 
                 except Exception as e:
@@ -787,8 +872,6 @@ async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     try:
         group_id = int(args[1])
-
-        # userbot ተጠቅሞ group ስም ያወጣል
         group_name = None
         account = get_next_account()
         if account:
@@ -802,36 +885,115 @@ async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 group_name = None
 
-        db_add_group(group_id, group_name)
-
+        db_add_group(group_id, group_name, is_source=False)
         name_str = f"📛 ስም: {group_name}\n" if group_name else ""
         await update.message.reply_text(
-            f"✅ Group ተጨመረ!\n{name_str}🆔 ID: {group_id}"
+            f"✅ Group ተጨመረ!\n{name_str}🆔 ID: {group_id}\n\n"
+            f"Source group ለማድረግ /listgroups ላይ ✅ ን ጫን"
         )
     except ValueError:
         await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
 
 
+async def cmd_syncgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    msg = await update.message.reply_text("🔄 Groups እየሳነቀ ነው...")
+    await _sync_all_account_groups()
+    await msg.edit_text("✅ Groups synced! /listgroups ይጫን")
+
+
+# ============================================================
+# LISTGROUPS — INLINE BUTTONS
+# ============================================================
+
 async def cmd_listgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
+    await _show_groups_list(update.message, edit=False)
+
+
+async def _show_groups_list(message, edit: bool = False):
     rows = db_list_groups()
     active_group = db_get_setting("active_group_id")
     target_group = db_get_setting("target_group_id")
+
     if not rows:
-        await update.message.reply_text("📭 Group የለም")
+        text = "📭 Group የለም\n\n/syncgroups — userbot ያለባቸውን ሁሉ ያምጣ"
+        if edit:
+            await message.edit_text(text)
+        else:
+            await message.reply_text(text)
         return
+
     lines = ["📋 Groups:\n"]
-    for gid, group_id, group_name in rows:
+    keyboard = []
+
+    for gid, group_id, group_name, is_source in rows:
         tags = []
         if str(group_id) == active_group:
-            tags.append("🟢 active")
+            tags.append("🟢")
         if str(group_id) == target_group:
-            tags.append("🎯 target")
+            tags.append("🎯")
         tag_str = " ".join(tags)
-        name_str = f" — {group_name}" if group_name else ""
-        lines.append(f"🔹 {gid}. {group_id}{name_str} {tag_str}")
-    await update.message.reply_text("\n".join(lines))
+        name_str = group_name or str(group_id)
+        source_icon = "✅" if is_source else "⬜"
+        lines.append(f"{source_icon} {name_str} {tag_str}")
+
+        if is_source:
+            connect_btn = InlineKeyboardButton(
+                "🔴 Disconnect",
+                callback_data=f"grp_disconnect:{group_id}"
+            )
+        else:
+            connect_btn = InlineKeyboardButton(
+                "✅ Connect",
+                callback_data=f"grp_connect:{group_id}"
+            )
+
+        remove_btn = InlineKeyboardButton(
+            "❌ Remove",
+            callback_data=f"grp_remove:{group_id}"
+        )
+        keyboard.append([connect_btn, remove_btn])
+
+    keyboard.append([InlineKeyboardButton("🔄 Sync Groups", callback_data="grp_sync")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    text = "\n".join(lines)
+
+    if edit:
+        await message.edit_text(text, reply_markup=reply_markup)
+    else:
+        await message.reply_text(text, reply_markup=reply_markup)
+
+
+async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    if not _is_admin(query.from_user.id):
+        await query.answer("❌ Admin ብቻ!")
+        return
+
+    await query.answer()
+    data = query.data
+
+    if data == "grp_sync":
+        await query.edit_message_text("🔄 Syncing...")
+        await _sync_all_account_groups()
+        await _show_groups_list(query.message, edit=True)
+        return
+
+    action, group_id_str = data.split(":", 1)
+    group_id = int(group_id_str)
+
+    if action == "grp_connect":
+        db_set_group_source(group_id, True)
+    elif action == "grp_disconnect":
+        db_set_group_source(group_id, False)
+    elif action == "grp_remove":
+        db_delete_group(group_id)
+
+    await _show_groups_list(query.message, edit=True)
 
 
 async def cmd_deletegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -869,7 +1031,6 @@ async def _handle_usend(update: Update, label: str):
     group_id = int(active_group_str)
     msg = update.message
 
-    # caption ከ command ያጸዳል (ለምሳሌ "/a ሰላም" → "ሰላም")
     def clean_caption(text):
         if not text:
             return ""
@@ -911,7 +1072,6 @@ async def _handle_usend(update: Update, label: str):
             else:
                 await msg.reply_text("❌ የማይደገፍ media አይነት!")
                 return
-
             await msg.reply_text(f"✅ [{label}] → {group_id} ተላከ!")
         finally:
             await client.disconnect()
@@ -1010,20 +1170,17 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 ባለፉት 2 ሰዓት message የላኩ users የሉም")
         return
 
-    # blocked users ወዲያው skip
     blocked = db_get_all_blocked()
     recent_users = [u for u in recent_users if u not in blocked]
     if not recent_users:
         await update.message.reply_text("📭 Broadcast ላኪ users የሉም")
         return
 
-    # target እና active group IDs ያወጣል
     target_str = db_get_setting("target_group_id")
     active_str = db_get_setting("active_group_id")
     target_group_id = int(target_str) if target_str else None
     active_group_id = int(active_str) if active_str else None
 
-    # target/active group members ያወጣል → skip ይደረጋሉ
     skip_user_ids = set()
     check_acc = get_next_account()
     if check_acc and (target_group_id or active_group_id):
@@ -1048,11 +1205,9 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     check_group_ids = [g[1] for g in check_groups]
 
     for user_id in recent_users:
-        # target/active group member ከሆነ skip
         if user_id in skip_user_ids:
             continue
 
-        # admin/owner ከሆነ skip
         is_admin_user = False
         for gid in check_group_ids:
             check_acc2 = get_next_account()
@@ -1077,9 +1232,8 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     total = len(filtered_users)
     status_msg = await update.message.reply_text(
-        f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}\n\n⚡ Background ይሰራል — ሌሎች commands ይሰራሉ!"
+        f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}\n\n⚡ Background ይሰራል!"
     )
-
     asyncio.create_task(_do_broadcast(update.message, filtered_users, status_msg))
 
 
@@ -1126,14 +1280,15 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         acc_lines.append(f"  {status}[{label}] {phone} {has_session}{flood}")
 
     grp_lines = []
-    for _, group_id, group_name in groups:
+    for _, group_id, group_name, is_source in groups:
         tags = []
         if str(group_id) == active_group:
             tags.append("🟢")
         if str(group_id) == target_group:
             tags.append("🎯")
+        source_icon = "✅" if is_source else "⬜"
         name_str = f" — {group_name}" if group_name else ""
-        grp_lines.append(f"  🔹{group_id}{name_str} {''.join(tags)}")
+        grp_lines.append(f"  {source_icon}{group_id}{name_str} {''.join(tags)}")
 
     text = (
         "🤖 Userbot Status & Commands\n"
@@ -1142,7 +1297,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎯 Target Group: {target_group}\n\n"
         "👤 Accounts:\n" +
         ("\n".join(acc_lines) if acc_lines else "  📭 የለም") +
-        "\n\n🏠 Source Groups:\n" +
+        "\n\n🏠 Groups (✅=source ⬜=inactive):\n" +
         ("\n".join(grp_lines) if grp_lines else "  📭 የለም") +
         "\n\n━━━━━━━━━━━━━━━━\n"
         "⚙️ Setup:\n"
@@ -1152,22 +1307,18 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/verify2fa +phone password\n"
         "/listaccounts\n"
         "/deleteaccount +phone\n"
-        "/myapi — API credentials ያሳያል\n\n"
-        "/addgroup -100xxxxxxx  → source group\n"
-        "/listgroups\n"
+        "/myapi\n\n"
+        "/listgroups — groups ✅/❌ buttons ጋር\n"
+        "/syncgroups — userbot ያለባቸው ሁሉ ያምጣ\n"
+        "/addgroup -100xxxxxxx\n"
         "/deletegroup -100xxxxxxx\n\n"
         "/setactivegroup -100xxxxxxx\n"
-        "  → /a /b /c /d ለሚልኩበት group\n\n"
-        "/settargetgroup -100xxxxxxx\n"
-        "  → Auto add ለሚሄድበት group\n\n"
+        "/settargetgroup -100xxxxxxx\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "⚡ Send:\n"
-        "/a መልዕክት (ወይም photo/video/sticker)\n"
-        "/b /c /d /e መልዕክት\n\n"
+        "/a /b /c /d /e መልዕክት\n\n"
         "📢 Broadcast:\n"
-        "/broadcast መልዕክት → ባለፉት 2 ሰዓት\n"
-        "active users ሁሉ ይደርሳቸዋል\n"
-        "(Admin/Owner users ይዘለላሉ)\n"
+        "/broadcast መልዕክት\n"
     )
     await update.message.reply_text(text)
 
@@ -1188,6 +1339,7 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("listaccounts", cmd_listaccounts))
     app.add_handler(CommandHandler("deleteaccount", cmd_deleteaccount))
     app.add_handler(CommandHandler("addgroup", cmd_addgroup))
+    app.add_handler(CommandHandler("syncgroups", cmd_syncgroups))
     app.add_handler(CommandHandler("listgroups", cmd_listgroups))
     app.add_handler(CommandHandler("deletegroup", cmd_deletegroup))
     app.add_handler(CommandHandler("setactivegroup", cmd_setactivegroup))
@@ -1198,7 +1350,6 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("d", cmd_d))
     app.add_handler(CommandHandler("e", cmd_e))
 
-    # photo/video/document caption ላይ /a /b /c /d /e ሲጻፍ
     for _label, _handler in [("a", cmd_a), ("b", cmd_b), ("c", cmd_c), ("d", cmd_d), ("e", cmd_e)]:
         app.add_handler(MessageHandler(
             filters.ChatType.PRIVATE & filters.User(ADMIN_IDS) &
@@ -1206,9 +1357,11 @@ def register_userbot_handlers(app):
             filters.CaptionRegex(f"^/{_label}(\s|$)"),
             _handler
         ))
+
     app.add_handler(CommandHandler("myapi", cmd_myapi))
     app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
     app.add_handler(CommandHandler("status2", cmd_status2))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CallbackQueryHandler(cb_group_action, pattern="^grp_"))
 
     logger.info("✅ Userbot handlers registered")
