@@ -125,7 +125,6 @@ def init_userbot_db():
         ADD COLUMN IF NOT EXISTS is_source BOOLEAN DEFAULT FALSE
     """)
 
-    # ✅ INDEX
     cur.execute("""
         CREATE INDEX IF NOT EXISTS idx_groups_source
         ON userbot_groups(group_id)
@@ -387,10 +386,6 @@ def db_get_recent_users(hours: int = 2):
     return [r[0] for r in rows]
 
 
-# ============================================================
-# BLOCKED USERS HELPERS
-# ============================================================
-
 def db_mark_user_blocked(user_id: int):
     conn = get_conn()
     cur = conn.cursor()
@@ -423,7 +418,6 @@ def db_get_all_blocked() -> set:
     return {r[0] for r in rows}
 
 
-# ✅ NEW — cleanup old messages
 def db_cleanup_old_messages(hours: int = 24):
     conn = get_conn()
     cur = conn.cursor()
@@ -551,11 +545,13 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 
 async def _auto_detect_groups(account: dict):
     client = await _get_client(account)
+    count = 0
     try:
         async for dialog in client.iter_dialogs():
             if dialog.is_group or dialog.is_channel:
                 db_add_group(dialog.id, dialog.name, is_source=False)
-        logger.info(f"✅ Auto-detected groups for [{account['label']}]")
+                count += 1
+        logger.info(f"✅ [{account['label']}] auto-detected {count} groups")
     except Exception as e:
         logger.warning(f"[AutoDetect] {account['label']}: {e}")
     finally:
@@ -591,10 +587,7 @@ async def start_listeners():
     global _telethon_clients
     accounts = db_get_all_accounts()
 
-    # ✅ Auto-detect groups on start
     await _sync_all_account_groups()
-
-    # ✅ Start cleanup loop
     asyncio.create_task(_cleanup_loop())
 
     for account in accounts:
@@ -613,7 +606,6 @@ async def start_listeners():
                 try:
                     chat_id = event.chat_id
 
-                    # ✅ Auto-save new group
                     groups = db_list_groups()
                     group_ids = [g[1] for g in groups]
                     if chat_id not in group_ids:
@@ -625,7 +617,6 @@ async def start_listeners():
                         except Exception:
                             db_add_group(chat_id, is_source=False)
 
-                    # ✅ Source group ብቻ ያዳምጣል
                     groups = db_list_groups()
                     source_ids = [g[1] for g in groups if g[3]]
                     if chat_id not in source_ids:
@@ -904,7 +895,7 @@ async def cmd_syncgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# LISTGROUPS — INLINE BUTTONS
+# LISTGROUPS — INLINE BUTTONS — ✅ FIXED
 # ============================================================
 
 async def cmd_listgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -920,10 +911,13 @@ async def _show_groups_list(message, edit: bool = False):
 
     if not rows:
         text = "📭 Group የለም\n\n/syncgroups — userbot ያለባቸውን ሁሉ ያምጣ"
-        if edit:
-            await message.edit_text(text)
-        else:
-            await message.reply_text(text)
+        try:
+            if edit:
+                await message.edit_text(text)
+            else:
+                await message.reply_text(text)
+        except Exception as e:
+            logger.warning(f"[listgroups empty] {e}")
         return
 
     lines = ["📋 Groups:\n"]
@@ -958,14 +952,21 @@ async def _show_groups_list(message, edit: bool = False):
         keyboard.append([connect_btn, remove_btn])
 
     keyboard.append([InlineKeyboardButton("🔄 Sync Groups", callback_data="grp_sync")])
-
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "\n".join(lines)
 
-    if edit:
-        await message.edit_text(text, reply_markup=reply_markup)
-    else:
-        await message.reply_text(text, reply_markup=reply_markup)
+    # ✅ FIX — edit fail ከሆነ reply አርግ
+    try:
+        if edit:
+            await message.edit_text(text, reply_markup=reply_markup)
+        else:
+            await message.reply_text(text, reply_markup=reply_markup)
+    except Exception as e:
+        logger.warning(f"[listgroups edit failed] {e}")
+        try:
+            await message.reply_text(text, reply_markup=reply_markup)
+        except Exception as e2:
+            logger.warning(f"[listgroups reply failed] {e2}")
 
 
 async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
