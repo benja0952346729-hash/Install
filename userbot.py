@@ -895,16 +895,19 @@ async def cmd_syncgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# LISTGROUPS — INLINE BUTTONS — ✅ FIXED
+# LISTGROUPS — PAGINATED
 # ============================================================
+
+PAGE_SIZE = 20
+
 
 async def cmd_listgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    await _show_groups_list(update.message, edit=False)
+    await _show_groups_list(update.message, edit=False, page=0)
 
 
-async def _show_groups_list(message, edit: bool = False):
+async def _show_groups_list(message, edit: bool = False, page: int = 0):
     rows = db_list_groups()
     active_group = db_get_setting("active_group_id")
     target_group = db_get_setting("target_group_id")
@@ -920,42 +923,54 @@ async def _show_groups_list(message, edit: bool = False):
             logger.warning(f"[listgroups empty] {e}")
         return
 
-    lines = ["📋 Groups:\n"]
+    total = len(rows)
+    total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+    page = max(0, min(page, total_pages - 1))
+    start = page * PAGE_SIZE
+    page_rows = rows[start: start + PAGE_SIZE]
+
+    lines = [f"📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"]
     keyboard = []
 
-    for gid, group_id, group_name, is_source in rows:
+    for gid, group_id, group_name, is_source in page_rows:
         tags = []
         if str(group_id) == active_group:
             tags.append("🟢")
         if str(group_id) == target_group:
             tags.append("🎯")
         tag_str = " ".join(tags)
-        name_str = group_name or str(group_id)
+        name_str = (group_name or str(group_id))[:25]
         source_icon = "✅" if is_source else "⬜"
         lines.append(f"{source_icon} {name_str} {tag_str}")
 
         if is_source:
             connect_btn = InlineKeyboardButton(
                 "🔴 Disconnect",
-                callback_data=f"grp_disconnect:{group_id}"
+                callback_data=f"grp_disconnect:{group_id}:{page}"
             )
         else:
             connect_btn = InlineKeyboardButton(
                 "✅ Connect",
-                callback_data=f"grp_connect:{group_id}"
+                callback_data=f"grp_connect:{group_id}:{page}"
             )
-
         remove_btn = InlineKeyboardButton(
-            "❌ Remove",
-            callback_data=f"grp_remove:{group_id}"
+            "❌", callback_data=f"grp_remove:{group_id}:{page}"
         )
         keyboard.append([connect_btn, remove_btn])
 
+    # Pagination row
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grp_page:{page-1}"))
+    nav_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="grp_noop"))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grp_page:{page+1}"))
+    keyboard.append(nav_row)
     keyboard.append([InlineKeyboardButton("🔄 Sync Groups", callback_data="grp_sync")])
+
     reply_markup = InlineKeyboardMarkup(keyboard)
     text = "\n".join(lines)
 
-    # ✅ FIX — edit fail ከሆነ reply አርግ
     try:
         if edit:
             await message.edit_text(text, reply_markup=reply_markup)
@@ -981,11 +996,21 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "grp_sync":
         await query.edit_message_text("🔄 Syncing...")
         await _sync_all_account_groups()
-        await _show_groups_list(query.message, edit=True)
+        await _show_groups_list(query.message, edit=True, page=0)
         return
 
-    action, group_id_str = data.split(":", 1)
-    group_id = int(group_id_str)
+    if data == "grp_noop":
+        return
+
+    if data.startswith("grp_page:"):
+        page = int(data.split(":")[1])
+        await _show_groups_list(query.message, edit=True, page=page)
+        return
+
+    parts = data.split(":")
+    action = parts[0]
+    group_id = int(parts[1])
+    page = int(parts[2]) if len(parts) > 2 else 0
 
     if action == "grp_connect":
         db_set_group_source(group_id, True)
@@ -994,7 +1019,7 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
     elif action == "grp_remove":
         db_delete_group(group_id)
 
-    await _show_groups_list(query.message, edit=True)
+    await _show_groups_list(query.message, edit=True, page=page)
 
 
 async def cmd_deletegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1280,16 +1305,17 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             flood = f" 🚫{remaining}min"
         acc_lines.append(f"  {status}[{label}] {phone} {has_session}{flood}")
 
+    # ✅ FIX — source groups ብቻ ያሳይ
+    source_groups = [g for g in groups if g[3]]
     grp_lines = []
-    for _, group_id, group_name, is_source in groups:
+    for _, group_id, group_name, is_source in source_groups:
         tags = []
         if str(group_id) == active_group:
             tags.append("🟢")
         if str(group_id) == target_group:
             tags.append("🎯")
-        source_icon = "✅" if is_source else "⬜"
         name_str = f" — {group_name}" if group_name else ""
-        grp_lines.append(f"  {source_icon}{group_id}{name_str} {''.join(tags)}")
+        grp_lines.append(f"  ✅ {group_id}{name_str} {''.join(tags)}")
 
     text = (
         "🤖 Userbot Status & Commands\n"
@@ -1298,8 +1324,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🎯 Target Group: {target_group}\n\n"
         "👤 Accounts:\n" +
         ("\n".join(acc_lines) if acc_lines else "  📭 የለም") +
-        "\n\n🏠 Groups (✅=source ⬜=inactive):\n" +
-        ("\n".join(grp_lines) if grp_lines else "  📭 የለም") +
+        f"\n\n🏠 Source Groups ({len(source_groups)}/{len(groups)}):\n" +
+        ("\n".join(grp_lines) if grp_lines else "  📭 የለም (use /listgroups to connect)") +
         "\n\n━━━━━━━━━━━━━━━━\n"
         "⚙️ Setup:\n"
         "/addaccount a api_id api_hash +phone\n"
