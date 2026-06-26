@@ -785,6 +785,75 @@ async def _reload_listeners():
                     if not target_str:
                         logger.info(f"[DEBUG] No target_group_id set!")
                         return
+async def _reload_listeners():
+    """Listener accounts ሲቀየር background ላይ restart ያደርጋል — bot አይቆምም"""
+    global _telethon_clients
+    for client in _telethon_clients:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    _telethon_clients = []
+
+    await _sync_all_account_groups()
+
+    listeners = db_get_all_listeners()
+    for account in listeners:
+        if not account.get("session"):
+            continue
+        try:
+            client = TelegramClient(
+                StringSession(account["session"]),
+                account["api_id"],
+                account["api_hash"]
+            )
+            await client.start()
+
+            @client.on(events.NewMessage)
+            async def handler(event, acc=account):
+                try:
+                    chat_id = event.chat_id
+                    logger.info(f"[DEBUG] Message from chat_id: {chat_id}")
+
+                    groups = db_list_groups()
+                    group_ids = [g[1] for g in groups]
+                    if chat_id not in group_ids:
+                        try:
+                            entity = await event.get_chat()
+                            group_name = getattr(entity, "title", str(chat_id))
+                            db_add_group(chat_id, group_name, is_source=False)
+                        except Exception:
+                            db_add_group(chat_id, is_source=False)
+
+                    groups = db_list_groups()
+                    source_ids = [g[1] for g in groups if g[3]]
+                    logger.info(f"[DEBUG] Source IDs: {source_ids}")
+                    logger.info(f"[DEBUG] Match: {chat_id in source_ids}")
+
+                    if chat_id not in source_ids:
+                        return
+
+                    sender = await event.get_sender()
+                    if not sender or sender.bot:
+                        return
+                    if sender.is_self:
+                        return
+
+                    user_id = sender.id
+
+                    check_client = await _get_client(acc)
+                    try:
+                        if await _is_admin_or_owner(check_client, user_id, chat_id):
+                            return
+                    finally:
+                        await check_client.disconnect()
+
+                    db_record_message(user_id, chat_id)
+
+                    target_str = db_get_setting("target_group_id")
+                    if not target_str:
+                        logger.info(f"[DEBUG] No target_group_id set!")
+                        return
 
                     target_group_id = int(target_str)
 
