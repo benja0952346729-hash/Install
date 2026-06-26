@@ -29,14 +29,6 @@ def init_userbot_db():
     cur = conn.cursor()
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS userbot_admins (
-            user_id BIGINT PRIMARY KEY,
-            added_by BIGINT NOT NULL,
-            added_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-
-    cur.execute("""
         CREATE TABLE IF NOT EXISTS userbot_accounts (
             id SERIAL PRIMARY KEY,
             label CHAR(1) NOT NULL UNIQUE,
@@ -46,7 +38,6 @@ def init_userbot_db():
             session TEXT DEFAULT NULL,
             is_active BOOLEAN DEFAULT TRUE,
             flood_until TIMESTAMP DEFAULT NULL,
-            is_listener BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW()
         )
     """)
@@ -101,15 +92,6 @@ def init_userbot_db():
     """)
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS userbot_daily_adds (
-            account_label CHAR(1) NOT NULL,
-            add_date DATE NOT NULL DEFAULT CURRENT_DATE,
-            count INTEGER DEFAULT 0,
-            PRIMARY KEY (account_label, add_date)
-        )
-    """)
-
-    cur.execute("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS label CHAR(1) UNIQUE
     """)
@@ -153,70 +135,19 @@ def init_userbot_db():
         WHERE is_source = TRUE
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS userbot_daily_adds (
+            account_label CHAR(1) NOT NULL,
+            add_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (account_label, add_date)
+        )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
     logger.info("✅ Userbot DB tables ready")
-
-
-# ============================================================
-# ADMIN DB HELPERS
-# ============================================================
-
-def db_add_uadmin(user_id: int, added_by: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO userbot_admins (user_id, added_by)
-        VALUES (%s, %s)
-        ON CONFLICT (user_id) DO NOTHING
-    """, (user_id, added_by))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def db_remove_uadmin(user_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM userbot_admins WHERE user_id=%s", (user_id,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def db_list_uadmins():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT user_id, added_by, added_at FROM userbot_admins ORDER BY added_at")
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return rows
-
-
-def db_is_uadmin(user_id: int) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM userbot_admins WHERE user_id=%s", (user_id,))
-    exists = cur.fetchone() is not None
-    cur.close()
-    conn.close()
-    return exists
-
-
-# ============================================================
-# ADMIN CHECK
-# ============================================================
-
-def _is_main_admin(user_id: int) -> bool:
-    return user_id in ADMIN_IDS
-
-
-def _is_admin(user_id: int) -> bool:
-    if user_id in ADMIN_IDS:
-        return True
-    return db_is_uadmin(user_id)
 
 
 # ============================================================
@@ -509,6 +440,16 @@ def db_mark_user_blocked(user_id: int):
     conn.close()
 
 
+def db_is_user_blocked(user_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM userbot_blocked_users WHERE user_id=%s", (user_id,))
+    exists = cur.fetchone() is not None
+    cur.close()
+    conn.close()
+    return exists
+
+
 def db_get_all_blocked() -> set:
     conn = get_conn()
     cur = conn.cursor()
@@ -624,6 +565,17 @@ async def _get_client(account: dict) -> TelegramClient:
 # CORE ACTIONS
 # ============================================================
 
+async def _send_to_group(account: dict, group_id: int, message=None, media=None):
+    client = await _get_client(account)
+    try:
+        if media:
+            await client.send_file(group_id, media, caption=message or "")
+        else:
+            await client.send_message(group_id, message)
+    finally:
+        await client.disconnect()
+
+
 async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int):
     client = await _get_client(account)
     try:
@@ -682,20 +634,15 @@ async def _auto_detect_groups(account: dict):
 
 
 async def _sync_all_account_groups():
+    # listener accounts ያሉባቸው groups ብቻ sync ያደርጋል
     listeners = db_get_all_listeners()
     for account in listeners:
         if account.get("session"):
             await _auto_detect_groups(account)
 
 
-# ============================================================
-# TELETHON EVENT LISTENERS
-# ============================================================
-
-_telethon_clients = []
-
-
 async def _reload_listeners():
+    """Listener accounts ሲቀየር background ላይ restart ያደርጋል — bot አይቆምም"""
     global _telethon_clients
     for client in _telethon_clients:
         try:
@@ -724,12 +671,24 @@ async def _reload_listeners():
                     chat_id = event.chat_id
 
                     groups = db_list_groups()
+                    group_ids = [g[1] for g in groups]
+                    if chat_id not in group_ids:
+                        try:
+                            entity = await event.get_chat()
+                            group_name = getattr(entity, "title", str(chat_id))
+                            db_add_group(chat_id, group_name, is_source=False)
+                        except Exception:
+                            db_add_group(chat_id, is_source=False)
+
+                    groups = db_list_groups()
                     source_ids = [g[1] for g in groups if g[3]]
                     if chat_id not in source_ids:
                         return
 
                     sender = await event.get_sender()
-                    if not sender or sender.bot or sender.is_self:
+                    if not sender or sender.bot:
+                        return
+                    if sender.is_self:
                         return
 
                     user_id = sender.id
@@ -771,11 +730,22 @@ async def _reload_listeners():
             logger.warning(f"[Reload] {account['phone']}: {e}")
 
 
+# ============================================================
+# CLEANUP LOOP
+# ============================================================
+
 async def _cleanup_loop():
     while True:
         await asyncio.sleep(3600)
         db_cleanup_old_messages(24)
         logger.info("✅ Old messages cleaned up")
+
+
+# ============================================================
+# TELETHON EVENT LISTENERS
+# ============================================================
+
+_telethon_clients = []
 
 
 async def start_listeners():
@@ -791,129 +761,32 @@ _pending_sessions: dict = {}
 
 
 # ============================================================
-# COMMAND HANDLERS
+# ADMIN CHECK
 # ============================================================
 
-async def cmd_adduadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
-        return
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("❌ Format: /adduadmin user_id")
-        return
-    try:
-        user_id = int(args[1])
-        db_add_uadmin(user_id, update.effective_user.id)
-        await update.message.reply_text(f"✅ {user_id} userbot admin ሆነ!")
-    except ValueError:
-        await update.message.reply_text("❌ User ID ቁጥር መሆን አለበት!")
+def _is_admin(user_id: int) -> bool:
+    return user_id in ADMIN_IDS
 
 
-async def cmd_removeuadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
-        return
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("❌ Format: /removeuadmin user_id")
-        return
-    try:
-        user_id = int(args[1])
-        db_remove_uadmin(user_id)
-        await update.message.reply_text(f"✅ {user_id} userbot admin ተወጣ!")
-    except ValueError:
-        await update.message.reply_text("❌ User ID ቁጥር መሆን አለበት!")
-
-
-async def cmd_listuadmins(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
-        return
-    rows = db_list_uadmins()
-    if not rows:
-        await update.message.reply_text("📭 Userbot admin የለም")
-        return
-    lines = ["👥 Userbot Admins:\n"]
-    for user_id, added_by, added_at in rows:
-        at = added_at.strftime("%m/%d %H:%M") if added_at else "?"
-        lines.append(f"🔹 {user_id} (by {added_by}) — {at}")
-    await update.message.reply_text("\n".join(lines))
-
-
-async def cmd_setuserapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
-        return
-    args = update.message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await update.message.reply_text("❌ Format: /setuserapi api_id api_hash")
-        return
-    try:
-        api_id = int(args[1])
-        api_hash = args[2]
-        db_set_setting("userbot_api_id", str(api_id))
-        db_set_setting("userbot_api_hash", api_hash)
-        await update.message.reply_text(
-            f"✅ Worker API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
-
-
-async def cmd_setuserapi2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
-        return
-    args = update.message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await update.message.reply_text("❌ Format: /setuserapi2 api_id api_hash")
-        return
-    try:
-        api_id = int(args[1])
-        api_hash = args[2]
-        db_set_setting("userbot_api_id2", str(api_id))
-        db_set_setting("userbot_api_hash2", api_hash)
-        await update.message.reply_text(
-            f"✅ Listener API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}"
-        )
-    except ValueError:
-        await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
-
-
-def _get_api_for_account(is_listener: bool) -> tuple:
-    if is_listener:
-        api_id2 = db_get_setting("userbot_api_id2")
-        api_hash2 = db_get_setting("userbot_api_hash2")
-        if api_id2 and api_hash2:
-            return int(api_id2), api_hash2
-    api_id = db_get_setting("userbot_api_id")
-    api_hash = db_get_setting("userbot_api_hash")
-    if api_id and api_hash:
-        return int(api_id), api_hash
-    return None, None
-
+# ============================================================
+# COMMAND HANDLERS
+# ============================================================
 
 async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
-    args = update.message.text.split(maxsplit=2)
-    if len(args) < 3:
+    args = update.message.text.split(maxsplit=4)
+    if len(args) < 5:
         await update.message.reply_text(
-            "❌ Format:\n/addaccount label +phone\n\n"
-            "ምሳሌ:\n/addaccount a +251911234567\n\n"
-            "⚠️ API ቀድሞ /setuserapi ተቀምጦ መሆን አለበት!"
+            "❌ Format:\n/addaccount label api_id api_hash +phone\n\n"
+            "ምሳሌ:\n/addaccount a 12345 abc123 +251911234567"
         )
         return
     try:
         label = args[1].lower()
-        phone = args[2]
-        api_id, api_hash = _get_api_for_account(is_listener=False)
-        if not api_id or not api_hash:
-            await update.message.reply_text(
-                "❌ API አልተቀመጠም!\n/setuserapi api_id api_hash ይጠቀም"
-            )
-            return
+        api_id = int(args[2])
+        api_hash = args[3]
+        phone = args[4]
         db_add_account(label, api_id, api_hash, phone)
         await update.message.reply_text(
             f"✅ Account [{label}] {phone} ተጨመረ!\n\n"
@@ -1021,26 +894,7 @@ async def cmd_setlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {phone} አልተገኘም!")
         return
     db_set_listener(phone, True)
-
-    # listener api2 ካለ → account api ይቀይር
-    api_id2, api_hash2 = _get_api_for_account(is_listener=True)
-    if api_id2 and api_hash2:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute(
-            "UPDATE userbot_accounts SET api_id=%s, api_hash=%s WHERE phone=%s",
-            (api_id2, api_hash2, phone)
-        )
-        conn.commit()
-        cur.close()
-        conn.close()
-        api_note = "\n🔑 Listener API ተቀምጧል"
-    else:
-        api_note = "\n⚠️ Listener API የለም — Worker API ይጠቀማል"
-
-    await update.message.reply_text(
-        f"✅ [{account['label']}] {phone} → Listener ሆነ!{api_note}\n🔄 Reloading..."
-    )
+    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Listener ሆነ!\n👂 Add አያደርግም፣ source group ብቻ ያያል።\n🔄 Reloading...")
     asyncio.create_task(_reload_listeners())
 
 
@@ -1057,7 +911,7 @@ async def cmd_unsetlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {phone} አልተገኘም!")
         return
     db_set_listener(phone, False)
-    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Worker ሆነ!\n🔄 Reloading...")
+    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Worker ሆነ!\n⚙️ Add ያደርጋል።\n🔄 Reloading...")
     asyncio.create_task(_reload_listeners())
 
 
@@ -1191,8 +1045,8 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
                 await message.edit_text(text)
             else:
                 await message.reply_text(text)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(f"[listgroups empty] {e}")
         return
 
     total = len(rows)
@@ -1227,9 +1081,12 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
                 f"#{num} ✅ Connect",
                 callback_data=f"grp_connect:{group_id}:{page}"
             )
-        remove_btn = InlineKeyboardButton("❌", callback_data=f"grp_remove:{group_id}:{page}")
+        remove_btn = InlineKeyboardButton(
+            "❌", callback_data=f"grp_remove:{group_id}:{page}"
+        )
         keyboard.append([connect_btn, remove_btn])
 
+    # Pagination row
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grp_page:{page-1}"))
@@ -1238,6 +1095,7 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
         nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grp_page:{page+1}"))
     keyboard.append(nav_row)
 
+    # Auto-add toggle + sync row
     toggle_btn = InlineKeyboardButton(
         "🔴 Pause Auto-Add" if auto_add_on else "🟢 Resume Auto-Add",
         callback_data="grp_autoadd_toggle"
@@ -1253,11 +1111,11 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
         else:
             await message.reply_text(text, reply_markup=reply_markup)
     except Exception as e:
-        logger.warning(f"[listgroups] {e}")
+        logger.warning(f"[listgroups edit failed] {e}")
         try:
             await message.reply_text(text, reply_markup=reply_markup)
-        except Exception:
-            pass
+        except Exception as e2:
+            logger.warning(f"[listgroups reply failed] {e2}")
 
 
 async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1447,8 +1305,9 @@ async def _do_broadcast(msg, users: list, status_msg):
             failed += 1
         except Exception as e:
             err = str(e).lower()
-            if "blocked" in err or "privacy" in err:
+            if "blocked" in err or "user is blocked" in err or "privacy" in err:
                 db_mark_user_blocked(user_id)
+                logger.info(f"[Broadcast] {user_id} blocked → marked")
             else:
                 logger.warning(f"[Broadcast] {user_id}: {e}")
             failed += 1
@@ -1483,11 +1342,65 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Broadcast ላኪ users የሉም")
         return
 
-    total = len(recent_users)
+    target_str = db_get_setting("target_group_id")
+    active_str = db_get_setting("active_group_id")
+    target_group_id = int(target_str) if target_str else None
+    active_group_id = int(active_str) if active_str else None
+
+    skip_user_ids = set()
+    check_acc = get_next_account()
+    if check_acc and (target_group_id or active_group_id):
+        try:
+            check_client = await _get_client(check_acc)
+            try:
+                for gid in [target_group_id, active_group_id]:
+                    if not gid:
+                        continue
+                    try:
+                        async for member in check_client.iter_participants(gid):
+                            skip_user_ids.add(member.id)
+                    except Exception as e:
+                        logger.warning(f"[Broadcast filter] group {gid}: {e}")
+            finally:
+                await check_client.disconnect()
+        except Exception as e:
+            logger.warning(f"[Broadcast filter] {e}")
+
+    filtered_users = []
+    check_groups = db_list_groups()
+    check_group_ids = [g[1] for g in check_groups]
+
+    for user_id in recent_users:
+        if user_id in skip_user_ids:
+            continue
+
+        is_admin_user = False
+        for gid in check_group_ids:
+            check_acc2 = get_next_account()
+            if not check_acc2:
+                break
+            try:
+                check_client = await _get_client(check_acc2)
+                try:
+                    if await _is_admin_or_owner(check_client, user_id, gid):
+                        is_admin_user = True
+                        break
+                finally:
+                    await check_client.disconnect()
+            except Exception:
+                pass
+        if not is_admin_user:
+            filtered_users.append(user_id)
+
+    if not filtered_users:
+        await update.message.reply_text("📭 Broadcast ላኪ users የሉም")
+        return
+
+    total = len(filtered_users)
     status_msg = await update.message.reply_text(
-        f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}"
+        f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}\n\n⚡ Background ይሰራል!"
     )
-    asyncio.create_task(_do_broadcast(update.message, recent_users, status_msg))
+    asyncio.create_task(_do_broadcast(update.message, filtered_users, status_msg))
 
 
 async def cmd_myapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1535,6 +1448,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         daily_str = f" [{daily}/{DAILY_ADD_LIMIT}]" if not is_listener else ""
         acc_lines.append(f"  {status}{role}[{label}] {phone} {has_session}{daily_str}{flood}")
 
+    # ✅ FIX — source groups ብቻ ያሳይ
     source_groups = [g for g in groups if g[3]]
     grp_lines = []
     for _, group_id, group_name, is_source in source_groups:
@@ -1549,43 +1463,29 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     auto_add_on = (db_get_setting("auto_add_enabled") or "true") == "true"
     auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
 
-    # uadmins
-    uadmins = db_list_uadmins()
-    uadmin_lines = [f"  🔹 {r[0]}" for r in uadmins] if uadmins else ["  📭 የለም"]
-
-    # API info
-    api_id1 = db_get_setting("userbot_api_id") or "❌ አልተቀመጠም"
-    api_id2 = db_get_setting("userbot_api_id2") or "❌ አልተቀመጠም"
-
     text = (
         "🤖 Userbot Status & Commands\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"🤖 Auto-Add: {auto_status}\n"
         f"🟢 Active Group: {active_group}\n"
         f"🎯 Target Group: {target_group}\n\n"
-        f"🔑 API (Worker): {api_id1}\n"
-        f"🔑 API (Listener): {api_id2}\n\n"
         "👤 Accounts:\n" +
         ("\n".join(acc_lines) if acc_lines else "  📭 የለም") +
         f"\n\n🏠 Source Groups ({len(source_groups)}/{len(groups)}):\n" +
-        ("\n".join(grp_lines) if grp_lines else "  📭 የለም") +
-        "\n\n👥 Userbot Admins:\n" +
-        "\n".join(uadmin_lines) +
+        ("\n".join(grp_lines) if grp_lines else "  📭 የለም (use /listgroups to connect)") +
         "\n\n━━━━━━━━━━━━━━━━\n"
         "⚙️ Setup:\n"
-        "/setuserapi api_id api_hash\n"
-        "/setuserapi2 api_id api_hash\n"
-        "/addaccount a +phone\n"
+        "/addaccount a api_id api_hash +phone\n"
         "/startsession +phone\n"
         "/verifycode +phone code\n"
         "/verify2fa +phone password\n"
-        "/setlistener +phone\n"
-        "/unsetlistener +phone\n"
+        "/setlistener +phone — Listener ያድርግ (👂)\n"
+        "/unsetlistener +phone — Worker ያድርግ (⚙️)\n"
         "/listaccounts\n"
         "/deleteaccount +phone\n"
         "/myapi\n\n"
-        "/listgroups\n"
-        "/syncgroups\n"
+        "/listgroups — groups ✅/❌ buttons ጋር\n"
+        "/syncgroups — userbot ያለባቸው ሁሉ ያምጣ\n"
         "/addgroup -100xxxxxxx\n"
         "/deletegroup -100xxxxxxx\n\n"
         "/setactivegroup -100xxxxxxx\n"
@@ -1594,12 +1494,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "⚡ Send:\n"
         "/a /b /c /d /e መልዕክት\n\n"
         "📢 Broadcast:\n"
-        "/broadcast መልዕክት\n\n"
-        "━━━━━━━━━━━━━━━━\n"
-        "👥 Admin (main admin ብቻ):\n"
-        "/adduadmin user_id\n"
-        "/removeuadmin user_id\n"
-        "/listuadmins\n"
+        "/broadcast መልዕክት\n"
     )
     await update.message.reply_text(text)
 
@@ -1613,14 +1508,6 @@ async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 def register_userbot_handlers(app):
-    # Main admin only
-    app.add_handler(CommandHandler("adduadmin", cmd_adduadmin))
-    app.add_handler(CommandHandler("removeuadmin", cmd_removeuadmin))
-    app.add_handler(CommandHandler("listuadmins", cmd_listuadmins))
-    app.add_handler(CommandHandler("setuserapi", cmd_setuserapi))
-    app.add_handler(CommandHandler("setuserapi2", cmd_setuserapi2))
-
-    # All userbot admins
     app.add_handler(CommandHandler("addaccount", cmd_addaccount))
     app.add_handler(CommandHandler("startsession", cmd_startsession))
     app.add_handler(CommandHandler("verifycode", cmd_verifycode))
@@ -1640,6 +1527,15 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("c", cmd_c))
     app.add_handler(CommandHandler("d", cmd_d))
     app.add_handler(CommandHandler("e", cmd_e))
+
+    for _label, _handler in [("a", cmd_a), ("b", cmd_b), ("c", cmd_c), ("d", cmd_d), ("e", cmd_e)]:
+        app.add_handler(MessageHandler(
+            filters.ChatType.PRIVATE & filters.User(ADMIN_IDS) &
+            (filters.PHOTO | filters.VIDEO | filters.Document.ALL) &
+            filters.CaptionRegex(f"^/{_label}(\s|$)"),
+            _handler
+        ))
+
     app.add_handler(CommandHandler("myapi", cmd_myapi))
     app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
     app.add_handler(CommandHandler("status2", cmd_status2))
