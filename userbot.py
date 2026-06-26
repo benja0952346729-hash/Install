@@ -99,6 +99,10 @@ def init_userbot_db():
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
     """)
+    cur.execute("""
+        ALTER TABLE userbot_accounts
+        ADD COLUMN IF NOT EXISTS is_listener BOOLEAN DEFAULT FALSE
+    """)
 
     cur.execute("""
         DO $$
@@ -131,6 +135,15 @@ def init_userbot_db():
         WHERE is_source = TRUE
     """)
 
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS userbot_daily_adds (
+            account_label CHAR(1) NOT NULL,
+            add_date DATE NOT NULL DEFAULT CURRENT_DATE,
+            count INTEGER DEFAULT 0,
+            PRIMARY KEY (account_label, add_date)
+        )
+    """)
+
     conn.commit()
     cur.close()
     conn.close()
@@ -157,7 +170,7 @@ def db_add_account(label: str, api_id: int, api_hash: str, phone: str):
 def db_list_accounts():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, label, phone, is_active, session, flood_until FROM userbot_accounts ORDER BY label")
+    cur.execute("SELECT id, label, phone, is_active, session, flood_until, is_listener FROM userbot_accounts ORDER BY label")
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -168,7 +181,7 @@ def db_get_account_by_label(label: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until FROM userbot_accounts WHERE label=%s",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE label=%s",
         (label,)
     )
     row = cur.fetchone()
@@ -178,7 +191,8 @@ def db_get_account_by_label(label: str):
         return None
     return {
         "id": row[0], "label": row[1], "api_id": row[2], "api_hash": row[3],
-        "phone": row[4], "session": row[5], "is_active": row[6], "flood_until": row[7]
+        "phone": row[4], "session": row[5], "is_active": row[6], "flood_until": row[7],
+        "is_listener": row[8]
     }
 
 
@@ -186,7 +200,7 @@ def db_get_account_by_phone(phone: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until FROM userbot_accounts WHERE phone=%s",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE phone=%s",
         (phone,)
     )
     row = cur.fetchone()
@@ -196,7 +210,8 @@ def db_get_account_by_phone(phone: str):
         return None
     return {
         "id": row[0], "label": row[1], "api_id": row[2], "api_hash": row[3],
-        "phone": row[4], "session": row[5], "is_active": row[6], "flood_until": row[7]
+        "phone": row[4], "session": row[5], "is_active": row[6], "flood_until": row[7],
+        "is_listener": row[8]
     }
 
 
@@ -204,16 +219,43 @@ def db_get_all_accounts():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until FROM userbot_accounts WHERE is_active=TRUE ORDER BY label"
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE is_active=TRUE ORDER BY label"
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [
         {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
-         "phone": r[4], "session": r[5], "is_active": r[6], "flood_until": r[7]}
+         "phone": r[4], "session": r[5], "is_active": r[6], "flood_until": r[7],
+         "is_listener": r[8]}
         for r in rows
     ]
+
+
+def db_get_all_listeners():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE ORDER BY label"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
+         "phone": r[4], "session": r[5], "is_active": r[6], "flood_until": r[7],
+         "is_listener": r[8]}
+        for r in rows
+    ]
+
+
+def db_set_listener(phone: str, is_listener: bool):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE userbot_accounts SET is_listener=%s WHERE phone=%s", (is_listener, phone))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def db_save_session(phone: str, session: str):
@@ -430,6 +472,35 @@ def db_cleanup_old_messages(hours: int = 24):
     conn.close()
 
 
+DAILY_ADD_LIMIT = 170
+
+
+def db_get_daily_add_count(label: str) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT count FROM userbot_daily_adds
+        WHERE account_label=%s AND add_date=CURRENT_DATE
+    """, (label,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row[0] if row else 0
+
+
+def db_increment_daily_add(label: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO userbot_daily_adds (account_label, add_date, count)
+        VALUES (%s, CURRENT_DATE, 1)
+        ON CONFLICT (account_label, add_date) DO UPDATE SET count = userbot_daily_adds.count + 1
+    """, (label,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
 # ============================================================
 # ROUND ROBIN
 # ============================================================
@@ -443,7 +514,10 @@ def get_next_account():
     now = datetime.now()
     available = [
         a for a in accounts
-        if a["session"] and (a["flood_until"] is None or a["flood_until"] < now)
+        if a["session"]
+        and not a.get("is_listener")
+        and (a["flood_until"] is None or a["flood_until"] < now)
+        and db_get_daily_add_count(a["label"]) < DAILY_ADD_LIMIT
     ]
     if not available:
         return None
@@ -529,6 +603,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 group = await client.get_entity(target_group_id)
                 await client(InviteToChannelRequest(channel=group, users=[sender]))
                 db_mark_user_added(user_id, target_group_id)
+                db_increment_daily_add(account["label"])
                 logger.info(f"✅ Added {user_id} → {target_group_id}")
             except FloodWaitError as e:
                 db_set_flood(account["phone"], e.seconds)
@@ -559,38 +634,27 @@ async def _auto_detect_groups(account: dict):
 
 
 async def _sync_all_account_groups():
-    accounts = db_get_all_accounts()
-    for account in accounts:
+    # listener accounts ያሉባቸው groups ብቻ sync ያደርጋል
+    listeners = db_get_all_listeners()
+    for account in listeners:
         if account.get("session"):
             await _auto_detect_groups(account)
 
 
-# ============================================================
-# CLEANUP LOOP
-# ============================================================
-
-async def _cleanup_loop():
-    while True:
-        await asyncio.sleep(3600)
-        db_cleanup_old_messages(24)
-        logger.info("✅ Old messages cleaned up")
-
-
-# ============================================================
-# TELETHON EVENT LISTENERS
-# ============================================================
-
-_telethon_clients = []
-
-
-async def start_listeners():
+async def _reload_listeners():
+    """Listener accounts ሲቀየር background ላይ restart ያደርጋል — bot አይቆምም"""
     global _telethon_clients
-    accounts = db_get_all_accounts()
+    for client in _telethon_clients:
+        try:
+            await client.disconnect()
+        except Exception:
+            pass
+    _telethon_clients = []
 
     await _sync_all_account_groups()
-    asyncio.create_task(_cleanup_loop())
 
-    for account in accounts:
+    listeners = db_get_all_listeners()
+    for account in listeners:
         if not account.get("session"):
             continue
         try:
@@ -613,7 +677,6 @@ async def start_listeners():
                             entity = await event.get_chat()
                             group_name = getattr(entity, "title", str(chat_id))
                             db_add_group(chat_id, group_name, is_source=False)
-                            logger.info(f"✅ Auto-added: {group_name} ({chat_id})")
                         except Exception:
                             db_add_group(chat_id, is_source=False)
 
@@ -625,7 +688,6 @@ async def start_listeners():
                     sender = await event.get_sender()
                     if not sender or sender.bot:
                         return
-
                     if sender.is_self:
                         return
 
@@ -663,9 +725,32 @@ async def start_listeners():
                     logger.warning(f"[AutoAdd] {e}")
 
             _telethon_clients.append(client)
-            logger.info(f"✅ Listener started: {account['label']} {account['phone']}")
+            logger.info(f"✅ Listener reloaded: {account['label']} {account['phone']}")
         except Exception as e:
-            logger.warning(f"[Listener] {account['phone']}: {e}")
+            logger.warning(f"[Reload] {account['phone']}: {e}")
+
+
+# ============================================================
+# CLEANUP LOOP
+# ============================================================
+
+async def _cleanup_loop():
+    while True:
+        await asyncio.sleep(3600)
+        db_cleanup_old_messages(24)
+        logger.info("✅ Old messages cleaned up")
+
+
+# ============================================================
+# TELETHON EVENT LISTENERS
+# ============================================================
+
+_telethon_clients = []
+
+
+async def start_listeners():
+    asyncio.create_task(_cleanup_loop())
+    await _reload_listeners()
 
 
 # ============================================================
@@ -796,6 +881,40 @@ async def cmd_verify2fa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
+async def cmd_setlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("❌ Format: /setlistener +phone")
+        return
+    phone = args[1]
+    account = db_get_account_by_phone(phone)
+    if not account:
+        await update.message.reply_text(f"❌ {phone} አልተገኘም!")
+        return
+    db_set_listener(phone, True)
+    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Listener ሆነ!\n👂 Add አያደርግም፣ source group ብቻ ያያል።\n🔄 Reloading...")
+    asyncio.create_task(_reload_listeners())
+
+
+async def cmd_unsetlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("❌ Format: /unsetlistener +phone")
+        return
+    phone = args[1]
+    account = db_get_account_by_phone(phone)
+    if not account:
+        await update.message.reply_text(f"❌ {phone} አልተገኘም!")
+        return
+    db_set_listener(phone, False)
+    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Worker ሆነ!\n⚙️ Add ያደርጋል።\n🔄 Reloading...")
+    asyncio.create_task(_reload_listeners())
+
+
 async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -805,14 +924,17 @@ async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     now = datetime.now()
     lines = ["📋 Accounts:\n"]
-    for aid, label, phone, is_active, session, flood_until in rows:
+    for aid, label, phone, is_active, session, flood_until, is_listener in rows:
         status = "✅" if is_active else "❌"
         has_session = "🔑" if session else "⚠️ no session"
+        role = "👂 Listener" if is_listener else "⚙️ Worker"
         flood = ""
         if flood_until and flood_until > now:
             remaining = int((flood_until - now).total_seconds() / 60)
             flood = f" 🚫 flood {remaining}min"
-        lines.append(f"{status} [{label}] {phone} {has_session}{flood}")
+        daily = db_get_daily_add_count(label) if not is_listener else 0
+        daily_str = f" [{daily}/{DAILY_ADD_LIMIT}]" if not is_listener else ""
+        lines.append(f"{status} [{label}] {phone} {has_session} {role}{daily_str}{flood}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1314,14 +1436,17 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     now = datetime.now()
 
     acc_lines = []
-    for _, label, phone, is_active, session, flood_until in accounts:
+    for _, label, phone, is_active, session, flood_until, is_listener in accounts:
         status = "✅" if is_active else "❌"
         has_session = "🔑" if session else "⚠️"
+        role = "👂" if is_listener else "⚙️"
         flood = ""
         if flood_until and flood_until > now:
             remaining = int((flood_until - now).total_seconds() / 60)
             flood = f" 🚫{remaining}min"
-        acc_lines.append(f"  {status}[{label}] {phone} {has_session}{flood}")
+        daily = db_get_daily_add_count(label) if not is_listener else 0
+        daily_str = f" [{daily}/{DAILY_ADD_LIMIT}]" if not is_listener else ""
+        acc_lines.append(f"  {status}{role}[{label}] {phone} {has_session}{daily_str}{flood}")
 
     # ✅ FIX — source groups ብቻ ያሳይ
     source_groups = [g for g in groups if g[3]]
@@ -1354,6 +1479,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/startsession +phone\n"
         "/verifycode +phone code\n"
         "/verify2fa +phone password\n"
+        "/setlistener +phone — Listener ያድርግ (👂)\n"
+        "/unsetlistener +phone — Worker ያድርግ (⚙️)\n"
         "/listaccounts\n"
         "/deleteaccount +phone\n"
         "/myapi\n\n"
@@ -1387,6 +1514,8 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("verify2fa", cmd_verify2fa))
     app.add_handler(CommandHandler("listaccounts", cmd_listaccounts))
     app.add_handler(CommandHandler("deleteaccount", cmd_deleteaccount))
+    app.add_handler(CommandHandler("setlistener", cmd_setlistener))
+    app.add_handler(CommandHandler("unsetlistener", cmd_unsetlistener))
     app.add_handler(CommandHandler("addgroup", cmd_addgroup))
     app.add_handler(CommandHandler("syncgroups", cmd_syncgroups))
     app.add_handler(CommandHandler("listgroups", cmd_listgroups))
