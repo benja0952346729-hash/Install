@@ -618,6 +618,12 @@ async def _get_client(account: dict) -> TelegramClient:
         account["api_hash"]
     )
     await client.connect()
+    # ✅ FIX: client's own entity cache populate ለማድረግ — resolve failures ለማስቀረት
+    try:
+        dialogs = await client.get_dialogs()
+        logger.info(f"[_get_client] ✅ [{account.get('label')}] dialogs preloaded: {len(dialogs)} chats cached")
+    except Exception as e:
+        logger.warning(f"[_get_client] ❌ [{account.get('label')}] dialogs preload failed: {e}")
     return client
 
 
@@ -742,11 +748,14 @@ async def _add_workers_to_source_group(group_id: int):
         logger.info("[WorkerAutoJoin] ⏭ worker accounts የለም")
         return
 
+    logger.info(f"[WorkerAutoJoin] 🚀 starting — group={group_id}, workers={[w['label'] for w in workers]}")
+
     listener_account = listeners[0]
     listener_client = await _get_client(listener_account)
     try:
         try:
             group_entity = await listener_client.get_entity(group_id)
+            logger.info(f"[WorkerAutoJoin] ✅ listener resolved group {group_id}: {getattr(group_entity, 'title', group_entity)}")
         except Exception as e:
             logger.warning(f"[WorkerAutoJoin] ❌ listener cannot resolve group {group_id}: {e}")
             return
@@ -756,11 +765,13 @@ async def _add_workers_to_source_group(group_id: int):
         try:
             async for participant in listener_client.iter_participants(group_entity):
                 existing_member_ids.add(participant.id)
+            logger.info(f"[WorkerAutoJoin] 📋 current members in group: {len(existing_member_ids)}")
         except Exception as e:
             logger.warning(f"[WorkerAutoJoin] ⚠️ cannot list participants: {e}")
 
         added_count = 0
         skipped_count = 0
+        failed_count = 0
 
         for worker in workers:
             try:
@@ -768,6 +779,7 @@ async def _add_workers_to_source_group(group_id: int):
                 try:
                     worker_me = await worker_client.get_me()
                     worker_user_id = worker_me.id
+                    logger.info(f"[WorkerAutoJoin] 🔍 [{worker['label']}] own id={worker_user_id}")
                 finally:
                     await worker_client.disconnect()
 
@@ -777,16 +789,24 @@ async def _add_workers_to_source_group(group_id: int):
                     continue
 
                 # ✅ Listener ራሱ worker'ን ይጨምር
-                worker_input = await listener_client.get_entity(worker_user_id)
+                try:
+                    worker_input = await listener_client.get_entity(worker_user_id)
+                    logger.info(f"[WorkerAutoJoin] ✅ [{worker['label']}] resolved by listener")
+                except Exception as e:
+                    logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] listener CANNOT resolve worker entity: {e}")
+                    failed_count += 1
+                    continue
+
                 await listener_client(InviteToChannelRequest(channel=group_entity, users=[worker_input]))
                 added_count += 1
-                logger.info(f"[WorkerAutoJoin] ✅ [{worker['label']}] added to source group {group_id}")
+                logger.info(f"[WorkerAutoJoin] ✅✅ [{worker['label']}] SUCCESSFULLY added to source group {group_id}")
 
             except FloodWaitError as e:
                 db_set_flood(listener_account["phone"], e.seconds)
-                logger.warning(f"[WorkerAutoJoin] Flood on listener: {e.seconds}s — stopping")
+                logger.warning(f"[WorkerAutoJoin] 🚫 Flood on listener: {e.seconds}s — stopping")
                 break
             except Exception as e:
+                failed_count += 1
                 logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] failed: {e}")
 
             # ✅ 15-25s random gap — Telegram flood ageda
@@ -794,7 +814,7 @@ async def _add_workers_to_source_group(group_id: int):
             logger.info(f"[WorkerAutoJoin] ⏳ waiting {gap:.1f}s before next worker...")
             await asyncio.sleep(gap)
 
-        logger.info(f"[WorkerAutoJoin] 🏁 done — added: {added_count}, skipped: {skipped_count}")
+        logger.info(f"[WorkerAutoJoin] 🏁 FINAL RESULT — added: {added_count}, skipped: {skipped_count}, failed: {failed_count}")
 
     finally:
         await listener_client.disconnect()
