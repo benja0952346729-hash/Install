@@ -621,11 +621,10 @@ async def _get_client(account: dict) -> TelegramClient:
 
 
 # ============================================================
-# NORMALIZE HELPERS — ✅ FIX
+# NORMALIZE HELPERS
 # ============================================================
 
 def _normalize_chat_id(event) -> int:
-    """Telethon event ውስጥ ትክክለኛ chat ID ያምጣ"""
     peer = event.message.peer_id
     if hasattr(peer, 'channel_id'):
         return int(f"-100{peer.channel_id}")
@@ -635,7 +634,6 @@ def _normalize_chat_id(event) -> int:
 
 
 def _normalize_source_id(gid) -> int:
-    """DB ውስጥ ያለው ID normalize ያድርግ — -100 prefix ያረጋግጣል"""
     s = str(abs(int(gid)))
     if not s.startswith("100"):
         s = "100" + s
@@ -722,7 +720,7 @@ async def _sync_all_account_groups():
 
 
 # ============================================================
-# TELETHON EVENT LISTENERS
+# TELETHON EVENT LISTENERS — ✅ FIX: source groups ብቻ
 # ============================================================
 
 _telethon_clients = []
@@ -739,6 +737,16 @@ async def _reload_listeners():
 
     await _sync_all_account_groups()
 
+    # ✅ source groups ከDB ያምጣ — አንድ ጊዜ ብቻ
+    groups = db_list_groups()
+    source_ids = [_normalize_source_id(g[1]) for g in groups if g[3]]
+
+    if not source_ids:
+        logger.warning("[Reload] ⚠️ source group የለም — listeners አይጀምሩም")
+        return
+
+    logger.info(f"[Reload] ✅ source groups: {source_ids}")
+
     listeners = db_get_all_listeners()
     for account in listeners:
         if not account.get("session"):
@@ -751,31 +759,20 @@ async def _reload_listeners():
             )
             await client.start()
 
-            @client.on(events.NewMessage)
+            # ✅ source groups ብቻ ያዳምጣል
+            @client.on(events.NewMessage(chats=source_ids))
             async def handler(event, acc=account):
                 try:
-                    # ✅ FIX — ትክክለኛ chat ID
                     chat_id = _normalize_chat_id(event)
 
-                    groups = db_list_groups()
-                    # ✅ FIX — source IDs normalize
-                    source_ids = [_normalize_source_id(g[1]) for g in groups if g[3]]
-
-                    logger.info(f"[AutoAdd] 📨 msg from chat {chat_id} | source_ids={source_ids}")
-
-                    if chat_id not in source_ids:
-                        logger.info(f"[AutoAdd] ⏭ chat {chat_id} not in source groups — skip")
-                        return
+                    logger.info(f"[AutoAdd] 📨 msg from chat {chat_id}")
 
                     sender = await event.get_sender()
                     if not sender:
-                        logger.info(f"[AutoAdd] ⏭ sender None — skip")
                         return
                     if sender.bot:
-                        logger.info(f"[AutoAdd] ⏭ sender is bot — skip")
                         return
                     if sender.is_self:
-                        logger.info(f"[AutoAdd] ⏭ sender is self — skip")
                         return
 
                     user_id = sender.id
@@ -794,11 +791,10 @@ async def _reload_listeners():
 
                     target_str = db_get_setting("target_group_id")
                     if not target_str:
-                        logger.warning(f"[AutoAdd] ⚠️ target_group_id አልተቀመጠም!")
+                        logger.warning("[AutoAdd] ⚠️ target_group_id አልተቀመጠም!")
                         return
 
                     target_group_id = int(target_str)
-                    logger.info(f"[AutoAdd] 🎯 target group: {target_group_id}")
 
                     if db_is_user_added(user_id, target_group_id):
                         logger.info(f"[AutoAdd] ⏭ user {user_id} already added — skip")
@@ -806,15 +802,15 @@ async def _reload_listeners():
 
                     auto_add = db_get_setting("auto_add_enabled") or "true"
                     if auto_add == "false":
-                        logger.info(f"[AutoAdd] ⏭ auto_add disabled — skip")
+                        logger.info("[AutoAdd] ⏭ auto_add disabled — skip")
                         return
 
                     chosen = get_next_account()
                     if not chosen:
-                        logger.warning(f"[AutoAdd] ⚠️ available worker account የለም!")
+                        logger.warning("[AutoAdd] ⚠️ available worker account የለም!")
                         return
 
-                    logger.info(f"[AutoAdd] ⚙️ using account [{chosen['label']}] to add {user_id}")
+                    logger.info(f"[AutoAdd] ⚙️ using [{chosen['label']}] to add {user_id}")
                     await asyncio.sleep(random.uniform(2, 5))
                     await _contact_and_add_by_sender(chosen, sender, target_group_id)
 
@@ -822,7 +818,7 @@ async def _reload_listeners():
                     logger.warning(f"[AutoAdd] ❌ Error: {e}")
 
             _telethon_clients.append(client)
-            logger.info(f"✅ Listener reloaded: {account['label']} {account['phone']}")
+            logger.info(f"✅ Listener reloaded: [{account['label']}] {account['phone']}")
         except Exception as e:
             logger.warning(f"[Reload] {account['phone']}: {e}")
 
@@ -1351,8 +1347,12 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "grp_connect":
         db_set_group_source(group_id, True)
+        # ✅ source group ሲጨመር listeners reload ያድርግ
+        asyncio.create_task(_reload_listeners())
     elif action == "grp_disconnect":
         db_set_group_source(group_id, False)
+        # ✅ source group ሲወጣ listeners reload ያድርግ
+        asyncio.create_task(_reload_listeners())
     elif action == "grp_remove":
         db_delete_group(group_id)
 
