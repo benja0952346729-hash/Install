@@ -10,7 +10,6 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.channels import InviteToChannelRequest
-from telethon.tl.types import InputPeerChannel
 from telethon.errors import FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -608,7 +607,7 @@ async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
 
 
 # ============================================================
-# TELETHON CLIENT
+# TELETHON CLIENT — ✅ source + target ብቻ resolve
 # ============================================================
 
 async def _get_client(account: dict) -> TelegramClient:
@@ -619,11 +618,35 @@ async def _get_client(account: dict) -> TelegramClient:
         account["api_hash"]
     )
     await client.connect()
+    logger.info(f"[_get_client] 🔌 [{account.get('label')}] connected")
+
+    # ✅ target group resolve
     try:
-        dialogs = await client.get_dialogs()
-        logger.info(f"[_get_client] ✅ [{account.get('label')}] dialogs preloaded: {len(dialogs)} chats cached")
+        target_str = db_get_setting("target_group_id")
+        if target_str:
+            await client.get_input_entity(int(target_str))
+            logger.info(f"[_get_client] ✅ [{account.get('label')}] target group cached: {target_str}")
+        else:
+            logger.warning(f"[_get_client] ⚠️ [{account.get('label')}] target_group_id አልተቀመጠም")
     except Exception as e:
-        logger.warning(f"[_get_client] ❌ [{account.get('label')}] dialogs preload failed: {e}")
+        logger.warning(f"[_get_client] ❌ [{account.get('label')}] target group cache failed: {e}")
+
+    # ✅ source groups resolve
+    try:
+        groups = db_list_groups()
+        source_ids = [g[1] for g in groups if g[3]]
+        if source_ids:
+            for sid in source_ids:
+                try:
+                    await client.get_input_entity(sid)
+                    logger.info(f"[_get_client] ✅ [{account.get('label')}] source group cached: {sid}")
+                except Exception as e:
+                    logger.warning(f"[_get_client] ❌ [{account.get('label')}] source {sid} cache failed: {e}")
+        else:
+            logger.warning(f"[_get_client] ⚠️ [{account.get('label')}] source group የለም")
+    except Exception as e:
+        logger.warning(f"[_get_client] ❌ [{account.get('label')}] source groups error: {e}")
+
     return client
 
 
@@ -659,13 +682,15 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
         last_name = sender.last_name or ""
         phone = sender.phone or ""
 
+        logger.info(f"[Add] [{account['label']}] starting add for user={user_id} → target={target_group_id}")
+
         # ✅ STEP 1 — worker's own cache
         resolved_user = None
         try:
             resolved_user = await client.get_entity(user_id)
             logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved from own cache")
         except Exception as e:
-            logger.info(f"[Resolve] [{account['label']}] {user_id} not in cache yet: {e}")
+            logger.info(f"[Resolve] [{account['label']}] {user_id} not in cache: {e}")
 
         # ✅ STEP 2 — contact ለማድረግ ይሞከር
         if not resolved_user:
@@ -682,48 +707,47 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                     logger.info(f"[Contact] ✅ [{account['label']}] contacted {user_id}")
                 except FloodWaitError as e:
                     db_set_flood(account["phone"], e.seconds)
-                    logger.warning(f"[Contact] Flood {account['label']}: {e.seconds}s")
+                    logger.warning(f"[Contact] 🚫 Flood [{account['label']}]: {e.seconds}s")
                     return
                 except Exception as e:
-                    logger.warning(f"[Contact] [{account['label']}] {user_id}: {e}")
+                    logger.warning(f"[Contact] ❌ [{account['label']}] {user_id}: {e}")
 
             # ✅ STEP 3 — contact ካደረገ በኋላ ድጋሚ resolve
             try:
                 resolved_user = await client.get_entity(user_id)
                 logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved after contact")
             except Exception as e:
-                logger.warning(f"[Resolve] [{account['label']}] still cannot resolve {user_id}: {e}")
+                logger.warning(f"[Resolve] ❌ [{account['label']}] still cannot resolve {user_id}: {e}")
 
         # ✅ STEP 4 — ምንም ካልሰራ → skip
         if not resolved_user:
-            logger.warning(f"[Add] [{account['label']}] ⏭ user {user_id} unresolvable — privacy restricted, skip")
+            logger.warning(f"[Add] ⏭ [{account['label']}] user {user_id} unresolvable — privacy restricted, skip")
             return
 
         if not db_is_user_added(user_id, target_group_id):
             try:
-                # ✅ FIX: get_entity ሳይሆን InputPeerChannel ቀጥታ ተጠቀም
-                raw_id = abs(target_group_id)
-                if str(raw_id).startswith("100"):
-                    raw_id = int(str(raw_id)[3:])
-                group = InputPeerChannel(channel_id=raw_id, access_hash=0)
+                # ✅ FIX: get_input_entity — cache ውስጥ ያለውን ቀጥታ ይጠቀማል
+                group = await client.get_input_entity(target_group_id)
+                logger.info(f"[Add] ✅ [{account['label']}] target group resolved: {target_group_id}")
 
                 await client(InviteToChannelRequest(channel=group, users=[resolved_user]))
                 db_mark_user_added(user_id, target_group_id)
                 db_increment_daily_add(account["label"])
-                logger.info(f"✅ Added {user_id} → {target_group_id}")
+                logger.info(f"[Add] ✅✅ [{account['label']}] user {user_id} → {target_group_id} SUCCESS!")
             except FloodWaitError as e:
                 db_set_flood(account["phone"], e.seconds)
-                logger.warning(f"[Add] Flood {account['label']}: {e.seconds}s")
+                logger.warning(f"[Add] 🚫 Flood [{account['label']}]: {e.seconds}s")
             except Exception as e:
-                logger.warning(f"[Add] [{account['label']}] {user_id}: {e}")
+                logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
         else:
-            logger.info(f"[AutoAdd-DEBUG] ⏭ user={user_id} already added to {target_group_id} — skip add step")
+            logger.info(f"[Add] ⏭ [{account['label']}] user={user_id} already added to {target_group_id} — skip")
     finally:
         await client.disconnect()
+        logger.info(f"[_get_client] 🔌 [{account.get('label')}] disconnected")
 
 
 # ============================================================
-# ✅ NEW — WORKER AUTO-JOIN TO SOURCE GROUP
+# WORKER AUTO-JOIN TO SOURCE GROUP
 # ============================================================
 
 async def _add_workers_to_source_group(group_id: int):
@@ -802,7 +826,7 @@ async def _add_workers_to_source_group(group_id: int):
             logger.info(f"[WorkerAutoJoin] ⏳ waiting {gap:.1f}s before next worker...")
             await asyncio.sleep(gap)
 
-        logger.info(f"[WorkerAutoJoin] 🏁 FINAL RESULT — added: {added_count}, skipped: {skipped_count}, failed: {failed_count}")
+        logger.info(f"[WorkerAutoJoin] 🏁 FINAL — added: {added_count}, skipped: {skipped_count}, failed: {failed_count}")
 
     finally:
         await listener_client.disconnect()
@@ -908,7 +932,6 @@ async def _reload_listeners():
             async def handler(event, acc=account):
                 try:
                     chat_id = _normalize_chat_id(event)
-
                     logger.info(f"[AutoAdd] 📨 msg from chat {chat_id}")
 
                     sender = await event.get_sender()
