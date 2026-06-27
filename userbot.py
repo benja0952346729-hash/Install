@@ -725,18 +725,32 @@ async def _reload_listeners():
 
                     groups = db_list_groups()
                     source_ids = [g[1] for g in groups if g[3]]
+
+                    logger.info(f"[AutoAdd] 📨 msg from chat {chat_id} | source_ids={source_ids}")
+
                     if chat_id not in source_ids:
+                        logger.info(f"[AutoAdd] ⏭ chat {chat_id} not in source groups — skip")
                         return
 
                     sender = await event.get_sender()
-                    if not sender or sender.bot or sender.is_self:
+                    if not sender:
+                        logger.info(f"[AutoAdd] ⏭ sender None — skip")
+                        return
+                    if sender.bot:
+                        logger.info(f"[AutoAdd] ⏭ sender is bot — skip")
+                        return
+                    if sender.is_self:
+                        logger.info(f"[AutoAdd] ⏭ sender is self — skip")
                         return
 
                     user_id = sender.id
+                    logger.info(f"[AutoAdd] 👤 user {user_id} ({sender.first_name})")
 
                     check_client = await _get_client(acc)
                     try:
-                        if await _is_admin_or_owner(check_client, user_id, chat_id):
+                        is_adm = await _is_admin_or_owner(check_client, user_id, chat_id)
+                        if is_adm:
+                            logger.info(f"[AutoAdd] ⏭ user {user_id} is admin/owner — skip")
                             return
                     finally:
                         await check_client.disconnect()
@@ -745,25 +759,32 @@ async def _reload_listeners():
 
                     target_str = db_get_setting("target_group_id")
                     if not target_str:
+                        logger.warning(f"[AutoAdd] ⚠️ target_group_id አልተቀመጠም!")
                         return
 
                     target_group_id = int(target_str)
+                    logger.info(f"[AutoAdd] 🎯 target group: {target_group_id}")
 
                     if db_is_user_added(user_id, target_group_id):
+                        logger.info(f"[AutoAdd] ⏭ user {user_id} already added — skip")
                         return
 
-                    if (db_get_setting("auto_add_enabled") or "true") == "false":
+                    auto_add = db_get_setting("auto_add_enabled") or "true"
+                    if auto_add == "false":
+                        logger.info(f"[AutoAdd] ⏭ auto_add disabled — skip")
                         return
 
                     chosen = get_next_account()
                     if not chosen:
+                        logger.warning(f"[AutoAdd] ⚠️ available worker account የለም!")
                         return
 
+                    logger.info(f"[AutoAdd] ⚙️ using account [{chosen['label']}] to add {user_id}")
                     await asyncio.sleep(random.uniform(2, 5))
                     await _contact_and_add_by_sender(chosen, sender, target_group_id)
 
                 except Exception as e:
-                    logger.warning(f"[AutoAdd] {e}")
+                    logger.warning(f"[AutoAdd] ❌ Error: {e}")
 
             _telethon_clients.append(client)
             logger.info(f"✅ Listener reloaded: {account['label']} {account['phone']}")
