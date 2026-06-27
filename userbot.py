@@ -10,7 +10,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.channels import InviteToChannelRequest
-from telethon.errors import FloodWaitError
+from telethon.errors import FloodWaitError, PeerFloodError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
@@ -18,7 +18,6 @@ from database import get_conn
 from config import ADMIN_IDS
 
 logger = logging.getLogger(__name__)
-
 
 # ============================================================
 # DB INIT
@@ -46,6 +45,7 @@ def init_userbot_db():
             session TEXT DEFAULT NULL,
             is_active BOOLEAN DEFAULT TRUE,
             flood_until TIMESTAMP DEFAULT NULL,
+            spam_until TIMESTAMP DEFAULT NULL,
             is_listener BOOLEAN DEFAULT FALSE,
             created_at TIMESTAMP DEFAULT NOW()
         )
@@ -116,6 +116,10 @@ def init_userbot_db():
     cur.execute("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
+    """)
+    cur.execute("""
+        ALTER TABLE userbot_accounts
+        ADD COLUMN IF NOT EXISTS spam_until TIMESTAMP DEFAULT NULL
     """)
     cur.execute("""
         ALTER TABLE userbot_accounts
@@ -239,7 +243,7 @@ def db_add_account(label: str, api_id: int, api_hash: str, phone: str):
 def db_list_accounts():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, label, phone, is_active, session, flood_until, is_listener FROM userbot_accounts ORDER BY label")
+    cur.execute("SELECT id, label, phone, is_active, session, flood_until, spam_until, is_listener FROM userbot_accounts ORDER BY label")
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -250,7 +254,7 @@ def db_get_account_by_label(label: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE label=%s",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE label=%s",
         (label,)
     )
     row = cur.fetchone()
@@ -260,8 +264,8 @@ def db_get_account_by_label(label: str):
         return None
     return {
         "id": row[0], "label": row[1], "api_id": row[2], "api_hash": row[3],
-        "phone": row[4], "session": row[5], "is_active": row[6], "flood_until": row[7],
-        "is_listener": row[8]
+        "phone": row[4], "session": row[5], "is_active": row[6],
+        "flood_until": row[7], "spam_until": row[8], "is_listener": row[9]
     }
 
 
@@ -269,7 +273,7 @@ def db_get_account_by_phone(phone: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE phone=%s",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE phone=%s",
         (phone,)
     )
     row = cur.fetchone()
@@ -279,8 +283,8 @@ def db_get_account_by_phone(phone: str):
         return None
     return {
         "id": row[0], "label": row[1], "api_id": row[2], "api_hash": row[3],
-        "phone": row[4], "session": row[5], "is_active": row[6], "flood_until": row[7],
-        "is_listener": row[8]
+        "phone": row[4], "session": row[5], "is_active": row[6],
+        "flood_until": row[7], "spam_until": row[8], "is_listener": row[9]
     }
 
 
@@ -288,15 +292,15 @@ def db_get_all_accounts():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE is_active=TRUE ORDER BY label"
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE is_active=TRUE ORDER BY label"
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [
         {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
-         "phone": r[4], "session": r[5], "is_active": r[6], "flood_until": r[7],
-         "is_listener": r[8]}
+         "phone": r[4], "session": r[5], "is_active": r[6],
+         "flood_until": r[7], "spam_until": r[8], "is_listener": r[9]}
         for r in rows
     ]
 
@@ -305,15 +309,15 @@ def db_get_all_listeners():
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, is_listener FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE ORDER BY label"
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE ORDER BY label"
     )
     rows = cur.fetchall()
     cur.close()
     conn.close()
     return [
         {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
-         "phone": r[4], "session": r[5], "is_active": r[6], "flood_until": r[7],
-         "is_listener": r[8]}
+         "phone": r[4], "session": r[5], "is_active": r[6],
+         "flood_until": r[7], "spam_until": r[8], "is_listener": r[9]}
         for r in rows
     ]
 
@@ -344,6 +348,43 @@ def db_set_flood(phone: str, seconds: int):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def db_set_spam(phone: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    until = datetime.now() + timedelta(hours=24)
+    cur.execute("UPDATE userbot_accounts SET spam_until=%s, is_active=FALSE WHERE phone=%s", (until, phone))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_clear_spam(phone: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE userbot_accounts SET spam_until=NULL, is_active=TRUE WHERE phone=%s", (phone,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_get_spam_accounts():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener "
+        "FROM userbot_accounts WHERE spam_until IS NOT NULL AND is_listener=FALSE ORDER BY label"
+    )
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
+         "phone": r[4], "session": r[5], "is_active": r[6],
+         "flood_until": r[7], "spam_until": r[8], "is_listener": r[9]}
+        for r in rows
+    ]
 
 
 def db_delete_account(phone: str):
@@ -497,6 +538,17 @@ def db_get_recent_users(hours: int = 2):
     return [r[0] for r in rows]
 
 
+def db_get_source_users():
+    """Source group ውስጥ ያሉ recent users ሁሉ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT user_id FROM userbot_recent_messages")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [r[0] for r in rows]
+
+
 def db_mark_user_blocked(user_id: int):
     conn = get_conn()
     cur = conn.cursor()
@@ -529,9 +581,6 @@ def db_cleanup_old_messages(hours: int = 24):
     conn.commit()
     cur.close()
     conn.close()
-
-
-DAILY_ADD_LIMIT = 170
 
 
 def db_get_daily_add_count(label: str) -> int:
@@ -571,18 +620,50 @@ def get_next_account():
     global _rr_index
     accounts = db_get_all_accounts()
     now = datetime.now()
-    available = [
-        a for a in accounts
-        if a["session"]
-        and not a.get("is_listener")
-        and (a["flood_until"] is None or a["flood_until"] < now)
-        and db_get_daily_add_count(a["label"]) < DAILY_ADD_LIMIT
-    ]
+    daily_limit_str = db_get_setting("daily_limit")
+    daily_limit = int(daily_limit_str) if daily_limit_str else None
+
+    available = []
+    for a in accounts:
+        if not a["session"]:
+            continue
+        if a.get("is_listener"):
+            continue
+        if a["flood_until"] and a["flood_until"] > now:
+            continue
+        if a["spam_until"] and a["spam_until"] > now:
+            continue
+        if daily_limit is not None and db_get_daily_add_count(a["label"]) >= daily_limit:
+            continue
+        available.append(a)
+
     if not available:
         return None
     account = available[_rr_index % len(available)]
     _rr_index += 1
     return account
+
+
+# ============================================================
+# ADMIN NOTIFY
+# ============================================================
+
+_bot_app = None
+
+
+def set_bot_app(app):
+    global _bot_app
+    _bot_app = app
+
+
+async def _notify_admins(text: str):
+    if not _bot_app:
+        return
+    for admin_id in ADMIN_IDS:
+        try:
+            await _bot_app.bot.send_message(admin_id, text)
+        except Exception:
+            pass
 
 
 # ============================================================
@@ -620,7 +701,6 @@ async def _get_client(account: dict) -> TelegramClient:
     await client.connect()
     logger.info(f"[_get_client] 🔌 [{account.get('label')}] connected")
 
-    # ✅ target group resolve — link ወይም ID
     try:
         target_link = db_get_setting("target_group_link")
         target_str = db_get_setting("target_group_id")
@@ -633,7 +713,6 @@ async def _get_client(account: dict) -> TelegramClient:
     except Exception as e:
         logger.warning(f"[_get_client] ❌ [{account.get('label')}] target group cache failed: {e}")
 
-    # ✅ source groups resolve
     try:
         groups = db_list_groups()
         source_ids = [g[1] for g in groups if g[3]]
@@ -709,6 +788,11 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                     db_set_flood(account["phone"], e.seconds)
                     logger.warning(f"[Contact] 🚫 Flood [{account['label']}]: {e.seconds}s")
                     return
+                except PeerFloodError:
+                    db_set_spam(account["phone"])
+                    logger.warning(f"[Contact] 🚫 SPAM BAN [{account['label']}]")
+                    await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
+                    return
                 except Exception as e:
                     logger.warning(f"[Contact] ❌ [{account['label']}] {user_id}: {e}")
 
@@ -724,7 +808,6 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 
         if not db_is_user_added(user_id, target_group_id):
             try:
-                # ✅ FIX: link ወይም ID ተጠቅሞ resolve
                 target_link = db_get_setting("target_group_link")
                 target = target_link if target_link else target_group_id
                 group = await client.get_entity(target)
@@ -737,6 +820,10 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             except FloodWaitError as e:
                 db_set_flood(account["phone"], e.seconds)
                 logger.warning(f"[Add] 🚫 Flood [{account['label']}]: {e.seconds}s")
+            except PeerFloodError:
+                db_set_spam(account["phone"])
+                logger.warning(f"[Add] 🚫 SPAM BAN [{account['label']}]")
+                await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
             except Exception as e:
                 logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
         else:
@@ -744,6 +831,56 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
     finally:
         await client.disconnect()
         logger.info(f"[_get_client] 🔌 [{account.get('label')}] disconnected")
+
+
+# ============================================================
+# SPAM RECOVERY LOOP
+# ============================================================
+
+async def _spam_recovery_loop():
+    """24hr በኋላ every 5hr spam accounts ን test ያደርጋል"""
+    while True:
+        await asyncio.sleep(5 * 3600)  # every 5 ሰዓት
+        try:
+            spam_accounts = db_get_spam_accounts()
+            now = datetime.now()
+            for account in spam_accounts:
+                if not account.get("session"):
+                    continue
+                spam_until = account.get("spam_until")
+                if spam_until and spam_until > now:
+                    remaining = int((spam_until - now).total_seconds() / 3600)
+                    logger.info(f"[SpamCheck] ⏳ [{account['label']}] still waiting {remaining}hr")
+                    continue
+
+                # 24hr አልፏል — test ያደርጋል
+                logger.info(f"[SpamCheck] 🔍 [{account['label']}] testing...")
+                try:
+                    client = TelegramClient(
+                        StringSession(account["session"]),
+                        account["api_id"],
+                        account["api_hash"]
+                    )
+                    await client.connect()
+                    try:
+                        # @SpamBot ን message ይልካል — test
+                        await client.send_message("@SpamBot", "/start")
+                        await asyncio.sleep(2)
+                        # Error ካልመጣ → spam ተነሳ
+                        db_clear_spam(account["phone"])
+                        logger.info(f"[SpamCheck] ✅ [{account['label']}] spam ban ተነሳ!")
+                        await _notify_admins(f"✅ Account [{account['label']}] {account['phone']} spam ban ተነሳ! እንደገና active ሆነ።")
+                    except PeerFloodError:
+                        # ገና spam ነው — 5hr ተጨማሪ
+                        logger.info(f"[SpamCheck] ❌ [{account['label']}] still spam banned")
+                    except Exception as e:
+                        logger.warning(f"[SpamCheck] [{account['label']}] test error: {e}")
+                    finally:
+                        await client.disconnect()
+                except Exception as e:
+                    logger.warning(f"[SpamCheck] [{account['label']}] connect error: {e}")
+        except Exception as e:
+            logger.warning(f"[SpamCheck] loop error: {e}")
 
 
 # ============================================================
@@ -770,7 +907,6 @@ async def _add_workers_to_source_group(group_id: int):
     try:
         try:
             group_entity = await listener_client.get_entity(group_id)
-            logger.info(f"[WorkerAutoJoin] ✅ listener resolved group {group_id}")
         except Exception as e:
             logger.warning(f"[WorkerAutoJoin] ❌ listener cannot resolve group {group_id}: {e}")
             return
@@ -779,7 +915,6 @@ async def _add_workers_to_source_group(group_id: int):
         try:
             async for participant in listener_client.iter_participants(group_entity):
                 existing_member_ids.add(participant.id)
-            logger.info(f"[WorkerAutoJoin] 📋 current members: {len(existing_member_ids)}")
         except Exception as e:
             logger.warning(f"[WorkerAutoJoin] ⚠️ cannot list participants: {e}")
 
@@ -795,7 +930,6 @@ async def _add_workers_to_source_group(group_id: int):
                     await worker_client.disconnect()
 
                 if worker_user_id in existing_member_ids:
-                    logger.info(f"[WorkerAutoJoin] ⏭ [{worker['label']}] already in source group")
                     skipped_count += 1
                     continue
 
@@ -818,8 +952,7 @@ async def _add_workers_to_source_group(group_id: int):
                 failed_count += 1
                 logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] failed: {e}")
 
-            gap = random.uniform(15, 25)
-            await asyncio.sleep(gap)
+            await asyncio.sleep(random.uniform(15, 25))
 
         logger.info(f"[WorkerAutoJoin] 🏁 added:{added_count} skipped:{skipped_count} failed:{failed_count}")
 
@@ -930,11 +1063,7 @@ async def _reload_listeners():
                     logger.info(f"[AutoAdd] 📨 msg from chat {chat_id}")
 
                     sender = await event.get_sender()
-                    if not sender:
-                        return
-                    if sender.bot:
-                        return
-                    if sender.is_self:
+                    if not sender or sender.bot or sender.is_self:
                         return
 
                     user_id = sender.id
@@ -952,7 +1081,6 @@ async def _reload_listeners():
 
                     target_str = db_get_setting("target_group_id")
                     if not target_str:
-                        logger.warning("[AutoAdd] ⚠️ target_group_id አልተቀመጠም!")
                         return
 
                     target_group_id = int(target_str)
@@ -962,6 +1090,12 @@ async def _reload_listeners():
 
                     auto_add = db_get_setting("auto_add_enabled") or "true"
                     if auto_add == "false":
+                        return
+
+                    # daily limit check
+                    daily_limit_str = db_get_setting("daily_limit")
+                    if not daily_limit_str:
+                        logger.info("[AutoAdd] ⏭ daily_limit አልተቀመጠም — auto add skip")
                         return
 
                     chosen = get_next_account()
@@ -991,6 +1125,7 @@ async def _cleanup_loop():
 
 async def start_listeners():
     asyncio.create_task(_cleanup_loop())
+    asyncio.create_task(_spam_recovery_loop())
     await _reload_listeners()
 
 
@@ -1106,21 +1241,17 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     args = update.message.text.split(maxsplit=2)
     if len(args) < 3:
-        await update.message.reply_text(
-            "❌ Format:\n/addaccount label +phone\n\nምሳሌ:\n/addaccount a +251911234567"
-        )
+        await update.message.reply_text("❌ Format:\n/addaccount label +phone")
         return
     try:
         label = args[1].lower()
         phone = args[2]
         api_id, api_hash = _get_api_for_account(is_listener=False)
         if not api_id or not api_hash:
-            await update.message.reply_text("❌ API አልተቀመጠም!\n/setuserapi api_id api_hash ይጠቀም")
+            await update.message.reply_text("❌ API አልተቀመጠም!")
             return
         db_add_account(label, api_id, api_hash, phone)
-        await update.message.reply_text(
-            f"✅ Account [{label}] {phone} ተጨመረ!\n\nSession ለማስጀመር:\n/startsession {phone}"
-        )
+        await update.message.reply_text(f"✅ Account [{label}] {phone} ተጨመረ!\n\n/startsession {phone}")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -1152,7 +1283,7 @@ async def cmd_startsession(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await client.connect()
         await client.send_code_request(phone)
         _pending_sessions[phone] = client
-        await update.message.reply_text(f"✅ Code ተላከ!\n\nCode ለማስገባት:\n/verifycode {phone} 12345")
+        await update.message.reply_text(f"✅ Code ተላከ!\n\n/verifycode {phone} 12345")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -1178,7 +1309,7 @@ async def cmd_verifycode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {phone} verified!")
     except Exception as e:
         if "password" in str(e).lower():
-            await update.message.reply_text(f"🔐 2FA password ያስፈልጋል!\n/verify2fa {phone} yourpassword")
+            await update.message.reply_text(f"🔐 2FA!\n/verify2fa {phone} yourpassword")
         else:
             await update.message.reply_text(f"❌ Error: {e}")
 
@@ -1224,20 +1355,15 @@ async def cmd_setlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if api_id2 and api_hash2:
         conn = get_conn()
         cur = conn.cursor()
-        cur.execute(
-            "UPDATE userbot_accounts SET api_id=%s, api_hash=%s WHERE phone=%s",
-            (api_id2, api_hash2, phone)
-        )
+        cur.execute("UPDATE userbot_accounts SET api_id=%s, api_hash=%s WHERE phone=%s", (api_id2, api_hash2, phone))
         conn.commit()
         cur.close()
         conn.close()
         api_note = "\n🔑 Listener API ተቀምጧል"
     else:
-        api_note = "\n⚠️ Listener API የለም — Worker API ይጠቀማል"
+        api_note = "\n⚠️ Listener API የለም"
 
-    await update.message.reply_text(
-        f"✅ [{account['label']}] {phone} → Listener ሆነ!{api_note}\n🔄 Reloading..."
-    )
+    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Listener ሆነ!{api_note}\n🔄 Reloading...")
     asyncio.create_task(_reload_listeners())
 
 
@@ -1258,6 +1384,21 @@ async def cmd_unsetlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     asyncio.create_task(_reload_listeners())
 
 
+async def cmd_setlimit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("❌ Format: /setlimit 50")
+        return
+    try:
+        limit = int(args[1])
+        db_set_setting("daily_limit", str(limit))
+        await update.message.reply_text(f"✅ Daily limit set: {limit} per worker")
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር መሆን አለበት!")
+
+
 async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -1267,17 +1408,25 @@ async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     now = datetime.now()
     lines = ["📋 Accounts:\n"]
-    for aid, label, phone, is_active, session, flood_until, is_listener in rows:
+    for aid, label, phone, is_active, session, flood_until, spam_until, is_listener in rows:
         status = "✅" if is_active else "❌"
         has_session = "🔑" if session else "⚠️ no session"
         role = "👂 Listener" if is_listener else "⚙️ Worker"
         flood = ""
+        spam = ""
         if flood_until and flood_until > now:
             remaining = int((flood_until - now).total_seconds() / 60)
-            flood = f" 🚫 flood {remaining}min"
+            flood = f" 🌊 flood {remaining}min"
+        if spam_until:
+            if spam_until > now:
+                remaining_hr = int((spam_until - now).total_seconds() / 3600)
+                spam = f" 🚫 spam {remaining_hr}hr"
+            else:
+                spam = " 🔍 spam check pending"
         daily = db_get_daily_add_count(label) if not is_listener else 0
-        daily_str = f" [{daily}/{DAILY_ADD_LIMIT}]" if not is_listener else ""
-        lines.append(f"{status} [{label}] {phone} {has_session} {role}{daily_str}{flood}")
+        daily_limit_str = db_get_setting("daily_limit") or "?"
+        daily_str = f" [{daily}/{daily_limit_str}]" if not is_listener else ""
+        lines.append(f"{status} [{label}] {phone} {has_session} {role}{daily_str}{flood}{spam}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1327,7 +1476,7 @@ async def cmd_settargetlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     args = update.message.text.split(maxsplit=1)
     if len(args) < 2:
-        await update.message.reply_text("❌ Format: /settargetlink https://t.me/+xxx ወይም https://t.me/username")
+        await update.message.reply_text("❌ Format: /settargetlink https://t.me/+xxx")
         return
     db_set_setting("target_group_link", args[1])
     await update.message.reply_text(f"✅ Target link ተቀምጧል: {args[1]}")
@@ -1428,15 +1577,9 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
         lines.append(f"#{num} {source_icon} {name_str} {tag_str}")
 
         if is_source:
-            connect_btn = InlineKeyboardButton(
-                f"#{num} 🔴 Disconnect",
-                callback_data=f"grp_disconnect:{group_id}:{page}"
-            )
+            connect_btn = InlineKeyboardButton(f"#{num} 🔴 Disconnect", callback_data=f"grp_disconnect:{group_id}:{page}")
         else:
-            connect_btn = InlineKeyboardButton(
-                f"#{num} ✅ Connect",
-                callback_data=f"grp_connect:{group_id}:{page}"
-            )
+            connect_btn = InlineKeyboardButton(f"#{num} ✅ Connect", callback_data=f"grp_connect:{group_id}:{page}")
         remove_btn = InlineKeyboardButton("❌", callback_data=f"grp_remove:{group_id}:{page}")
         keyboard.append([connect_btn, remove_btn])
 
@@ -1546,7 +1689,7 @@ async def _handle_usend(update: Update, label: str):
 
     active_group_str = db_get_setting("active_group_id")
     if not active_group_str:
-        await update.message.reply_text("❌ Active group አልተቀመጠም!\n/setactivegroup -100xxxxxxx")
+        await update.message.reply_text("❌ Active group አልተቀመጠም!")
         return
 
     group_id = int(active_group_str)
@@ -1658,6 +1801,10 @@ async def _do_broadcast(msg, users: list, status_msg):
         except FloodWaitError as e:
             db_set_flood(account["phone"], e.seconds)
             failed += 1
+        except PeerFloodError:
+            db_set_spam(account["phone"])
+            await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!")
+            failed += 1
         except Exception as e:
             err = str(e).lower()
             if "blocked" in err or "privacy" in err:
@@ -1668,17 +1815,13 @@ async def _do_broadcast(msg, users: list, status_msg):
 
         if (i + 1) % 10 == 0:
             try:
-                await status_msg.edit_text(
-                    f"⏳ እየሰራ ነው...\n📊 {i+1}/{total}\n✅ {success}\n❌ {failed}"
-                )
+                await status_msg.edit_text(f"⏳ እየሰራ ነው...\n📊 {i+1}/{total}\n✅ {success}\n❌ {failed}")
             except Exception:
                 pass
 
         await asyncio.sleep(delay + random.uniform(1, 3))
 
-    await status_msg.edit_text(
-        f"✅ Broadcast ተጠናቀቀ!\n👥 Total: {total}\n✅ Sent: {success}\n❌ Failed: {failed}"
-    )
+    await status_msg.edit_text(f"✅ Broadcast ተጠናቀቀ!\n👥 Total: {total}\n✅ Sent: {success}\n❌ Failed: {failed}")
 
 
 async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1725,22 +1868,30 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     active_group = db_get_setting("active_group_id") or "❌ አልተቀመጠም"
     target_group = db_get_setting("target_group_id") or "❌ አልተቀመጠም"
     target_link = db_get_setting("target_group_link") or "❌ አልተቀመጠም"
+    daily_limit = db_get_setting("daily_limit") or "❌ አልተቀመጠም"
     accounts = db_list_accounts()
     groups = db_list_groups()
     now = datetime.now()
 
     acc_lines = []
-    for _, label, phone, is_active, session, flood_until, is_listener in accounts:
+    for _, label, phone, is_active, session, flood_until, spam_until, is_listener in accounts:
         status = "✅" if is_active else "❌"
         has_session = "🔑" if session else "⚠️"
         role = "👂" if is_listener else "⚙️"
         flood = ""
+        spam = ""
         if flood_until and flood_until > now:
             remaining = int((flood_until - now).total_seconds() / 60)
-            flood = f" 🚫{remaining}min"
+            flood = f" 🌊{remaining}min"
+        if spam_until:
+            if spam_until > now:
+                remaining_hr = int((spam_until - now).total_seconds() / 3600)
+                spam = f" 🚫spam {remaining_hr}hr"
+            else:
+                spam = " 🔍checking"
         daily = db_get_daily_add_count(label) if not is_listener else 0
-        daily_str = f" [{daily}/{DAILY_ADD_LIMIT}]" if not is_listener else ""
-        acc_lines.append(f"  {status}{role}[{label}] {phone} {has_session}{daily_str}{flood}")
+        daily_str = f" [{daily}/{daily_limit}]" if not is_listener else ""
+        acc_lines.append(f"  {status}{role}[{label}] {phone} {has_session}{daily_str}{flood}{spam}")
 
     source_groups = [g for g in groups if g[3]]
     grp_lines = []
@@ -1766,7 +1917,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🤖 Auto-Add: {auto_status}\n"
         f"🟢 Active Group: {active_group}\n"
         f"🎯 Target Group: {target_group}\n"
-        f"🔗 Target Link: {target_link}\n\n"
+        f"🔗 Target Link: {target_link}\n"
+        f"📊 Daily Limit: {daily_limit} per worker\n\n"
         f"🔑 API (Worker): {api_id1}\n"
         f"🔑 API (Listener): {api_id2}\n\n"
         "👤 Accounts:\n" +
@@ -1794,7 +1946,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/deletegroup -100xxxxxxx\n\n"
         "/setactivegroup -100xxxxxxx\n"
         "/settargetgroup -100xxxxxxx\n"
-        "/settargetlink https://t.me/+xxx\n\n"
+        "/settargetlink https://t.me/+xxx\n"
+        "/setlimit 50\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "⚡ Send:\n"
         "/a /b /c /d /e መልዕክት\n\n"
@@ -1818,6 +1971,8 @@ async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ============================================================
 
 def register_userbot_handlers(app):
+    set_bot_app(app)
+
     app.add_handler(CommandHandler("adduadmin", cmd_adduadmin))
     app.add_handler(CommandHandler("removeuadmin", cmd_removeuadmin))
     app.add_handler(CommandHandler("listuadmins", cmd_listuadmins))
@@ -1838,6 +1993,7 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("setactivegroup", cmd_setactivegroup))
     app.add_handler(CommandHandler("settargetgroup", cmd_settargetgroup))
     app.add_handler(CommandHandler("settargetlink", cmd_settargetlink))
+    app.add_handler(CommandHandler("setlimit", cmd_setlimit))
     app.add_handler(CommandHandler("a", cmd_a))
     app.add_handler(CommandHandler("b", cmd_b))
     app.add_handler(CommandHandler("c", cmd_c))
