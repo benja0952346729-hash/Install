@@ -110,15 +110,6 @@ def init_userbot_db():
     """)
 
     cur.execute("""
-        CREATE TABLE IF NOT EXISTS userbot_pending_sessions (
-            phone TEXT PRIMARY KEY,
-            phone_code_hash TEXT NOT NULL,
-            partial_session TEXT DEFAULT NULL,
-            created_at TIMESTAMP DEFAULT NOW()
-        )
-    """)
-
-    cur.execute("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS label CHAR(1) UNIQUE
     """)
@@ -569,41 +560,6 @@ def db_increment_daily_add(label: str):
     conn.close()
 
 
-def db_save_pending(phone: str, phone_code_hash: str, partial_session: str = None):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO userbot_pending_sessions (phone, phone_code_hash, partial_session)
-        VALUES (%s, %s, %s)
-        ON CONFLICT (phone) DO UPDATE SET
-            phone_code_hash=%s,
-            partial_session=COALESCE(%s, userbot_pending_sessions.partial_session),
-            created_at=NOW()
-    """, (phone, phone_code_hash, partial_session, phone_code_hash, partial_session))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def db_get_pending(phone: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT phone_code_hash, partial_session FROM userbot_pending_sessions WHERE phone=%s", (phone,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row if row else None
-
-
-def db_delete_pending(phone: str):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM userbot_pending_sessions WHERE phone=%s", (phone,))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
 # ============================================================
 # ROUND ROBIN
 # ============================================================
@@ -643,7 +599,8 @@ async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
     try:
         participant = await client.get_permissions(group_id, user_id)
         result = participant.is_admin or participant.is_creator
-    except Exception:
+    except Exception as e:
+        logger.warning(f"[AutoAdd-DEBUG] get_permissions failed for user={user_id} group={group_id}: {e}")
         result = False
     _admin_cache[cache_key] = result
     return result
@@ -654,18 +611,14 @@ async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
 # ============================================================
 
 async def _get_client(account: dict) -> TelegramClient:
-    try:
-        session = account.get("session") or ""
-        client = TelegramClient(
-            StringSession(session),
-            account["api_id"],
-            account["api_hash"]
-        )
-        await client.connect()
-        return client
-    except Exception as e:
-        logger.error(f"❌ [GetClient] [{account['label']}] {account['phone']}: {e}")
-        raise
+    session = account.get("session") or ""
+    client = TelegramClient(
+        StringSession(session),
+        account["api_id"],
+        account["api_hash"]
+    )
+    await client.connect()
+    return client
 
 
 # ============================================================
@@ -693,11 +646,7 @@ def _normalize_source_id(gid) -> int:
 # ============================================================
 
 async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int):
-    try:
-        client = await _get_client(account)
-    except Exception as e:
-        logger.error(f"❌ [Add] connect failed [{account['label']}]: {e}")
-        return
+    client = await _get_client(account)
     try:
         user_id = sender.id
 
@@ -711,13 +660,13 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                     add_phone_privacy_exception=False
                 ))
                 db_mark_user_contacted(user_id, account["label"])
-                logger.info(f"✅ [Contact] {user_id} via [{account['label']}]")
+                logger.info(f"[AutoAdd-DEBUG] ✅ contacted user={user_id} via [{account['label']}]")
             except FloodWaitError as e:
                 db_set_flood(account["phone"], e.seconds)
-                logger.warning(f"⚠️ [Contact] Flood [{account['label']}]: {e.seconds}s")
+                logger.warning(f"[Contact] Flood {account['label']}: {e.seconds}s")
                 return
             except Exception as e:
-                logger.error(f"❌ [Contact] {user_id}: {e}")
+                logger.warning(f"[Contact] {user_id}: {e}")
 
         if not db_is_user_added(user_id, target_group_id):
             try:
@@ -725,17 +674,16 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 await client(InviteToChannelRequest(channel=group, users=[sender]))
                 db_mark_user_added(user_id, target_group_id)
                 db_increment_daily_add(account["label"])
-                logger.info(f"✅ [Add] {user_id} → {target_group_id} via [{account['label']}]")
+                logger.info(f"✅ Added {user_id} → {target_group_id}")
             except FloodWaitError as e:
                 db_set_flood(account["phone"], e.seconds)
-                logger.warning(f"⚠️ [Add] Flood [{account['label']}]: {e.seconds}s")
+                logger.warning(f"[Add] Flood {account['label']}: {e.seconds}s")
             except Exception as e:
-                logger.error(f"❌ [Add] {user_id} → {target_group_id}: {e}")
+                logger.warning(f"[Add] {user_id}: {e}")
+        else:
+            logger.info(f"[AutoAdd-DEBUG] ⏭ user={user_id} already added to {target_group_id} — skip add step")
     finally:
-        try:
-            await client.disconnect()
-        except Exception as e:
-            logger.warning(f"⚠️ [Add] disconnect [{account['label']}]: {e}")
+        await client.disconnect()
 
 
 # ============================================================
@@ -743,11 +691,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 # ============================================================
 
 async def _auto_detect_groups(account: dict):
-    try:
-        client = await _get_client(account)
-    except Exception as e:
-        logger.error(f"❌ [AutoDetect] connect failed [{account['label']}]: {e}")
-        return
+    client = await _get_client(account)
     count = 0
     try:
         async for dialog in client.iter_dialogs():
@@ -765,31 +709,23 @@ async def _auto_detect_groups(account: dict):
                 cur.close()
                 conn.close()
                 count += 1
-        logger.info(f"✅ [AutoDetect] [{account['label']}] {count} groups synced")
+        logger.info(f"✅ [{account['label']}] auto-detected {count} groups")
     except Exception as e:
-        logger.error(f"❌ [AutoDetect] iter_dialogs [{account['label']}]: {e}")
+        logger.warning(f"[AutoDetect] {account['label']}: {e}")
     finally:
-        try:
-            await client.disconnect()
-        except Exception as e:
-            logger.warning(f"⚠️ [AutoDetect] disconnect [{account['label']}]: {e}")
+        await client.disconnect()
 
 
 async def _sync_all_account_groups():
     listeners = db_get_all_listeners()
-    if not listeners:
-        logger.warning("⚠️ [Sync] listener account የለም")
-        return
     for account in listeners:
         if account.get("session"):
-            logger.info(f"🔄 [Sync] [{account['label']}] syncing...")
             await _auto_detect_groups(account)
-        else:
-            logger.warning(f"⚠️ [Sync] [{account['label']}] session የለም — skip")
 
 
 # ============================================================
-# TELETHON EVENT LISTENERS
+# TELETHON EVENT LISTENERS — ✅ FIX: source groups ብቻ
+# ✅ DEBUG: event ራሱ trigger ስለመሆኑ/አለመሆኑ ለማወቅ log ተጨምሯል
 # ============================================================
 
 _telethon_clients = []
@@ -797,37 +733,28 @@ _telethon_clients = []
 
 async def _reload_listeners():
     global _telethon_clients
-    logger.info("🔄 [Reload] listeners reloading...")
-
     for client in _telethon_clients:
         try:
             await client.disconnect()
-        except Exception as e:
-            logger.warning(f"⚠️ [Reload] disconnect old client: {e}")
+        except Exception:
+            pass
     _telethon_clients = []
 
-    try:
-        await _sync_all_account_groups()
-    except Exception as e:
-        logger.error(f"❌ [Reload] sync failed: {e}")
+    await _sync_all_account_groups()
 
+    # ✅ source groups ከDB ያምጣ — አንድ ጊዜ ብቻ
     groups = db_list_groups()
     source_ids = [_normalize_source_id(g[1]) for g in groups if g[3]]
 
     if not source_ids:
-        logger.warning("⚠️ [Reload] source group የለም — listeners አይጀምሩም")
+        logger.warning("[Reload] ⚠️ source group የለም — listeners አይጀምሩም")
         return
 
-    logger.info(f"✅ [Reload] source groups: {source_ids}")
+    logger.info(f"[Reload] ✅ source groups: {source_ids}")
 
     listeners = db_get_all_listeners()
-    if not listeners:
-        logger.warning("⚠️ [Reload] listener account የለም")
-        return
-
     for account in listeners:
         if not account.get("session"):
-            logger.warning(f"⚠️ [Reload] [{account['label']}] session የለም — skip")
             continue
         try:
             client = TelegramClient(
@@ -836,40 +763,59 @@ async def _reload_listeners():
                 account["api_hash"]
             )
             await client.start()
-            logger.info(f"✅ [Reload] [{account['label']}] connected")
 
+            # ✅ DEBUG: client ራሱ ምን entity ካታሎግ ላይ እንዳለው፣ source ids resolve ይቻል/አይቻል ለማየት
+            for sid in source_ids:
+                try:
+                    entity = await client.get_entity(sid)
+                    logger.info(f"[AutoAdd-DEBUG] ✅ [{account['label']}] resolved entity for {sid}: {getattr(entity, 'title', entity)}")
+                except Exception as e:
+                    logger.warning(f"[AutoAdd-DEBUG] ❌ [{account['label']}] CANNOT resolve entity for {sid}: {e}")
+
+            # ✅ DEBUG: ምንም filter ሳይኖር ALL messages ይያዙ፣ ራሱ event firing ይሁን/አይሁን ለማወቅ
+            @client.on(events.NewMessage())
+            async def debug_any_handler(event, acc=account):
+                try:
+                    raw_chat_id = event.chat_id
+                    normalized = _normalize_chat_id(event)
+                    logger.info(
+                        f"[AutoAdd-DEBUG] 🟡 [{acc['label']}] ANY message seen | "
+                        f"raw_chat_id={raw_chat_id} | normalized={normalized} | "
+                        f"is_source_match={normalized in source_ids}"
+                    )
+                except Exception as e:
+                    logger.warning(f"[AutoAdd-DEBUG] debug_any_handler error: {e}")
+
+            # ✅ source groups ብቻ ያዳምጣል (ኦርጅናል logic ሳይነካ)
             @client.on(events.NewMessage(chats=source_ids))
             async def handler(event, acc=account):
                 try:
                     chat_id = _normalize_chat_id(event)
+
                     logger.info(f"[AutoAdd] 📨 msg from chat {chat_id}")
 
                     sender = await event.get_sender()
                     if not sender:
-                        logger.warning("[AutoAdd] ⚠️ sender None — skip")
+                        logger.info("[AutoAdd-DEBUG] ⏭ sender is None — skip")
                         return
                     if sender.bot:
-                        logger.info(f"[AutoAdd] ⏭ bot — skip")
+                        logger.info(f"[AutoAdd-DEBUG] ⏭ sender {sender.id} is bot — skip")
                         return
                     if sender.is_self:
-                        logger.info(f"[AutoAdd] ⏭ self — skip")
+                        logger.info("[AutoAdd-DEBUG] ⏭ sender is self — skip")
                         return
 
                     user_id = sender.id
                     logger.info(f"[AutoAdd] 👤 user {user_id} ({sender.first_name})")
 
+                    check_client = await _get_client(acc)
                     try:
-                        check_client = await _get_client(acc)
-                        try:
-                            is_adm = await _is_admin_or_owner(check_client, user_id, chat_id)
-                            if is_adm:
-                                logger.info(f"[AutoAdd] ⏭ {user_id} is admin — skip")
-                                return
-                        finally:
-                            await check_client.disconnect()
-                    except Exception as e:
-                        logger.error(f"❌ [AutoAdd] admin check failed {user_id}: {e}")
-                        return
+                        is_adm = await _is_admin_or_owner(check_client, user_id, chat_id)
+                        if is_adm:
+                            logger.info(f"[AutoAdd] ⏭ user {user_id} is admin/owner — skip")
+                            return
+                    finally:
+                        await check_client.disconnect()
 
                     db_record_message(user_id, chat_id)
 
@@ -881,7 +827,7 @@ async def _reload_listeners():
                     target_group_id = int(target_str)
 
                     if db_is_user_added(user_id, target_group_id):
-                        logger.info(f"[AutoAdd] ⏭ {user_id} already added — skip")
+                        logger.info(f"[AutoAdd] ⏭ user {user_id} already added — skip")
                         return
 
                     auto_add = db_get_setting("auto_add_enabled") or "true"
@@ -894,18 +840,17 @@ async def _reload_listeners():
                         logger.warning("[AutoAdd] ⚠️ available worker account የለም!")
                         return
 
-                    logger.info(f"[AutoAdd] ⚙️ [{chosen['label']}] adding {user_id}")
+                    logger.info(f"[AutoAdd] ⚙️ using [{chosen['label']}] to add {user_id}")
                     await asyncio.sleep(random.uniform(2, 5))
                     await _contact_and_add_by_sender(chosen, sender, target_group_id)
 
                 except Exception as e:
-                    logger.error(f"❌ [AutoAdd] handler error: {e}", exc_info=True)
+                    logger.warning(f"[AutoAdd] ❌ Error: {e}", exc_info=True)
 
             _telethon_clients.append(client)
-            logger.info(f"✅ [Reload] listener ready: [{account['label']}] {account['phone']}")
-
+            logger.info(f"✅ Listener reloaded: [{account['label']}] {account['phone']}")
         except Exception as e:
-            logger.error(f"❌ [Reload] [{account['label']}] failed to start: {e}", exc_info=True)
+            logger.warning(f"[Reload] {account['phone']}: {e}")
 
 
 async def _cleanup_loop():
@@ -991,7 +936,9 @@ async def cmd_setuserapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         api_hash = args[2]
         db_set_setting("userbot_api_id", str(api_id))
         db_set_setting("userbot_api_hash", api_hash)
-        await update.message.reply_text(f"✅ Worker API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
+        await update.message.reply_text(
+            f"✅ Worker API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}"
+        )
     except ValueError:
         await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
 
@@ -1009,7 +956,9 @@ async def cmd_setuserapi2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         api_hash = args[2]
         db_set_setting("userbot_api_id2", str(api_id))
         db_set_setting("userbot_api_hash2", api_hash)
-        await update.message.reply_text(f"✅ Listener API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
+        await update.message.reply_text(
+            f"✅ Listener API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}"
+        )
     except ValueError:
         await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
 
@@ -1033,7 +982,9 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(maxsplit=2)
     if len(args) < 3:
         await update.message.reply_text(
-            "❌ Format:\n/addaccount label +phone\n\nምሳሌ:\n/addaccount a +251911234567"
+            "❌ Format:\n/addaccount label +phone\n\n"
+            "ምሳሌ:\n/addaccount a +251911234567\n\n"
+            "⚠️ API ቀድሞ /setuserapi ተቀምጦ መሆን አለበት!"
         )
         return
     try:
@@ -1041,15 +992,16 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         phone = args[2]
         api_id, api_hash = _get_api_for_account(is_listener=False)
         if not api_id or not api_hash:
-            await update.message.reply_text("❌ API አልተቀመጠም!\n/setuserapi api_id api_hash ይጠቀም")
+            await update.message.reply_text(
+                "❌ API አልተቀመጠም!\n/setuserapi api_id api_hash ይጠቀም"
+            )
             return
         db_add_account(label, api_id, api_hash, phone)
-        logger.info(f"✅ [AddAccount] [{label}] {phone} added")
         await update.message.reply_text(
-            f"✅ Account [{label}] {phone} ተጨመረ!\n\nSession ለማስጀመር:\n/startsession {phone}"
+            f"✅ Account [{label}] {phone} ተጨመረ!\n\n"
+            f"Session ለማስጀመር:\n/startsession {phone}"
         )
     except Exception as e:
-        logger.error(f"❌ [AddAccount] {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 
@@ -1057,7 +1009,11 @@ async def cmd_startsession(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     args = update.message.text.split()
-    phone = next((a for a in args[1:] if a.startswith("+")), None)
+    phone = None
+    for arg in args[1:]:
+        if arg.startswith("+"):
+            phone = arg
+            break
     if not phone:
         await update.message.reply_text("❌ Format: /startsession +phone")
         return
@@ -1074,15 +1030,12 @@ async def cmd_startsession(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         client = TelegramClient(StringSession(), account["api_id"], account["api_hash"])
         await client.connect()
-        sent = await client.send_code_request(phone)
-        db_save_pending(phone, sent.phone_code_hash)
+        await client.send_code_request(phone)
         _pending_sessions[phone] = client
-        logger.info(f"✅ [StartSession] {phone} code sent, hash saved to DB")
         await update.message.reply_text(
             f"✅ Code ተላከ!\n\nCode ለማስገባት:\n/verifycode {phone} 12345"
         )
     except Exception as e:
-        logger.error(f"❌ [StartSession] {phone}: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 
@@ -1095,48 +1048,22 @@ async def cmd_verifycode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     phone, code = args[1], args[2]
-
     client = _pending_sessions.get(phone)
-    pending = db_get_pending(phone)
-
-    if not pending:
-        await update.message.reply_text(
-            f"❌ {phone} pending session የለም!\n/startsession {phone} ደግም ጫን"
-        )
-        return
-
-    phone_code_hash = pending[0]
-
     if not client:
-        logger.warning(f"⚠️ [VerifyCode] {phone} memory ውስጥ የለም — DB ከ hash ዳግም እየፈጠረ...")
-        try:
-            account = db_get_account_by_phone(phone)
-            client = TelegramClient(StringSession(), account["api_id"], account["api_hash"])
-            await client.connect()
-            _pending_sessions[phone] = client
-        except Exception as e:
-            logger.error(f"❌ [VerifyCode] reconnect failed {phone}: {e}")
-            await update.message.reply_text(f"❌ Reconnect failed: {e}\n/startsession {phone} ደግም ጫን")
-            return
-
+        await update.message.reply_text(f"❌ {phone} pending session የለም!")
+        return
     try:
-        await client.sign_in(phone=phone, code=code, phone_code_hash=phone_code_hash)
+        await client.sign_in(phone=phone, code=code)
         session_str = client.session.save()
         db_save_session(phone, session_str)
-        db_delete_pending(phone)
         _pending_sessions.pop(phone, None)
-        logger.info(f"✅ [VerifyCode] {phone} verified and session saved to DB")
         await update.message.reply_text(f"✅ {phone} verified!")
     except Exception as e:
         if "password" in str(e).lower():
-            partial = client.session.save()
-            db_save_pending(phone, phone_code_hash, partial)
-            logger.info(f"🔐 [VerifyCode] {phone} needs 2FA — partial session saved to DB")
             await update.message.reply_text(
                 f"🔐 2FA password ያስፈልጋል!\n/verify2fa {phone} yourpassword"
             )
         else:
-            logger.error(f"❌ [VerifyCode] {phone}: {e}")
             await update.message.reply_text(f"❌ Error: {e}")
 
 
@@ -1150,39 +1077,16 @@ async def cmd_verify2fa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     phone, password = args[1], args[2]
     client = _pending_sessions.get(phone)
-
     if not client:
-        pending = db_get_pending(phone)
-        if not pending or not pending[1]:
-            await update.message.reply_text(
-                f"❌ {phone} pending session የለም!\n/startsession {phone} ደግም ጫን"
-            )
-            return
-        logger.warning(f"⚠️ [Verify2FA] {phone} memory ውስጥ የለም — DB ከ partial session ዳግም እየፈጠረ...")
-        try:
-            account = db_get_account_by_phone(phone)
-            client = TelegramClient(
-                StringSession(pending[1]),
-                account["api_id"],
-                account["api_hash"]
-            )
-            await client.connect()
-            _pending_sessions[phone] = client
-        except Exception as e:
-            logger.error(f"❌ [Verify2FA] reconnect failed {phone}: {e}")
-            await update.message.reply_text(f"❌ Reconnect failed: {e}")
-            return
-
+        await update.message.reply_text(f"❌ {phone} pending session የለም!")
+        return
     try:
         await client.sign_in(password=password)
         session_str = client.session.save()
         db_save_session(phone, session_str)
-        db_delete_pending(phone)
         _pending_sessions.pop(phone, None)
-        logger.info(f"✅ [Verify2FA] {phone} 2FA verified and session saved to DB")
         await update.message.reply_text(f"✅ {phone} 2FA verified!")
     except Exception as e:
-        logger.error(f"❌ [Verify2FA] {phone}: {e}")
         await update.message.reply_text(f"❌ Error: {e}")
 
 
@@ -1215,7 +1119,6 @@ async def cmd_setlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         api_note = "\n⚠️ Listener API የለም — Worker API ይጠቀማል"
 
-    logger.info(f"✅ [SetListener] [{account['label']}] {phone} → Listener")
     await update.message.reply_text(
         f"✅ [{account['label']}] {phone} → Listener ሆነ!{api_note}\n🔄 Reloading..."
     )
@@ -1235,7 +1138,6 @@ async def cmd_unsetlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ {phone} አልተገኘም!")
         return
     db_set_listener(phone, False)
-    logger.info(f"✅ [UnsetListener] [{account['label']}] {phone} → Worker")
     await update.message.reply_text(f"✅ [{account['label']}] {phone} → Worker ሆነ!\n🔄 Reloading...")
     asyncio.create_task(_reload_listeners())
 
@@ -1271,7 +1173,6 @@ async def cmd_deleteaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Format: /deleteaccount +phone")
         return
     db_delete_account(args[1])
-    logger.info(f"✅ [DeleteAccount] {args[1]} deleted")
     await update.message.reply_text(f"✅ {args[1]} ተሰረዘ!")
 
 
@@ -1285,7 +1186,6 @@ async def cmd_setactivegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         group_id = int(args[1])
         db_set_setting("active_group_id", str(group_id))
-        logger.info(f"✅ [SetActiveGroup] {group_id}")
         await update.message.reply_text(f"✅ Active group set: {group_id}")
     except ValueError:
         await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
@@ -1301,7 +1201,6 @@ async def cmd_settargetgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         group_id = int(args[1])
         db_set_setting("target_group_id", str(group_id))
-        logger.info(f"✅ [SetTargetGroup] {group_id}")
         await update.message.reply_text(f"✅ Target group set: {group_id}")
     except ValueError:
         await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
@@ -1326,11 +1225,10 @@ async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     group_name = getattr(entity, "title", None)
                 finally:
                     await client.disconnect()
-            except Exception as e:
-                logger.warning(f"⚠️ [AddGroup] get entity failed: {e}")
+            except Exception:
+                group_name = None
 
         db_add_group(group_id, group_name, is_source=False)
-        logger.info(f"✅ [AddGroup] {group_id} ({group_name}) added")
         name_str = f"📛 ስም: {group_name}\n" if group_name else ""
         await update.message.reply_text(
             f"✅ Group ተጨመረ!\n{name_str}🆔 ID: {group_id}\n\n"
@@ -1436,11 +1334,11 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
         else:
             await message.reply_text(text, reply_markup=reply_markup)
     except Exception as e:
-        logger.warning(f"⚠️ [listgroups] {e}")
+        logger.warning(f"[listgroups] {e}")
         try:
             await message.reply_text(text, reply_markup=reply_markup)
-        except Exception as e2:
-            logger.error(f"❌ [listgroups] fallback failed: {e2}")
+        except Exception:
+            pass
 
 
 async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1461,7 +1359,6 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "grp_autoadd_toggle":
         current = (db_get_setting("auto_add_enabled") or "true") == "true"
         db_set_setting("auto_add_enabled", "false" if current else "true")
-        logger.info(f"✅ [AutoAdd] toggled → {'OFF' if current else 'ON'}")
         await _show_groups_list(query.message, edit=True, page=0)
         return
 
@@ -1480,15 +1377,14 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "grp_connect":
         db_set_group_source(group_id, True)
-        logger.info(f"✅ [GroupConnect] {group_id} → source=True, reloading...")
+        # ✅ source group ሲጨመር listeners reload ያድርግ
         asyncio.create_task(_reload_listeners())
     elif action == "grp_disconnect":
         db_set_group_source(group_id, False)
-        logger.info(f"✅ [GroupDisconnect] {group_id} → source=False, reloading...")
+        # ✅ source group ሲወጣ listeners reload ያድርግ
         asyncio.create_task(_reload_listeners())
     elif action == "grp_remove":
         db_delete_group(group_id)
-        logger.info(f"✅ [GroupRemove] {group_id} deleted")
 
     await _show_groups_list(query.message, edit=True, page=page)
 
@@ -1503,7 +1399,6 @@ async def cmd_deletegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         group_id = int(args[1])
         db_delete_group(group_id)
-        logger.info(f"✅ [DeleteGroup] {group_id} deleted")
         await update.message.reply_text(f"✅ {group_id} ተሰረዘ!")
     except ValueError:
         await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
@@ -1570,12 +1465,10 @@ async def _handle_usend(update: Update, label: str):
             else:
                 await msg.reply_text("❌ የማይደገፍ media አይነት!")
                 return
-            logger.info(f"✅ [Send] [{label}] → {group_id}")
             await msg.reply_text(f"✅ [{label}] → {group_id} ተላከ!")
         finally:
             await client.disconnect()
     except Exception as e:
-        logger.error(f"❌ [Send] [{label}] → {group_id}: {e}")
         await msg.reply_text(f"❌ Error: {e}")
 
 
@@ -1603,7 +1496,6 @@ async def _do_broadcast(msg, users: list, status_msg):
     for i, user_id in enumerate(users):
         account = get_next_account()
         if not account:
-            logger.error("❌ [Broadcast] available account የለም!")
             await status_msg.edit_text("❌ Available account የለም!")
             return
 
@@ -1633,20 +1525,17 @@ async def _do_broadcast(msg, users: list, status_msg):
                     if text:
                         await client.send_message(user_id, text)
                 success += 1
-                logger.info(f"✅ [Broadcast] {user_id} sent ({i+1}/{total})")
             finally:
                 await client.disconnect()
         except FloodWaitError as e:
             db_set_flood(account["phone"], e.seconds)
-            logger.warning(f"⚠️ [Broadcast] Flood [{account['label']}]: {e.seconds}s")
             failed += 1
         except Exception as e:
             err = str(e).lower()
             if "blocked" in err or "privacy" in err:
                 db_mark_user_blocked(user_id)
-                logger.warning(f"⚠️ [Broadcast] {user_id} blocked/privacy")
             else:
-                logger.error(f"❌ [Broadcast] {user_id}: {e}")
+                logger.warning(f"[Broadcast] {user_id}: {e}")
             failed += 1
 
         if (i + 1) % 10 == 0:
@@ -1659,7 +1548,6 @@ async def _do_broadcast(msg, users: list, status_msg):
 
         await asyncio.sleep(delay + random.uniform(1, 3))
 
-    logger.info(f"✅ [Broadcast] done — total:{total} success:{success} failed:{failed}")
     await status_msg.edit_text(
         f"✅ Broadcast ተጠናቀቀ!\n👥 Total: {total}\n✅ Sent: {success}\n❌ Failed: {failed}"
     )
@@ -1681,7 +1569,6 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     total = len(recent_users)
-    logger.info(f"🔄 [Broadcast] starting — {total} users")
     status_msg = await update.message.reply_text(
         f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}"
     )
