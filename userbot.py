@@ -10,6 +10,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import AddContactRequest
 from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.types import InputPeerChannel
 from telethon.errors import FloodWaitError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -618,7 +619,6 @@ async def _get_client(account: dict) -> TelegramClient:
         account["api_hash"]
     )
     await client.connect()
-    # ✅ FIX: client's own entity cache populate ለማድረግ — resolve failures ለማስቀረት
     try:
         dialogs = await client.get_dialogs()
         logger.info(f"[_get_client] ✅ [{account.get('label')}] dialogs preloaded: {len(dialogs)} chats cached")
@@ -652,14 +652,6 @@ def _normalize_source_id(gid) -> int:
 # ============================================================
 
 async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int):
-    """
-    ✅ FIX: sender object (ሌላ client's cache object) ቀጥታ አይተላለፍም ለ InviteToChannelRequest።
-    Worker ራሱ user_id ተጠቅሞ own session ላይ resolve ያደርጋል፦
-      STEP 1: worker's own cache ላይ ቀድሞ ካለ (worker ራሱ group's member ቢሆን) → ቀጥታ ይሰራል
-      STEP 2: cache ላይ ከሌለ → AddContactRequest ይሞከር (phone ካለ access_hash ይፈጠራል)
-      STEP 3: ድጋሚ resolve ይሞከር
-      STEP 4: ምንም ካልሰራ → privacy-restricted, graceful skip
-    """
     client = await _get_client(account)
     try:
         user_id = sender.id
@@ -667,7 +659,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
         last_name = sender.last_name or ""
         phone = sender.phone or ""
 
-        # ✅ STEP 1 — worker's own cache (e.g. worker ራሱ ያ group's member ቢሆን)
+        # ✅ STEP 1 — worker's own cache
         resolved_user = None
         try:
             resolved_user = await client.get_entity(user_id)
@@ -675,7 +667,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
         except Exception as e:
             logger.info(f"[Resolve] [{account['label']}] {user_id} not in cache yet: {e}")
 
-        # ✅ STEP 2 — contact ለማድረግ ይሞከር (access_hash ይፈጥራል)
+        # ✅ STEP 2 — contact ለማድረግ ይሞከር
         if not resolved_user:
             if not db_is_user_contacted(user_id, account["label"]):
                 try:
@@ -702,14 +694,19 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             except Exception as e:
                 logger.warning(f"[Resolve] [{account['label']}] still cannot resolve {user_id}: {e}")
 
-        # ✅ STEP 4 — ምንም ካልሰራ → privacy restricted, skip
+        # ✅ STEP 4 — ምንም ካልሰራ → skip
         if not resolved_user:
             logger.warning(f"[Add] [{account['label']}] ⏭ user {user_id} unresolvable — privacy restricted, skip")
             return
 
         if not db_is_user_added(user_id, target_group_id):
             try:
-                group = await client.get_entity(target_group_id)
+                # ✅ FIX: get_entity ሳይሆን InputPeerChannel ቀጥታ ተጠቀም
+                raw_id = abs(target_group_id)
+                if str(raw_id).startswith("100"):
+                    raw_id = int(str(raw_id)[3:])
+                group = InputPeerChannel(channel_id=raw_id, access_hash=0)
+
                 await client(InviteToChannelRequest(channel=group, users=[resolved_user]))
                 db_mark_user_added(user_id, target_group_id)
                 db_increment_daily_add(account["label"])
@@ -727,15 +724,9 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 
 # ============================================================
 # ✅ NEW — WORKER AUTO-JOIN TO SOURCE GROUP
-# Source group connect (✅) ሲደረግ workers (a-e) auto-add ይደረጋሉ
-# ወደ source group፣ 15-25s random gap ይዘው (Telegram flood ageda)
 # ============================================================
 
 async def _add_workers_to_source_group(group_id: int):
-    """
-    Listener ራሱ workers (non-listener accounts) ወደ source group ይጨምራል፣
-    ቀድሞ member ያልሆኑትን ብቻ፣ 15-25s gap በመካከል።
-    """
     listeners = db_get_all_listeners()
     if not listeners:
         logger.warning("[WorkerAutoJoin] ⚠️ listener account የለም — workers አይታከሉም")
@@ -760,7 +751,6 @@ async def _add_workers_to_source_group(group_id: int):
             logger.warning(f"[WorkerAutoJoin] ❌ listener cannot resolve group {group_id}: {e}")
             return
 
-        # ✅ Source group's current members ይፍተሽ — ቀድሞ ያሉ workers skip
         existing_member_ids = set()
         try:
             async for participant in listener_client.iter_participants(group_entity):
@@ -788,7 +778,6 @@ async def _add_workers_to_source_group(group_id: int):
                     skipped_count += 1
                     continue
 
-                # ✅ Listener ራሱ worker'ን ይጨምር
                 try:
                     worker_input = await listener_client.get_entity(worker_user_id)
                     logger.info(f"[WorkerAutoJoin] ✅ [{worker['label']}] resolved by listener")
@@ -809,7 +798,6 @@ async def _add_workers_to_source_group(group_id: int):
                 failed_count += 1
                 logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] failed: {e}")
 
-            # ✅ 15-25s random gap — Telegram flood ageda
             gap = random.uniform(15, 25)
             logger.info(f"[WorkerAutoJoin] ⏳ waiting {gap:.1f}s before next worker...")
             await asyncio.sleep(gap)
@@ -858,8 +846,7 @@ async def _sync_all_account_groups():
 
 
 # ============================================================
-# TELETHON EVENT LISTENERS — ✅ source groups ብቻ
-# ✅ DEBUG logs ለ event trigger ማረጋገጥ ተጨምሯል
+# TELETHON EVENT LISTENERS
 # ============================================================
 
 _telethon_clients = []
@@ -897,7 +884,6 @@ async def _reload_listeners():
             )
             await client.start()
 
-            # ✅ DEBUG: client ራሱ source entity resolve ይቻል/አይቻል
             for sid in source_ids:
                 try:
                     entity = await client.get_entity(sid)
@@ -905,7 +891,6 @@ async def _reload_listeners():
                 except Exception as e:
                     logger.warning(f"[AutoAdd-DEBUG] ❌ [{account['label']}] CANNOT resolve entity for {sid}: {e}")
 
-            # ✅ DEBUG: ምንም filter ሳይኖር ALL messages
             @client.on(events.NewMessage())
             async def debug_any_handler(event, acc=account):
                 try:
@@ -919,7 +904,6 @@ async def _reload_listeners():
                 except Exception as e:
                     logger.warning(f"[AutoAdd-DEBUG] debug_any_handler error: {e}")
 
-            # ✅ source groups ብቻ ያዳምጣል (ኦርጅናል logic)
             @client.on(events.NewMessage(chats=source_ids))
             async def handler(event, acc=account):
                 try:
@@ -1510,13 +1494,10 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "grp_connect":
         db_set_group_source(group_id, True)
-        # ✅ source group ሲጨመር listeners reload ያድርግ
         asyncio.create_task(_reload_listeners())
-        # ✅ NEW: workers (a-e) ወደ source group auto-add ይደረጋሉ (15-25s gap)
         asyncio.create_task(_add_workers_to_source_group(group_id))
     elif action == "grp_disconnect":
         db_set_group_source(group_id, False)
-        # ✅ source group ሲወጣ listeners reload ያድርግ
         asyncio.create_task(_reload_listeners())
     elif action == "grp_remove":
         db_delete_group(group_id)
