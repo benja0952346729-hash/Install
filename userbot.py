@@ -607,7 +607,7 @@ async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
 
 
 # ============================================================
-# TELETHON CLIENT — ✅ source + target ብቻ resolve
+# TELETHON CLIENT
 # ============================================================
 
 async def _get_client(account: dict) -> TelegramClient:
@@ -620,14 +620,16 @@ async def _get_client(account: dict) -> TelegramClient:
     await client.connect()
     logger.info(f"[_get_client] 🔌 [{account.get('label')}] connected")
 
-    # ✅ target group resolve
+    # ✅ target group resolve — link ወይም ID
     try:
+        target_link = db_get_setting("target_group_link")
         target_str = db_get_setting("target_group_id")
-        if target_str:
-            await client.get_input_entity(int(target_str))
-            logger.info(f"[_get_client] ✅ [{account.get('label')}] target group cached: {target_str}")
+        target = target_link if target_link else (int(target_str) if target_str else None)
+        if target:
+            await client.get_entity(target)
+            logger.info(f"[_get_client] ✅ [{account.get('label')}] target group cached: {target}")
         else:
-            logger.warning(f"[_get_client] ⚠️ [{account.get('label')}] target_group_id አልተቀመጠም")
+            logger.warning(f"[_get_client] ⚠️ [{account.get('label')}] target_group አልተቀመጠም")
     except Exception as e:
         logger.warning(f"[_get_client] ❌ [{account.get('label')}] target group cache failed: {e}")
 
@@ -684,7 +686,6 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 
         logger.info(f"[Add] [{account['label']}] starting add for user={user_id} → target={target_group_id}")
 
-        # ✅ STEP 1 — worker's own cache
         resolved_user = None
         try:
             resolved_user = await client.get_entity(user_id)
@@ -692,7 +693,6 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
         except Exception as e:
             logger.info(f"[Resolve] [{account['label']}] {user_id} not in cache: {e}")
 
-        # ✅ STEP 2 — contact ለማድረግ ይሞከር
         if not resolved_user:
             if not db_is_user_contacted(user_id, account["label"]):
                 try:
@@ -712,23 +712,23 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 except Exception as e:
                     logger.warning(f"[Contact] ❌ [{account['label']}] {user_id}: {e}")
 
-            # ✅ STEP 3 — contact ካደረገ በኋላ ድጋሚ resolve
             try:
                 resolved_user = await client.get_entity(user_id)
                 logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved after contact")
             except Exception as e:
                 logger.warning(f"[Resolve] ❌ [{account['label']}] still cannot resolve {user_id}: {e}")
 
-        # ✅ STEP 4 — ምንም ካልሰራ → skip
         if not resolved_user:
-            logger.warning(f"[Add] ⏭ [{account['label']}] user {user_id} unresolvable — privacy restricted, skip")
+            logger.warning(f"[Add] ⏭ [{account['label']}] user {user_id} unresolvable — skip")
             return
 
         if not db_is_user_added(user_id, target_group_id):
             try:
-                # ✅ FIX: get_input_entity — cache ውስጥ ያለውን ቀጥታ ይጠቀማል
-                group = await client.get_input_entity(target_group_id)
-                logger.info(f"[Add] ✅ [{account['label']}] target group resolved: {target_group_id}")
+                # ✅ FIX: link ወይም ID ተጠቅሞ resolve
+                target_link = db_get_setting("target_group_link")
+                target = target_link if target_link else target_group_id
+                group = await client.get_entity(target)
+                logger.info(f"[Add] ✅ [{account['label']}] target group resolved: {target}")
 
                 await client(InviteToChannelRequest(channel=group, users=[resolved_user]))
                 db_mark_user_added(user_id, target_group_id)
@@ -740,7 +740,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             except Exception as e:
                 logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
         else:
-            logger.info(f"[Add] ⏭ [{account['label']}] user={user_id} already added to {target_group_id} — skip")
+            logger.info(f"[Add] ⏭ [{account['label']}] user={user_id} already added — skip")
     finally:
         await client.disconnect()
         logger.info(f"[_get_client] 🔌 [{account.get('label')}] disconnected")
@@ -753,7 +753,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 async def _add_workers_to_source_group(group_id: int):
     listeners = db_get_all_listeners()
     if not listeners:
-        logger.warning("[WorkerAutoJoin] ⚠️ listener account የለም — workers አይታከሉም")
+        logger.warning("[WorkerAutoJoin] ⚠️ listener account የለም")
         return
 
     accounts = db_get_all_accounts()
@@ -770,7 +770,7 @@ async def _add_workers_to_source_group(group_id: int):
     try:
         try:
             group_entity = await listener_client.get_entity(group_id)
-            logger.info(f"[WorkerAutoJoin] ✅ listener resolved group {group_id}: {getattr(group_entity, 'title', group_entity)}")
+            logger.info(f"[WorkerAutoJoin] ✅ listener resolved group {group_id}")
         except Exception as e:
             logger.warning(f"[WorkerAutoJoin] ❌ listener cannot resolve group {group_id}: {e}")
             return
@@ -779,13 +779,11 @@ async def _add_workers_to_source_group(group_id: int):
         try:
             async for participant in listener_client.iter_participants(group_entity):
                 existing_member_ids.add(participant.id)
-            logger.info(f"[WorkerAutoJoin] 📋 current members in group: {len(existing_member_ids)}")
+            logger.info(f"[WorkerAutoJoin] 📋 current members: {len(existing_member_ids)}")
         except Exception as e:
             logger.warning(f"[WorkerAutoJoin] ⚠️ cannot list participants: {e}")
 
-        added_count = 0
-        skipped_count = 0
-        failed_count = 0
+        added_count = skipped_count = failed_count = 0
 
         for worker in workers:
             try:
@@ -793,40 +791,37 @@ async def _add_workers_to_source_group(group_id: int):
                 try:
                     worker_me = await worker_client.get_me()
                     worker_user_id = worker_me.id
-                    logger.info(f"[WorkerAutoJoin] 🔍 [{worker['label']}] own id={worker_user_id}")
                 finally:
                     await worker_client.disconnect()
 
                 if worker_user_id in existing_member_ids:
-                    logger.info(f"[WorkerAutoJoin] ⏭ [{worker['label']}] already in source group — skip")
+                    logger.info(f"[WorkerAutoJoin] ⏭ [{worker['label']}] already in source group")
                     skipped_count += 1
                     continue
 
                 try:
                     worker_input = await listener_client.get_entity(worker_user_id)
-                    logger.info(f"[WorkerAutoJoin] ✅ [{worker['label']}] resolved by listener")
                 except Exception as e:
-                    logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] listener CANNOT resolve worker entity: {e}")
+                    logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] cannot resolve: {e}")
                     failed_count += 1
                     continue
 
                 await listener_client(InviteToChannelRequest(channel=group_entity, users=[worker_input]))
                 added_count += 1
-                logger.info(f"[WorkerAutoJoin] ✅✅ [{worker['label']}] SUCCESSFULLY added to source group {group_id}")
+                logger.info(f"[WorkerAutoJoin] ✅✅ [{worker['label']}] added to source group")
 
             except FloodWaitError as e:
                 db_set_flood(listener_account["phone"], e.seconds)
-                logger.warning(f"[WorkerAutoJoin] 🚫 Flood on listener: {e.seconds}s — stopping")
+                logger.warning(f"[WorkerAutoJoin] 🚫 Flood: {e.seconds}s")
                 break
             except Exception as e:
                 failed_count += 1
                 logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] failed: {e}")
 
             gap = random.uniform(15, 25)
-            logger.info(f"[WorkerAutoJoin] ⏳ waiting {gap:.1f}s before next worker...")
             await asyncio.sleep(gap)
 
-        logger.info(f"[WorkerAutoJoin] 🏁 FINAL — added: {added_count}, skipped: {skipped_count}, failed: {failed_count}")
+        logger.info(f"[WorkerAutoJoin] 🏁 added:{added_count} skipped:{skipped_count} failed:{failed_count}")
 
     finally:
         await listener_client.disconnect()
@@ -891,7 +886,7 @@ async def _reload_listeners():
     source_ids = [_normalize_source_id(g[1]) for g in groups if g[3]]
 
     if not source_ids:
-        logger.warning("[Reload] ⚠️ source group የለም — listeners አይጀምሩም")
+        logger.warning("[Reload] ⚠️ source group የለም")
         return
 
     logger.info(f"[Reload] ✅ source groups: {source_ids}")
@@ -936,13 +931,10 @@ async def _reload_listeners():
 
                     sender = await event.get_sender()
                     if not sender:
-                        logger.info("[AutoAdd-DEBUG] ⏭ sender is None — skip")
                         return
                     if sender.bot:
-                        logger.info(f"[AutoAdd-DEBUG] ⏭ sender {sender.id} is bot — skip")
                         return
                     if sender.is_self:
-                        logger.info("[AutoAdd-DEBUG] ⏭ sender is self — skip")
                         return
 
                     user_id = sender.id
@@ -952,7 +944,6 @@ async def _reload_listeners():
                     try:
                         is_adm = await _is_admin_or_owner(check_client, user_id, chat_id)
                         if is_adm:
-                            logger.info(f"[AutoAdd] ⏭ user {user_id} is admin/owner — skip")
                             return
                     finally:
                         await check_client.disconnect()
@@ -967,12 +958,10 @@ async def _reload_listeners():
                     target_group_id = int(target_str)
 
                     if db_is_user_added(user_id, target_group_id):
-                        logger.info(f"[AutoAdd] ⏭ user {user_id} already added — skip")
                         return
 
                     auto_add = db_get_setting("auto_add_enabled") or "true"
                     if auto_add == "false":
-                        logger.info("[AutoAdd] ⏭ auto_add disabled — skip")
                         return
 
                     chosen = get_next_account()
@@ -1076,9 +1065,7 @@ async def cmd_setuserapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         api_hash = args[2]
         db_set_setting("userbot_api_id", str(api_id))
         db_set_setting("userbot_api_hash", api_hash)
-        await update.message.reply_text(
-            f"✅ Worker API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}"
-        )
+        await update.message.reply_text(f"✅ Worker API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
     except ValueError:
         await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
 
@@ -1096,9 +1083,7 @@ async def cmd_setuserapi2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         api_hash = args[2]
         db_set_setting("userbot_api_id2", str(api_id))
         db_set_setting("userbot_api_hash2", api_hash)
-        await update.message.reply_text(
-            f"✅ Listener API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}"
-        )
+        await update.message.reply_text(f"✅ Listener API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
     except ValueError:
         await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
 
@@ -1122,9 +1107,7 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     args = update.message.text.split(maxsplit=2)
     if len(args) < 3:
         await update.message.reply_text(
-            "❌ Format:\n/addaccount label +phone\n\n"
-            "ምሳሌ:\n/addaccount a +251911234567\n\n"
-            "⚠️ API ቀድሞ /setuserapi ተቀምጦ መሆን አለበት!"
+            "❌ Format:\n/addaccount label +phone\n\nምሳሌ:\n/addaccount a +251911234567"
         )
         return
     try:
@@ -1132,14 +1115,11 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         phone = args[2]
         api_id, api_hash = _get_api_for_account(is_listener=False)
         if not api_id or not api_hash:
-            await update.message.reply_text(
-                "❌ API አልተቀመጠም!\n/setuserapi api_id api_hash ይጠቀም"
-            )
+            await update.message.reply_text("❌ API አልተቀመጠም!\n/setuserapi api_id api_hash ይጠቀም")
             return
         db_add_account(label, api_id, api_hash, phone)
         await update.message.reply_text(
-            f"✅ Account [{label}] {phone} ተጨመረ!\n\n"
-            f"Session ለማስጀመር:\n/startsession {phone}"
+            f"✅ Account [{label}] {phone} ተጨመረ!\n\nSession ለማስጀመር:\n/startsession {phone}"
         )
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
@@ -1172,9 +1152,7 @@ async def cmd_startsession(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await client.connect()
         await client.send_code_request(phone)
         _pending_sessions[phone] = client
-        await update.message.reply_text(
-            f"✅ Code ተላከ!\n\nCode ለማስገባት:\n/verifycode {phone} 12345"
-        )
+        await update.message.reply_text(f"✅ Code ተላከ!\n\nCode ለማስገባት:\n/verifycode {phone} 12345")
     except Exception as e:
         await update.message.reply_text(f"❌ Error: {e}")
 
@@ -1200,9 +1178,7 @@ async def cmd_verifycode(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ {phone} verified!")
     except Exception as e:
         if "password" in str(e).lower():
-            await update.message.reply_text(
-                f"🔐 2FA password ያስፈልጋል!\n/verify2fa {phone} yourpassword"
-            )
+            await update.message.reply_text(f"🔐 2FA password ያስፈልጋል!\n/verify2fa {phone} yourpassword")
         else:
             await update.message.reply_text(f"❌ Error: {e}")
 
@@ -1346,6 +1322,17 @@ async def cmd_settargetgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
 
 
+async def cmd_settargetlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not _is_admin(update.effective_user.id):
+        return
+    args = update.message.text.split(maxsplit=1)
+    if len(args) < 2:
+        await update.message.reply_text("❌ Format: /settargetlink https://t.me/+xxx ወይም https://t.me/username")
+        return
+    db_set_setting("target_group_link", args[1])
+    await update.message.reply_text(f"✅ Target link ተቀምጧል: {args[1]}")
+
+
 async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -1403,6 +1390,7 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
     rows = db_list_groups()
     active_group = db_get_setting("active_group_id")
     target_group = db_get_setting("target_group_id")
+    target_link = db_get_setting("target_group_link")
     auto_add_on = (db_get_setting("auto_add_enabled") or "true") == "true"
 
     if not rows:
@@ -1423,7 +1411,8 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0):
     page_rows = rows[start: start + PAGE_SIZE]
 
     auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
-    lines = [f"🤖 Auto-Add: {auto_status}\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"]
+    link_str = f"\n🔗 Target Link: {target_link}" if target_link else ""
+    lines = [f"🤖 Auto-Add: {auto_status}{link_str}\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"]
     keyboard = []
 
     for i, (gid, group_id, group_name, is_source) in enumerate(page_rows):
@@ -1708,9 +1697,7 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     total = len(recent_users)
-    status_msg = await update.message.reply_text(
-        f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}"
-    )
+    status_msg = await update.message.reply_text(f"📤 Broadcast እየጀመረ ነው...\n👥 Users: {total}")
     asyncio.create_task(_do_broadcast(update.message, recent_users, status_msg))
 
 
@@ -1728,12 +1715,7 @@ async def cmd_myapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     lines = ["🔑 Account Details:\n"]
     for label, api_id, api_hash, phone in rows:
-        lines.append(
-            f"📱 {phone}\n"
-            f"🏷 Label: {label}\n"
-            f"🆔 API_ID: {api_id}\n"
-            f"🔑 API_HASH: {api_hash}"
-        )
+        lines.append(f"📱 {phone}\n🏷 Label: {label}\n🆔 API_ID: {api_id}\n🔑 API_HASH: {api_hash}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1742,6 +1724,7 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     active_group = db_get_setting("active_group_id") or "❌ አልተቀመጠም"
     target_group = db_get_setting("target_group_id") or "❌ አልተቀመጠም"
+    target_link = db_get_setting("target_group_link") or "❌ አልተቀመጠም"
     accounts = db_list_accounts()
     groups = db_list_groups()
     now = datetime.now()
@@ -1772,10 +1755,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     auto_add_on = (db_get_setting("auto_add_enabled") or "true") == "true"
     auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
-
     uadmins = db_list_uadmins()
     uadmin_lines = [f"  🔹 {r[0]}" for r in uadmins] if uadmins else ["  📭 የለም"]
-
     api_id1 = db_get_setting("userbot_api_id") or "❌ አልተቀመጠም"
     api_id2 = db_get_setting("userbot_api_id2") or "❌ አልተቀመጠም"
 
@@ -1784,7 +1765,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━\n\n"
         f"🤖 Auto-Add: {auto_status}\n"
         f"🟢 Active Group: {active_group}\n"
-        f"🎯 Target Group: {target_group}\n\n"
+        f"🎯 Target Group: {target_group}\n"
+        f"🔗 Target Link: {target_link}\n\n"
         f"🔑 API (Worker): {api_id1}\n"
         f"🔑 API (Listener): {api_id2}\n\n"
         "👤 Accounts:\n" +
@@ -1811,7 +1793,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/addgroup -100xxxxxxx\n"
         "/deletegroup -100xxxxxxx\n\n"
         "/setactivegroup -100xxxxxxx\n"
-        "/settargetgroup -100xxxxxxx\n\n"
+        "/settargetgroup -100xxxxxxx\n"
+        "/settargetlink https://t.me/+xxx\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "⚡ Send:\n"
         "/a /b /c /d /e መልዕክት\n\n"
@@ -1854,6 +1837,7 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("deletegroup", cmd_deletegroup))
     app.add_handler(CommandHandler("setactivegroup", cmd_setactivegroup))
     app.add_handler(CommandHandler("settargetgroup", cmd_settargetgroup))
+    app.add_handler(CommandHandler("settargetlink", cmd_settargetlink))
     app.add_handler(CommandHandler("a", cmd_a))
     app.add_handler(CommandHandler("b", cmd_b))
     app.add_handler(CommandHandler("c", cmd_c))
