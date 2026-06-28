@@ -330,7 +330,7 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_minutes NUMERIC DEFAULT 2;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS game_rule TEXT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
-            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")  # ✅ NEW
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS carry_balance NUMERIC DEFAULT 0;")
@@ -768,6 +768,15 @@ def save_settings(data: dict, group_id: int = None):
     cur = conn.cursor()
     if group_id:
         cur.execute("UPDATE game_settings SET is_active = FALSE WHERE group_id=%s", (group_id,))
+        # ✅ አዲስ game ሲጀምር unmatched SMS እና screenshot payments አጽዳ
+        cur.execute("""
+            DELETE FROM sms_payments
+            WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
+        cur.execute("""
+            DELETE FROM screenshot_payments
+            WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
     else:
         cur.execute("UPDATE game_settings SET is_active = FALSE")
     cur.execute("""
@@ -786,7 +795,7 @@ def save_settings(data: dict, group_id: int = None):
         data.get("countdown_minutes", 2),
         data.get("game_rule") or None,
         data.get("slot_symbol") or "#",
-        data.get("show_all_slots", False),  # ✅ NEW
+        data.get("show_all_slots", False),
     ))
     game_id = cur.fetchone()[0]
     conn.commit()
@@ -818,7 +827,7 @@ def get_active_settings(group_id: int = None):
             "prize_1st", "prize_2nd", "prize_3rd", "payment_info",
             "board_message_id", "remaining_message_id", "group_id",
             "is_active", "created_at", "countdown_enabled", "countdown_minutes",
-            "game_rule", "slot_symbol", "show_all_slots"]  # ✅ NEW
+            "game_rule", "slot_symbol", "show_all_slots"]
     return dict(zip(cols, row))
 
 
@@ -1961,19 +1970,38 @@ def _normalize_name(name: str) -> set:
     return set(w for w in cleaned.split() if len(w) > 1)
 
 
+def _levenshtein(s1: str, s2: str) -> int:
+    """✅ NEW: edit distance between two strings"""
+    if len(s1) < len(s2):
+        s1, s2 = s2, s1
+    if not s2:
+        return len(s1)
+    prev = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr = [i + 1]
+        for j, c2 in enumerate(s2):
+            curr.append(min(prev[j] + (c1 != c2), curr[j] + 1, prev[j + 1] + 1))
+        prev = curr
+    return prev[-1]
+
+
 def _names_match(name1: str, name2: str) -> bool:
     n1, n2 = _normalize_name(name1), _normalize_name(name2)
     if not n1 or not n2:
         return False
+
+    # 1️⃣ Exact word match
     if n1 & n2:
         return True
+
+    # 2️⃣ Fuzzy — 2 spelling mistake ይቅር
     for w1 in n1:
         for w2 in n2:
-            if len(w1) > 3 and len(w2) > 3:
-                shorter = min(len(w1), len(w2))
-                longer = max(len(w1), len(w2))
-                if shorter / longer >= 0.8 and w1[:3] == w2[:3]:
-                    return True
+            if len(w1) < 4 or len(w2) < 4:
+                continue
+            if _levenshtein(w1, w2) <= 2:
+                return True
+
     return False
 
 
@@ -1989,39 +2017,41 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     sms_id = cur.fetchone()[0]
     conn.commit()
 
-    if group_id:
-        cur.execute("""
-            SELECT id, telegram_id, ref_no, amount, sender_name
-            FROM screenshot_payments
-            WHERE matched=FALSE AND group_id=%s
-              AND (game_id=%s OR game_id IS NULL)
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
-        """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
-    else:
-        cur.execute("""
-            SELECT id, telegram_id, ref_no, amount, sender_name
-            FROM screenshot_payments
-            WHERE matched=FALSE
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
-        """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    # ✅ group_id ግዴታ — ከሌለ match አናደርግም
+    if not group_id:
+        cur.close()
+        conn.close()
+        return {"matched": None}
+
+    cur.execute("""
+        SELECT id, telegram_id, ref_no, amount, sender_name
+        FROM screenshot_payments
+        WHERE matched=FALSE AND group_id=%s
+          AND (game_id=%s OR game_id IS NULL)
+          AND amount BETWEEN %s AND %s
+        ORDER BY created_at ASC
+    """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     candidates = cur.fetchall()
 
     chosen = None
+
+    # 1️⃣ Ref match
     if ref:
         for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
             if scr_ref and scr_ref == ref:
                 chosen = (scr_id, telegram_id, scr_sender)
                 break
-    if not chosen and sender_name:
+
+    # 2️⃣ ስም ግዴታ — ስም ከሌለ match አናደርግም
+    if not chosen:
+        if not sender_name:
+            cur.close()
+            conn.close()
+            return {"matched": None}
         for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
             if _names_match(sender_name, scr_sender):
                 chosen = (scr_id, telegram_id, scr_sender)
                 break
-    if not chosen and len(candidates) == 1:
-        scr_id, telegram_id, scr_ref, scr_amount, scr_sender = candidates[0]
-        chosen = (scr_id, telegram_id, scr_sender)
 
     matched_data = None
     if chosen:
@@ -2043,25 +2073,21 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
 
 
 def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_type: str, group_id: int = None, game_id: int = None):
+    # ✅ group_id ግዴታ — ከሌለ match አናደርግም
+    if not group_id:
+        return None
+
     conn = get_conn()
     cur = conn.cursor()
-    if group_id:
-        cur.execute("""
-            SELECT id, ref_no, amount, sender_name, pay_type
-            FROM sms_payments
-            WHERE matched=FALSE AND group_id=%s
-              AND (game_id=%s OR game_id IS NULL)
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
-        """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
-    else:
-        cur.execute("""
-            SELECT id, ref_no, amount, sender_name, pay_type
-            FROM sms_payments
-            WHERE matched=FALSE
-              AND amount BETWEEN %s AND %s
-            ORDER BY created_at ASC
-        """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    cur.execute("""
+        SELECT id, ref_no, amount, sender_name, pay_type
+        FROM sms_payments
+        WHERE matched=FALSE
+          AND group_id=%s
+          AND (game_id=%s OR game_id IS NULL)
+          AND amount BETWEEN %s AND %s
+        ORDER BY created_at ASC
+    """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     candidates = cur.fetchall()
     cur.close()
     conn.close()
@@ -2069,22 +2095,21 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
     if not candidates:
         return None
 
+    # 1️⃣ Ref match
     if ref:
         for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
             if sms_ref and sms_ref == ref:
                 return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
                         "sender_name": sender_name or sms_sender}
 
-    if sender_name:
-        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
-            if _names_match(sender_name, sms_sender):
-                return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
-                        "sender_name": sender_name or sms_sender}
+    # 2️⃣ ስም ግዴታ — ስም ከሌለ match አናደርግም
+    if not sender_name:
+        return None
 
-    if len(candidates) == 1:
-        sms_id, sms_ref, sms_amount, sms_sender, sms_type = candidates[0]
-        return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
-                "sender_name": sender_name or sms_sender}
+    for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+        if _names_match(sender_name, sms_sender):
+            return {"id": sms_id, "amount": float(sms_amount), "type": sms_type,
+                    "sender_name": sender_name or sms_sender}
 
     return None
 
@@ -2566,4 +2591,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-            }
+    }
