@@ -72,7 +72,7 @@ pending_ambiguous = {}
 active_countdowns = {}
 countdown_done = set()
 nekay_active = set()
-admin_nekay_games = set()  # game_ids where admin manually set nekay — bot won't auto-nekay
+admin_nekay_games = set()
 nekay_numbers = {}
 msg_counter = {}
 
@@ -303,7 +303,6 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list)
     if game_id not in nekay_active:
         return
 
-    # FIX — is_nekay=TRUE ብቻ ይጠቀም
     fresh_nekay = get_nekay_numbers(game_id)
     snap = {}
     for number, slots in fresh_nekay:
@@ -420,7 +419,6 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
     unpaid = get_unpaid_numbers(game_id)
     if unpaid:
-        # Admin nekay ቀድሞ ካወጣ bot አይወጣም (FIX 5)
         if game_id in admin_nekay_games:
             active_countdowns.pop(game_id, None)
             return
@@ -701,7 +699,74 @@ async def handle_setcountdown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# MANUAL /nekay COMMAND — admin-set replace-style nekay list
+# ✅ NEW: /showslots COMMAND — sub-slots ላይ ስም ያሳያል/ያጠፋል
+# ============================================================
+
+async def handle_showslots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    chat_type = update.effective_chat.type
+
+    if chat_type != "private":
+        if not is_admin(user_id, update.effective_chat.id):
+            return
+        group_id = update.effective_chat.id
+    else:
+        group_id = get_admin_group_id(user_id)
+        if not group_id:
+            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            return
+
+    parts = update.message.text.strip().split()
+    if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
+        await update.message.reply_text(
+            "❌ ምሳሌ: /showslots on\n"
+            "       /showslots off\n"
+            "sub-slots ላይ ስም ያሳያል / ያጠፋል"
+        )
+        return
+
+    settings = get_active_settings(group_id=group_id)
+    if not settings:
+        await update.message.reply_text("❌ Active game የለም!")
+        return
+
+    enabled = parts[1].lower() == "on"
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE game_settings SET show_all_slots=%s WHERE id=%s",
+        (enabled, settings["id"])
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    # Board አዲስ ያዘምናል
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        taken = get_taken_numbers(fresh["id"])
+        paid = get_paid_numbers(fresh["id"])
+        board_text = build_board(fresh, taken, paid)
+        board_msg_id = fresh.get("board_message_id")
+        if board_msg_id:
+            try:
+                await ctx.bot.edit_message_text(
+                    chat_id=group_id, message_id=board_msg_id, text=board_text
+                )
+            except Exception:
+                new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                update_board_message_id(fresh["id"], new_msg.message_id)
+        else:
+            new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+            update_board_message_id(fresh["id"], new_msg.message_id)
+
+    status = "✅ On" if enabled else "❌ Off"
+    await update.message.reply_text(f"Sub-slots display: {status}")
+
+
+# ============================================================
+# MANUAL /nekay COMMAND
 # ============================================================
 
 async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -753,7 +818,7 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nekay_numbers[game_id] = snap
 
     nekay_active.add(game_id)
-    admin_nekay_games.add(game_id)  # bot ለዚህ game auto-nekay አያወጣም (FIX 5)
+    admin_nekay_games.add(game_id)
 
     rem_msg_id = settings.get("remaining_message_id")
     if rem_msg_id:
@@ -893,7 +958,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
 
     game_id = settings["id"]
 
-    # ── Ethiopian bank receipt URL check (FIX 4) ─────────────────
     import re as _re_url
     _url_pattern = _re_url.compile(r'https?://\S+')
     _urls_in_msg = _url_pattern.findall(text)
@@ -924,7 +988,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     user_numbers = get_user_numbers(game_id, user_id)
     recent_winners = get_recent_winners(group_id, hours=24)
 
-    # ── NEW: balance + failed attempts context ──
     user_balance = get_user_balance(group_id, user_id)
     user_failed_attempts = get_failed_attempts(game_id, user_id)
 
@@ -1006,7 +1069,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         update_remaining_message_id(game_id, None)
                         nekay_active.discard(game_id)
                         nekay_numbers.pop(game_id, None)
-                # all paid check
                 fresh2 = get_active_settings(group_id=group_id)
                 if fresh2:
                     await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
@@ -1159,7 +1221,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         active_countdowns[game_id] = {"task": task, "start": time.time(), "warn_secs": warn_secs}
                         countdown_done.add(game_id)
 
-            # all paid check
             fresh2 = get_active_settings(group_id=group_id)
             if fresh2:
                 await _check_all_paid_and_resend(ctx.bot, fresh2, group_id)
@@ -1231,8 +1292,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         await msg.reply_text("\n".join(lines))
         return
 
-    # ── account_query early return (9+ digit) ────────────────────
-    # parse_numbers ከመጠራቱ በፊት account intent ከሆነ ቀድሞ ምልሽ ይስጥ
     import re as _re
     if _re.findall(r'\b\d{9,}\b', text):
         if resp["reply"]:
@@ -1295,9 +1354,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         q.append((user_id, user_name, text, msg))
         return
 
-    # ══════════════════════════════════════════════════════════════
-    # AI BOOKING INTENT CHECK — unclear pattern ሲሆን ብቻ ይሰራል
-    # ══════════════════════════════════════════════════════════════
     if not parse_result.get("is_clear_pattern", True):
         try:
             from ai_fallback import ai_parse_booking
@@ -1312,7 +1368,6 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 return
         except Exception as _ai_err:
             logging.warning(f"[AI BookingCheck] Error: {_ai_err}")
-    # ══════════════════════════════════════════════════════════════
 
     numbers = parse_result["numbers"]
     ambiguous = parse_result["ambiguous"]
@@ -1391,7 +1446,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
-        # ✅ nekay snap value ይለይ
         nekay_snap_value = None
         if game_id in nekay_numbers and actual_num in nekay_numbers.get(game_id, {}):
             nekay_snap_value = nekay_numbers[game_id][actual_num]
@@ -1399,7 +1453,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_nekay = (nekay_snap_value is not None)
         is_nekay_force = (nekay_snap_value == 0)
 
-        # ✅ FIX: force-replace ጊዜ parsed_name ካለ እሱን ተጠቀም፣ ካልሆነ telegram name
         if is_nekay_force:
             actual_name = parsed_name if parsed_name else user_name
         elif parsed_name:
@@ -1418,7 +1471,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             all_taken.append(actual_num)
             continue
 
-        # ✅ user የራሱ ቁጥር ከሆነ directly change_number_type ጠራ
         if user_owns_number(game_id, user_id, actual_num) and not is_nekay:
             target_type = "half" if is_half else "full"
             result_tc = change_number_type(game_id, user_id, actual_num, target_type)
@@ -1465,7 +1517,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     reg_result = "registered" if registered else ("taken" if all_taken else None)
 
-    # ✅ NEW: ይህ turn የተመዘገቡ ቁጥሮች ሁሉም paid መሆናቸውን (auto-paid balance) ይፈትሻል
     is_paid_result = None
     if registered:
         is_paid_result = all(
@@ -1588,7 +1639,6 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     if remaining_count == 0 and game_id not in active_countdowns and game_id not in countdown_done:
         _stop_inactivity_tracker(game_id)
 
-        # ቁጥር ሲያልቅ ባንድ ጨዋታ 1 ጊዜ ብቻ — board ሁልጊዜ delete+resend (duplicate እንዳይፈጠር)
         fresh_settings_for_resend = get_active_settings(group_id=group_id)
         if fresh_settings_for_resend:
             final_board_msg_id = fresh_settings_for_resend.get("board_message_id")
@@ -1617,6 +1667,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         check_and_rotate_db()
     except Exception:
         pass
+
 
 # ============================================================
 # HELPERS
@@ -1860,7 +1911,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             update_board_message_id(game_id, new_board_msg.message_id)
 
         if game_id in nekay_active:
-            # FIX — is_nekay=TRUE ብቻ ይጠቀም (ሁሉም unpaid ሳይሆን)
             nekay_fresh = get_nekay_numbers(game_id)
             snap = {}
             for number, slots in nekay_fresh:
@@ -1887,7 +1937,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 nekay_numbers.pop(game_id, None)
                 _stop_inactivity_tracker(game_id)
 
-        # all paid check
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
 
@@ -1928,7 +1977,6 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _refresh_board(ctx, settings, group_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -1999,7 +2047,6 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _refresh_board(ctx, settings, group_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -2094,7 +2141,6 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     await _refresh_board(ctx, settings, group_id)
 
-    # all paid check
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -2405,7 +2451,6 @@ async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    # FIX 6 — private chat ብቻ ይሰራል
     if update.effective_chat.type != "private":
         return
 
@@ -2482,7 +2527,6 @@ async def handle_warnmedia_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE
     if not is_main_admin(update.effective_user.id):
         return
 
-    # complete sticker upload ቅድሚያ ይፈትሻል
     if ctx.user_data.get("awaiting_complete_sticker"):
         await handle_complete_sticker_upload(update, ctx)
         return
@@ -2627,7 +2671,6 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             else:
                 await process_registration(ctx, settings2, numbers, q_user_id, q_user_name, group_id, q_msg)
 
-        # all paid check after payment photo
         fresh = get_active_settings(group_id=group_id)
         if fresh:
             await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
@@ -2839,7 +2882,8 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/setgame — አዲስ game settings ያቀናብራል\n"
         "/newgame — ቁጥሮችን ጠርጎ አዲስ ጨዋታ ይጀምራል\n"
         "/setcountdown 2 — countdown ደቂቃ ይቀይራል (0=አጥፋ)\n"
-        "/nekay 5 10+ 15 — manually ነቃይ ያደርጋል (ቀድሞ የነበረውን ይተካል)\n"
+        "/showslots on/off — sub-slots ላይ ስም ያሳያል/ያጠፋል\n"
+        "/nekay 5 10+ 15 — manually ነቃይ ያደርጋል\n"
         "/status — ሁሉንም commands ያሳያል\n\n"
         "👤 *ምዝገባ*\n"
         "/register 5 10+ አበበ — ቁጥር manually ይመዘግባል\n"
@@ -3015,6 +3059,7 @@ def main():
     app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
     app.add_handler(CommandHandler("newgame", handle_newgame))
     app.add_handler(CommandHandler("setcountdown", handle_setcountdown))
+    app.add_handler(CommandHandler("showslots", handle_showslots))  # ✅ NEW
     app.add_handler(CommandHandler("nekay", handle_nekay_cmd))
     app.add_handler(CommandHandler("setcompletesticker", handle_setcompletesticker))
     app.add_handler(CommandHandler("listcompletestickers", handle_listcompletestickers))
@@ -3083,7 +3128,6 @@ def main():
     global _bot_instance
     _bot_instance = app.bot
 
-    # ── Jina Brain init (background task) ──────────────────────────
     async def _init_jina_background():
         try:
             from jina_brain import init_jina_brain
