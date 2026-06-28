@@ -11,6 +11,7 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
     payment_info = settings["payment_info"]
     game_rule = settings.get("game_rule")
     symbol = settings.get("slot_symbol") or "#"
+    show_all = settings.get("show_all_slots", False)
 
     if paid is None:
         paid = {}
@@ -56,7 +57,11 @@ def build_board(settings: dict, taken: dict, paid: dict = None) -> str:
                 lines.append(f"{label}{symbol} {display}")
 
             for sub in range(group_start + 1, group_end + 1):
-                lines.append(f"{format_number(sub)}{symbol}")
+                if show_all and entry:
+                    display = _format_entry(entry, paid_slots)
+                    lines.append(f"{format_number(sub)}{symbol} {display}")
+                else:
+                    lines.append(f"{format_number(sub)}{symbol}")
 
             lines.append("")
             n += per_person
