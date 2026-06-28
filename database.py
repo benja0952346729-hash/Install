@@ -2121,7 +2121,7 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
 def mark_sms_as_used(sms_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("UPDATE sms_payments SET matched=TRUE WHERE id=%s", (sms_id,))
+    cur.execute("DELETE FROM sms_payments WHERE id=%s", (sms_id,))
     conn.commit()
     cur.close()
     conn.close()
