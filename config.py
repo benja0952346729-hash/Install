@@ -32,6 +32,12 @@ DATABASE_URL = DATABASE_URLS[0] if DATABASE_URLS else None
 DB_ROW_LIMIT = int(os.environ.get("DB_ROW_LIMIT", "10000"))
 
 # ============================================================
+# TELEGRAM API — Telethon ለ Userbot
+# ============================================================
+TELEGRAM_API_ID = int(os.environ.get("TELEGRAM_API_ID", "0"))
+TELEGRAM_API_HASH = os.environ.get("TELEGRAM_API_HASH", "")
+
+# ============================================================
 # GROQ API KEYS — እስከ 10 ይቻላል
 # ============================================================
 GROQ_API_KEYS = [
