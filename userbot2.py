@@ -4,7 +4,7 @@ import re
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from config import TELEGRAM_API_ID, TELEGRAM_API_HASH
-from database import get_conn, get_recent_winners_by_telegram_id, deduct_winner_balance, mark_winner_sent
+from database import get_conn, deduct_winner_balance, mark_winner_sent
 
 logger = logging.getLogger(__name__)
 
