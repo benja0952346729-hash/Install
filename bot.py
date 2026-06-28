@@ -3144,6 +3144,10 @@ def main():
 
     loop.create_task(_init_jina_background())
 
+    # ✅ NEW — NVIDIA rate-limit health check background task
+    from handlers import ensure_nvidia_health_task_started
+    ensure_nvidia_health_task_started()
+
     async def _daily_report_scheduler():
         import pytz
         et_tz = pytz.timezone("Africa/Addis_Ababa")
