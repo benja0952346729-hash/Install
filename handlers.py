@@ -5,6 +5,8 @@ import base64
 import logging
 import random
 import asyncio
+import time
+from collections import defaultdict, deque
 from typing import Optional
 from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS, JINA_API_KEYS
 import httpx
@@ -133,7 +135,8 @@ def _get_jina_key() -> str:
 
 
 # ============================================================
-# NVIDIA KEY ROTATION
+# NVIDIA KEY ROTATION — ✅ FIXED: proactive RPM tracking +
+# never-block-forever waiting + per-key 429 background recheck
 # ============================================================
 
 _nvidia_index = 0
@@ -144,7 +147,20 @@ _nvidia_clients = [
     ) for key in NVIDIA_API_KEYS
 ] if NVIDIA_API_KEYS else []
 
+# --- NEW: rate tracking state ---
+NVIDIA_RPM_LIMIT = 38          # ✅ NEW: buffer below the real ~40 RPM ceiling
+NVIDIA_WINDOW_SECONDS = 60     # ✅ NEW: sliding window size
+NVIDIA_MAX_WAIT_SECONDS = 120  # ✅ NEW: hard cap so we never hang forever in one call
+NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60  # ✅ NEW: 7 minutes, only for blocked keys
+
+_nvidia_lock = asyncio.Lock()                      # ✅ NEW: prevents race conditions across coroutines
+_nvidia_call_times = defaultdict(deque)            # ✅ NEW: key_index -> deque of call timestamps
+_nvidia_blocked_until = {}                         # ✅ NEW: key_index -> timestamp when a 429 happened (for background recheck)
+_nvidia_health_task_started = False                # ✅ NEW: guard so we only start the background task once
+
+
 def _get_nvidia_client():
+    """Kept for backward compatibility — simple round robin, no rate awareness."""
     global _nvidia_index
     if not _nvidia_clients:
         raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
@@ -152,12 +168,148 @@ def _get_nvidia_client():
     _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
     return client
 
+
+def _nvidia_prune_window(idx: int, now: float):
+    """✅ NEW: remove timestamps older than the sliding window for one key."""
+    q = _nvidia_call_times[idx]
+    while q and now - q[0] > NVIDIA_WINDOW_SECONDS:
+        q.popleft()
+
+
+async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
+    """
+    ✅ NEW: Proactively picks an NVIDIA key that still has RPM headroom.
+
+    - If at least one key is free right now, returns it immediately (no waiting).
+    - If all keys are currently at their RPM ceiling, waits exactly until the
+      soonest key will free up (calculated, not guessed), then retries.
+    - Never blocks longer than max_wait; raises RuntimeError only after that,
+      so callers can decide what to do (the bot itself never crashes from this).
+    """
+    global _nvidia_index
+    deadline = time.time() + max_wait
+
+    while True:
+        async with _nvidia_lock:
+            now = time.time()
+            soonest_free_at = None
+
+            for _ in range(len(_nvidia_clients)):
+                idx = _nvidia_index
+                _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
+
+                _nvidia_prune_window(idx, now)
+                q = _nvidia_call_times[idx]
+
+                if len(q) < NVIDIA_RPM_LIMIT:
+                    q.append(now)
+                    return _nvidia_clients[idx], idx
+
+                key_free_at = q[0] + NVIDIA_WINDOW_SECONDS
+                if soonest_free_at is None or key_free_at < soonest_free_at:
+                    soonest_free_at = key_free_at
+
+        # ሁሉም keys busy ናቸው — በትክክለኛው ሰከንድ ስሌት እንጠብቅ
+        now = time.time()
+        if now >= deadline:
+            raise RuntimeError("All NVIDIA keys are at their rate limit — timed out waiting")
+
+        wait_time = max(0.5, (soonest_free_at or now + 1) - now)
+        wait_time = min(wait_time, deadline - now, 5)  # ከ5 ሰከንድ በላይ በአንድ ጊዜ አይጠብቅ — responsive ይሁን
+        logger.info(f"[NVIDIA] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
+        await asyncio.sleep(wait_time)
+
+
+def _nvidia_mark_blocked(idx: int):
+    """✅ NEW: remember that this key just got a 429, for background recheck."""
+    _nvidia_blocked_until[idx] = time.time()
+
+
+def _nvidia_clear_blocked(idx: int):
+    """✅ NEW: clear the 429 flag once the key is confirmed healthy again."""
+    _nvidia_blocked_until.pop(idx, None)
+
+
+async def _background_recheck_blocked_nvidia_keys():
+    """
+    ✅ NEW: Every 7 minutes, sends one tiny ping ONLY to keys that previously
+    got a 429. Healthy keys are never touched by this loop, so no quota is
+    wasted on keys that already work. Wrapped so a single failure never kills
+    the loop — it just logs and keeps going.
+    """
+    while True:
+        try:
+            await asyncio.sleep(NVIDIA_HEALTH_RECHECK_INTERVAL)
+
+            for idx in list(_nvidia_blocked_until.keys()):
+                if idx >= len(_nvidia_clients):
+                    _nvidia_blocked_until.pop(idx, None)
+                    continue
+
+                client = _nvidia_clients[idx]
+                try:
+                    await asyncio.to_thread(
+                        lambda c=client: c.chat.completions.create(
+                            model="meta/llama-4-maverick-17b-128e-instruct",
+                            messages=[{"role": "user", "content": "ping"}],
+                            max_tokens=1,
+                        )
+                    )
+                    # ✅ ነፃ ሆኗል — ከ blocked list አስወግድና rate window አጽዳ
+                    _nvidia_clear_blocked(idx)
+                    async with _nvidia_lock:
+                        _nvidia_call_times[idx].clear()
+                    logger.info(f"[NVIDIA Health] Key {idx} ነፃ ሆኗል — ወደ rotation ተመለሰ")
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                        logger.info(f"[NVIDIA Health] Key {idx} ገና busy — {NVIDIA_HEALTH_RECHECK_INTERVAL//60} ደቂቃ ይጠብቅ")
+                        _nvidia_mark_blocked(idx)
+                    else:
+                        logger.warning(f"[NVIDIA Health] Key {idx} non-rate error during recheck: {e}")
+        except Exception as loop_err:
+            # ✅ NEW: the loop itself must never die
+            logger.error(f"[NVIDIA Health] background loop error: {loop_err}", exc_info=True)
+
+
+def ensure_nvidia_health_task_started():
+    """✅ NEW: call this once at bot startup to launch the background recheck loop."""
+    global _nvidia_health_task_started
+    if _nvidia_health_task_started or not _nvidia_clients:
+        return
+    _nvidia_health_task_started = True
+    try:
+        asyncio.create_task(_background_recheck_blocked_nvidia_keys())
+        logger.info("[NVIDIA Health] background recheck task started")
+    except RuntimeError:
+        # ✅ no running event loop yet — caller should call this again once the loop is running
+        _nvidia_health_task_started = False
+
+
 async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
+    """
+    ✅ FIXED: now uses _get_available_nvidia_client (proactive RPM tracking)
+    instead of pure round-robin. On a 429 it marks the key as blocked for the
+    background recheck loop and tries the next available key — it keeps
+    retrying (waiting if needed) until max_attempts is hit, but the bot never
+    raises uncaught past this function in normal operation.
+    """
     total_keys = len(_nvidia_clients)
-    max_attempts = total_keys * 2
+    if total_keys == 0:
+        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+
+    max_attempts = total_keys * 3  # ✅ a bit more headroom since we now wait intelligently
+    last_error = None
+
     for attempt in range(max_attempts):
-        client = _get_nvidia_client()
-        key_num = (_nvidia_index - 1) % total_keys + 1
+        try:
+            client, idx = await _get_available_nvidia_client()
+        except RuntimeError as e:
+            # ሁሉም busy ሆነው max_wait አልፎ ቢሆን እንኳ፣ አንድ ተጨማሪ ትንሽ ጠብቆ እንሞክር
+            logger.warning(f"[NVIDIA] {e} — retrying once more after short wait")
+            await asyncio.sleep(2)
+            continue
+
         try:
             response = await asyncio.to_thread(
                 lambda c=client: c.chat.completions.create(
@@ -173,18 +325,19 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                     temperature=0.1,
                 )
             )
+            _nvidia_clear_blocked(idx)  # ✅ success — make sure it's not marked blocked
             return response.choices[0].message.content.strip()
         except Exception as e:
+            last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[NVIDIA] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
-                if (attempt + 1) % total_keys == 0:
-                    logger.info("[NVIDIA] All keys exhausted — waiting 10s...")
-                    await asyncio.sleep(10)
+                logger.warning(f"[NVIDIA] Key #{idx} rate limited — attempt {attempt+1}/{max_attempts}")
+                _nvidia_mark_blocked(idx)  # ✅ NEW: hand off to the 7-minute background recheck
                 continue
             logger.error(f"[NVIDIA] Non-rate error: {e}")
             raise
-    raise RuntimeError("All NVIDIA keys exhausted")
+
+    raise RuntimeError(f"All NVIDIA keys exhausted after {max_attempts} attempts: {last_error}")
 
 
 # ============================================================
