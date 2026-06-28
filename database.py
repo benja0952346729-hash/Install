@@ -330,7 +330,6 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_minutes NUMERIC DEFAULT 2;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS game_rule TEXT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
-            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")  # ✅ NEW
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS carry_balance NUMERIC DEFAULT 0;")
@@ -774,8 +773,8 @@ def save_settings(data: dict, group_id: int = None):
         INSERT INTO game_settings
         (total_numbers, numbers_per_person, price_full, price_half,
          prize_1st, prize_2nd, prize_3rd, payment_info, group_id,
-         countdown_enabled, countdown_minutes, game_rule, slot_symbol, show_all_slots)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         countdown_enabled, countdown_minutes, game_rule, slot_symbol)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
     """, (
         data["total_numbers"], data["numbers_per_person"],
@@ -786,7 +785,6 @@ def save_settings(data: dict, group_id: int = None):
         data.get("countdown_minutes", 2),
         data.get("game_rule") or None,
         data.get("slot_symbol") or "#",
-        data.get("show_all_slots", False),  # ✅ NEW
     ))
     game_id = cur.fetchone()[0]
     conn.commit()
@@ -818,7 +816,7 @@ def get_active_settings(group_id: int = None):
             "prize_1st", "prize_2nd", "prize_3rd", "payment_info",
             "board_message_id", "remaining_message_id", "group_id",
             "is_active", "created_at", "countdown_enabled", "countdown_minutes",
-            "game_rule", "slot_symbol", "show_all_slots"]  # ✅ NEW
+            "game_rule", "slot_symbol"]
     return dict(zip(cols, row))
 
 
@@ -1267,17 +1265,19 @@ def get_unpaid_numbers(game_id: int) -> list:
 
 
 # ============================================================
-# NEKAY
+# NEKAY — FIX 2a
 # ============================================================
 
 def mark_nekay(game_id: int, number: int):
     conn = get_conn()
     cur = conn.cursor()
+    # is_paid=FALSE ያላቸው → is_nekay=TRUE
     cur.execute("""
         UPDATE registrations
         SET is_nekay=TRUE
         WHERE game_id=%s AND number=%s AND is_paid=FALSE
     """, (game_id, number))
+    # pending_upgrade=TRUE ያላቸው → is_half=TRUE + is_nekay=TRUE + pending_upgrade=FALSE
     cur.execute("""
         UPDATE registrations
         SET is_nekay=TRUE,
@@ -1290,7 +1290,16 @@ def mark_nekay(game_id: int, number: int):
     conn.close()
 
 
+# ============================================================
+# ADMIN MANUAL /nekay COMMAND — REPLACE-STYLE
+# ============================================================
+
 def get_nekay_numbers(game_id: int) -> list:
+    """
+    is_nekay=TRUE ያላቸውን ቁጥሮች ብቻ ይመልሳል።
+    board edit ጊዜ snap rebuild ለማድረግ — get_unpaid_numbers ሳይሆን ይህ ይጠቀም።
+    Returns: [(number, slots), ...] — ልክ እንደ get_unpaid_numbers format
+    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1311,9 +1320,21 @@ def get_nekay_numbers(game_id: int) -> list:
 
 
 def admin_set_nekay(game_id: int, numbers: list) -> dict:
+    """
+    numbers: list of (number, is_half) tuples — admin-specified nekay list.
+    REPLACES the current nekay set entirely:
+      - All currently-nekay registrations (is_nekay=TRUE) are reset to is_nekay=FALSE.
+      - Each number in `numbers` is force-marked is_nekay=TRUE on its existing
+        registration row (paid or unpaid — NO refund, balance untouched).
+      - If a number has no registration row (empty/unclaimed slot), it is simply
+        reported back as "empty" so bot.py can add it to the in-memory nekay snap
+        (slot=0) without needing a DB row — board ✅/⏳ marks are never touched.
+    Returns: {"empty_numbers": [(number, is_half), ...]} for numbers with no row.
+    """
     conn = get_conn()
     cur = conn.cursor()
 
+    # 1) ቀድሞ nekay የነበሩ ሁሉንም → is_nekay=FALSE (ኖርማል ይመለሳሉ)
     cur.execute("""
         UPDATE registrations
         SET is_nekay=FALSE
@@ -1322,6 +1343,7 @@ def admin_set_nekay(game_id: int, numbers: list) -> dict:
 
     empty_numbers = []
 
+    # 2) አዲሶቹን ቁጥሮች force is_nekay=TRUE (paid ቢሆኑም refund የለም)
     for number, is_half in numbers:
         cur.execute("""
             SELECT id FROM registrations
@@ -1367,6 +1389,11 @@ def get_user_by_number(game_id: int, number: int) -> dict:
 
 
 def get_users_by_number(game_id: int, number: int) -> list:
+    """
+    ቁጥሩን ያዙ ሁሉንም users ይመልሳል (slot 1 + slot 2)።
+    ሁለት ሰው በግማሽ ካዙ → ሁለቱም ይመለሳሉ።
+    Returns: [{"telegram_id": ..., "user_name": ..., "slot": ..., "is_half": ...}, ...]
+    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1445,6 +1472,7 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
     conn.close()
 
 
+# ── FIX: telegram_id, number ጨምሯል (other fields untouched) ──
 def get_recent_winners(group_id: int, hours: int = 24) -> list:
     conn = get_conn()
     cur = conn.cursor()
@@ -1849,6 +1877,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
 
         else:
             if is_paid:
+                # ሁኔታ 2 — paid half, balance ከሌለ → pending_upgrade
                 cur.execute("""
                     UPDATE registrations
                     SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
@@ -1859,6 +1888,7 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
                 conn.close()
                 return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True, "pending_upgrade": True}
             else:
+                # ሁኔታ 1 — unpaid half, balance ከሌለ → ምንም ምልክት የለም
                 cur.execute("""
                     UPDATE registrations
                     SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=FALSE
@@ -1872,8 +1902,6 @@ def change_number_type(game_id: int, user_id: int, number: int, target: str) -> 
     cur.close()
     conn.close()
     return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
-
-
 # ============================================================
 # FAILED ATTEMPTS
 # ============================================================
@@ -1928,7 +1956,7 @@ def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
 
 
 # ============================================================
-# USER BALANCE
+# USER BALANCE — NEW FUNCTION
 # ============================================================
 
 def get_user_balance(group_id: int, telegram_id: int) -> float:
@@ -2114,6 +2142,28 @@ def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
     conn = get_conn()
     cur = conn.cursor()
 
+    # ── FIX: already matched SMS ካለ (same amount + same user) → duplicate match አይሁን ──
+    if group_id:
+        cur.execute("""
+            SELECT id FROM sms_payments
+            WHERE matched=TRUE
+              AND group_id=%s
+              AND amount BETWEEN %s AND %s
+            LIMIT 1
+        """, (group_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    else:
+        cur.execute("""
+            SELECT id FROM sms_payments
+            WHERE matched=TRUE
+              AND amount BETWEEN %s AND %s
+            LIMIT 1
+        """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    already_matched = cur.fetchone()
+    if already_matched:
+        cur.close()
+        conn.close()
+        return {"matched": None, "already_confirmed": True}
+
     if group_id:
         cur.execute("""
             DELETE FROM screenshot_payments
@@ -2265,6 +2315,7 @@ def remove_number(game_id: int, user_id: int, number: int) -> bool:
             DO UPDATE SET carry_balance=%s, balance=%s, updated_at=NOW()
         """, (group_id, user_id, new_total, new_carry, prize_balance, new_carry, new_total))
 
+        # FIX 2b — pending_upgrade=TRUE ያላቸውን ጨምሮ ሁሉንም unpaid ይከፍላል
         cur.execute("""
             SELECT id, number, is_half, slot, pending_upgrade
             FROM registrations
@@ -2566,4 +2617,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-        }
+    }
