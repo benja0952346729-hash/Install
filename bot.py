@@ -57,6 +57,7 @@ logging.basicConfig(
 )
 from responder import get_response, get_response_async, RESPONSES
 from userbot import init_userbot_db, register_userbot_handlers, start_listeners
+from userbot2 import init_userbot2_db, register_userbot2_handlers, start_winner_listeners
 import random
 
 (
@@ -699,7 +700,7 @@ async def handle_setcountdown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# ✅ NEW: /showslots COMMAND — sub-slots ላይ ስም ያሳያል/ያጠፋል
+# /showslots COMMAND
 # ============================================================
 
 async def handle_showslots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -742,7 +743,6 @@ async def handle_showslots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     cur.close()
     conn.close()
 
-    # Board አዲስ ያዘምናል
     fresh = get_active_settings(group_id=group_id)
     if fresh:
         taken = get_taken_numbers(fresh["id"])
@@ -1402,6 +1402,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         log_activity(group_id, registrations=1)
     except Exception:
         pass
+
 
 async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id):
     pending = pending_ambiguous.get(user_id)
@@ -2929,6 +2930,7 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             "/setcompletesticker — ሁሉም ✅ ሲሆን sticker ያስቀምጣል\n"
             "/listcompletestickers — complete stickers ዝርዝር\n"
             "/removecompletesticker N — sticker #N ያስወጣል\n"
+            "/setsession2 — userbot2 session string ያስቀምጣል\n"
         )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -3017,10 +3019,12 @@ async def start_server():
 def main():
     init_db()
     init_userbot_db()
+    init_userbot2_db()  # ← ተጨምሯል
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     register_userbot_handlers(app)
+    register_userbot2_handlers(app, app.bot)  # ← ተጨምሯል
 
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setgame", setgame_start)],
@@ -3059,7 +3063,7 @@ def main():
     app.add_handler(CommandHandler("unpaid", handle_paid_cmd))
     app.add_handler(CommandHandler("newgame", handle_newgame))
     app.add_handler(CommandHandler("setcountdown", handle_setcountdown))
-    app.add_handler(CommandHandler("showslots", handle_showslots))  # ✅ NEW
+    app.add_handler(CommandHandler("showslots", handle_showslots))
     app.add_handler(CommandHandler("nekay", handle_nekay_cmd))
     app.add_handler(CommandHandler("setcompletesticker", handle_setcompletesticker))
     app.add_handler(CommandHandler("listcompletestickers", handle_listcompletestickers))
@@ -3124,6 +3128,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_server())
     loop.run_until_complete(start_listeners())
+    loop.run_until_complete(start_winner_listeners(app.bot))  # ← ተጨምሯል
 
     global _bot_instance
     _bot_instance = app.bot
