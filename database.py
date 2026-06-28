@@ -2055,7 +2055,8 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     if chosen:
         scr_id, telegram_id, scr_sender = chosen
         cur.execute("UPDATE sms_payments SET matched=TRUE WHERE id=%s", (sms_id,))
-        cur.execute("UPDATE screenshot_payments SET matched=TRUE WHERE id=%s", (scr_id,))
+        # ── FIX: screenshot record delete — ደጋሚ match አይሆንም ──
+        cur.execute("DELETE FROM screenshot_payments WHERE id=%s", (scr_id,))
         conn.commit()
         matched_data = {
             "telegram_id": telegram_id,
@@ -2141,28 +2142,6 @@ def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
     import uuid
     conn = get_conn()
     cur = conn.cursor()
-
-    # ── FIX: already matched SMS ካለ (same amount + same user) → duplicate match አይሁን ──
-    if group_id:
-        cur.execute("""
-            SELECT id FROM sms_payments
-            WHERE matched=TRUE
-              AND group_id=%s
-              AND amount BETWEEN %s AND %s
-            LIMIT 1
-        """, (group_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
-    else:
-        cur.execute("""
-            SELECT id FROM sms_payments
-            WHERE matched=TRUE
-              AND amount BETWEEN %s AND %s
-            LIMIT 1
-        """, (float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
-    already_matched = cur.fetchone()
-    if already_matched:
-        cur.close()
-        conn.close()
-        return {"matched": None, "already_confirmed": True}
 
     if group_id:
         cur.execute("""
