@@ -135,8 +135,7 @@ def _get_jina_key() -> str:
 
 
 # ============================================================
-# NVIDIA KEY ROTATION — ✅ FIXED: proactive RPM tracking +
-# never-block-forever waiting + per-key 429 background recheck
+# NVIDIA KEY ROTATION
 # ============================================================
 
 _nvidia_index = 0
@@ -147,20 +146,18 @@ _nvidia_clients = [
     ) for key in NVIDIA_API_KEYS
 ] if NVIDIA_API_KEYS else []
 
-# --- NEW: rate tracking state ---
-NVIDIA_RPM_LIMIT = 38          # ✅ NEW: buffer below the real ~40 RPM ceiling
-NVIDIA_WINDOW_SECONDS = 60     # ✅ NEW: sliding window size
-NVIDIA_MAX_WAIT_SECONDS = 120  # ✅ NEW: hard cap so we never hang forever in one call
-NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60  # ✅ NEW: 7 minutes, only for blocked keys
+NVIDIA_RPM_LIMIT = 38
+NVIDIA_WINDOW_SECONDS = 60
+NVIDIA_MAX_WAIT_SECONDS = 120
+NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
 
-_nvidia_lock = asyncio.Lock()                      # ✅ NEW: prevents race conditions across coroutines
-_nvidia_call_times = defaultdict(deque)            # ✅ NEW: key_index -> deque of call timestamps
-_nvidia_blocked_until = {}                         # ✅ NEW: key_index -> timestamp when a 429 happened (for background recheck)
-_nvidia_health_task_started = False                # ✅ NEW: guard so we only start the background task once
+_nvidia_lock = asyncio.Lock()
+_nvidia_call_times = defaultdict(deque)
+_nvidia_blocked_until = {}
+_nvidia_health_task_started = False
 
 
 def _get_nvidia_client():
-    """Kept for backward compatibility — simple round robin, no rate awareness."""
     global _nvidia_index
     if not _nvidia_clients:
         raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
@@ -170,22 +167,12 @@ def _get_nvidia_client():
 
 
 def _nvidia_prune_window(idx: int, now: float):
-    """✅ NEW: remove timestamps older than the sliding window for one key."""
     q = _nvidia_call_times[idx]
     while q and now - q[0] > NVIDIA_WINDOW_SECONDS:
         q.popleft()
 
 
 async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
-    """
-    ✅ NEW: Proactively picks an NVIDIA key that still has RPM headroom.
-
-    - If at least one key is free right now, returns it immediately (no waiting).
-    - If all keys are currently at their RPM ceiling, waits exactly until the
-      soonest key will free up (calculated, not guessed), then retries.
-    - Never blocks longer than max_wait; raises RuntimeError only after that,
-      so callers can decide what to do (the bot itself never crashes from this).
-    """
     global _nvidia_index
     deadline = time.time() + max_wait
 
@@ -209,34 +196,25 @@ async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
                 if soonest_free_at is None or key_free_at < soonest_free_at:
                     soonest_free_at = key_free_at
 
-        # ሁሉም keys busy ናቸው — በትክክለኛው ሰከንድ ስሌት እንጠብቅ
         now = time.time()
         if now >= deadline:
             raise RuntimeError("All NVIDIA keys are at their rate limit — timed out waiting")
 
         wait_time = max(0.5, (soonest_free_at or now + 1) - now)
-        wait_time = min(wait_time, deadline - now, 5)  # ከ5 ሰከንድ በላይ በአንድ ጊዜ አይጠብቅ — responsive ይሁን
+        wait_time = min(wait_time, deadline - now, 5)
         logger.info(f"[NVIDIA] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
         await asyncio.sleep(wait_time)
 
 
 def _nvidia_mark_blocked(idx: int):
-    """✅ NEW: remember that this key just got a 429, for background recheck."""
     _nvidia_blocked_until[idx] = time.time()
 
 
 def _nvidia_clear_blocked(idx: int):
-    """✅ NEW: clear the 429 flag once the key is confirmed healthy again."""
     _nvidia_blocked_until.pop(idx, None)
 
 
 async def _background_recheck_blocked_nvidia_keys():
-    """
-    ✅ NEW: Every 7 minutes, sends one tiny ping ONLY to keys that previously
-    got a 429. Healthy keys are never touched by this loop, so no quota is
-    wasted on keys that already work. Wrapped so a single failure never kills
-    the loop — it just logs and keeps going.
-    """
     while True:
         try:
             await asyncio.sleep(NVIDIA_HEALTH_RECHECK_INTERVAL)
@@ -255,7 +233,6 @@ async def _background_recheck_blocked_nvidia_keys():
                             max_tokens=1,
                         )
                     )
-                    # ✅ ነፃ ሆኗል — ከ blocked list አስወግድና rate window አጽዳ
                     _nvidia_clear_blocked(idx)
                     async with _nvidia_lock:
                         _nvidia_call_times[idx].clear()
@@ -268,12 +245,10 @@ async def _background_recheck_blocked_nvidia_keys():
                     else:
                         logger.warning(f"[NVIDIA Health] Key {idx} non-rate error during recheck: {e}")
         except Exception as loop_err:
-            # ✅ NEW: the loop itself must never die
             logger.error(f"[NVIDIA Health] background loop error: {loop_err}", exc_info=True)
 
 
 def ensure_nvidia_health_task_started():
-    """✅ NEW: call this once at bot startup to launch the background recheck loop."""
     global _nvidia_health_task_started
     if _nvidia_health_task_started or not _nvidia_clients:
         return
@@ -282,30 +257,21 @@ def ensure_nvidia_health_task_started():
         asyncio.create_task(_background_recheck_blocked_nvidia_keys())
         logger.info("[NVIDIA Health] background recheck task started")
     except RuntimeError:
-        # ✅ no running event loop yet — caller should call this again once the loop is running
         _nvidia_health_task_started = False
 
 
 async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
-    """
-    ✅ FIXED: now uses _get_available_nvidia_client (proactive RPM tracking)
-    instead of pure round-robin. On a 429 it marks the key as blocked for the
-    background recheck loop and tries the next available key — it keeps
-    retrying (waiting if needed) until max_attempts is hit, but the bot never
-    raises uncaught past this function in normal operation.
-    """
     total_keys = len(_nvidia_clients)
     if total_keys == 0:
         raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
 
-    max_attempts = total_keys * 3  # ✅ a bit more headroom since we now wait intelligently
+    max_attempts = total_keys * 3
     last_error = None
 
     for attempt in range(max_attempts):
         try:
             client, idx = await _get_available_nvidia_client()
         except RuntimeError as e:
-            # ሁሉም busy ሆነው max_wait አልፎ ቢሆን እንኳ፣ አንድ ተጨማሪ ትንሽ ጠብቆ እንሞክር
             logger.warning(f"[NVIDIA] {e} — retrying once more after short wait")
             await asyncio.sleep(2)
             continue
@@ -325,14 +291,14 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                     temperature=0.1,
                 )
             )
-            _nvidia_clear_blocked(idx)  # ✅ success — make sure it's not marked blocked
+            _nvidia_clear_blocked(idx)
             return response.choices[0].message.content.strip()
         except Exception as e:
             last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
                 logger.warning(f"[NVIDIA] Key #{idx} rate limited — attempt {attempt+1}/{max_attempts}")
-                _nvidia_mark_blocked(idx)  # ✅ NEW: hand off to the 7-minute background recheck
+                _nvidia_mark_blocked(idx)
                 continue
             logger.error(f"[NVIDIA] Non-rate error: {e}")
             raise
@@ -390,7 +356,7 @@ Respond ONLY in this exact JSON format with no extra text:
 
 
 # ============================================================
-# FIX 4 — JINA URL → full payment data
+# JINA URL → full payment data
 # ============================================================
 
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
@@ -553,17 +519,12 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
+        # ✅ group_id ግዴታ — fallback group_id=None አስወግድ
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount, sender_name=sender_name,
             ref=ref, pay_type=photo_type, group_id=_group_id,
             game_id=game_id,
         )
-        if not match:
-            match = find_matching_sms(
-                telegram_id=telegram_id, amount=amount, sender_name=sender_name,
-                ref=ref, pay_type=photo_type, group_id=None,
-                game_id=game_id,
-            )
 
         if not match:
             save_screenshot_payment(
@@ -638,19 +599,13 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
+        # ✅ group_id ግዴታ — fallback group_id=None አስወግድ
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount,
             sender_name=sender_name, ref=ref,
             pay_type=bank, group_id=_group_id,
             game_id=game_id,
         )
-        if not match:
-            match = find_matching_sms(
-                telegram_id=telegram_id, amount=amount,
-                sender_name=sender_name, ref=ref,
-                pay_type=bank, group_id=None,
-                game_id=game_id,
-            )
 
         if not match:
             save_screenshot_payment(
@@ -822,7 +777,7 @@ Respond ONLY in this exact JSON format:
 
 
 # ============================================================
-# WINNER PHOTO HANDLER — FIX: split prize for half-slot winners
+# WINNER PHOTO HANDLER
 # ============================================================
 
 async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
@@ -861,14 +816,12 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             else:
                 lookup_number = number
 
-            # ── FIX: ሁሉንም slot holders ይምጣ (split prize) ──────────
             users = get_users_by_number(settings["id"], lookup_number)
 
             if not users:
                 lines.append(f"{medal} {place}ኛ: #{number} — user አልተገኘም")
                 continue
 
-            # Prize per person — ለሁሉም እኩል ይካፈላል
             split_prize = round(prize / len(users), 2)
 
             winner_parts = []
@@ -898,7 +851,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
                 except Exception as _log_err:
                     logger.warning(f"[log_transaction] Error: {_log_err}")
 
-            # ── Line format: 1 winner ወይም 2 winners ──────────────
             if len(users) == 1:
                 lines.append(f"{medal} {place}ኛ: #{number} — {winner_parts[0]}")
             else:
