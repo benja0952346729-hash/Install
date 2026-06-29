@@ -631,8 +631,7 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text=f"⚠️ ደረሰኙ ሊነበብ አልቻለም።
-🔍 {fail_reason}"
+                    text="⚠️ ደረሰኙ ሊነበብ አልቻለም።\n🔍 " + str(fail_reason)
                 )
             except Exception:
                 pass
@@ -661,7 +660,7 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 telegram_id=telegram_id, amount=amount,
                 sender_name=sender_name, ref=ref,
                 pay_type=bank,
-                description=f"Receipt URL: {url}",
+                description="Receipt URL: " + url,
                 group_id=_group_id,
                 game_id=game_id,
             )
