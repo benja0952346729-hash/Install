@@ -9,7 +9,7 @@ userbot2.py — Winner payment auto-listener (Telethon-based)
    (2FA ካለ: /verify2fa2 +phone password)
 
 Payment logic:
-- Photo (no caption) + unsent winner → AI analyzes screenshot → send
+- Photo (no caption) + winner → AI analyzes screenshot → send
 - #/300 (no photo)  + sent winner   → caption amount → edit
 - URL outgoing      + unsent winner → fetch amount → send
 - Normal chat / not winner          → ምንም አይሰራም, AI አይጠራም
@@ -117,6 +117,31 @@ def save_session_string(group_id: int, admin_id: int, session_string: str):
 # ============================================================
 # WINNER LOOKUP
 # ============================================================
+
+def get_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
+    """sent ምንም ይሁን winner ያምጣ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, game_id, place, user_name, prize
+        FROM winners
+        WHERE telegram_id=%s AND group_id=%s
+        ORDER BY created_at DESC
+        LIMIT 1
+    """, (telegram_id, group_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "game_id": row[1],
+        "place": row[2],
+        "user_name": row[3],
+        "prize": float(row[4]) if row[4] else 0,
+    }
+
 
 def get_unsent_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
     """Winners table ላይ sent=FALSE ያለውን winner ያምጣ"""
@@ -241,10 +266,6 @@ async def process_winner_payment(bot, group_id: int,
 
 async def _send_group_announcement(bot, group_id: int, winner: dict,
                                     amount: float, new_balance: float, is_edit: bool):
-    """
-    ✅ FIX: bot.send_message(chat_id=group_id, text=text)
-    PTB syntax ነው — keyword argument chat_id= መጠቀም አለበት
-    """
     try:
         place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(winner["place"], f"{winner['place']}ኛ")
         edit_label = " (ተስተካከለ)" if is_edit else ""
@@ -258,7 +279,6 @@ async def _send_group_announcement(bot, group_id: int, winner: dict,
 
         logger.info(f"[Userbot2] Sending announcement to group {group_id} | winner={winner['user_name']} | amount={amount} | is_edit={is_edit}")
 
-        # ✅ FIXED: chat_id= keyword argument (PTB syntax)
         await bot.send_message(chat_id=group_id, text=text)
 
         logger.info(f"[Userbot2] ✅ Announcement sent successfully to group {group_id}")
@@ -273,7 +293,7 @@ async def _send_group_announcement(bot, group_id: int, winner: dict,
 
 _active_clients = []
 _pending_sessions2: dict = {}
-_processed_photo_ids: set = set()  # ድጋሚ እንዳይቀንስ
+_processed_photo_ids: set = set()  # ድጋሚ አንድኑ screenshot እንዳይቀንስ
 
 
 async def _start_single_listener(bot, session: dict) -> bool:
@@ -334,7 +354,7 @@ async def _start_single_listener(bot, session: dict) -> bool:
 
                 # ── SEND: photo, no caption ───────────────────────────────
                 if has_photo and not caption:
-                    # ድጋሚ same photo እንዳይቀንስ
+                    # አንድኑ screenshot ድጋሚ እንዳይቀንስ
                     photo_uid = msg.photo.id
                     if photo_uid in _processed_photo_ids:
                         logger.info(f"[Userbot2] photo {photo_uid} already processed — skip")
@@ -342,14 +362,15 @@ async def _start_single_listener(bot, session: dict) -> bool:
                     _processed_photo_ids.add(photo_uid)
 
                     logger.info(f"[Userbot2] Photo detected | receiver={receiver_id} | checking winner...")
-                    winner = get_unsent_winner_by_telegram_id(receiver_id, _group_id)
+
+                    # ✅ sent ምንም ይሁን winner ያምጣ
+                    winner = get_winner_by_telegram_id(receiver_id, _group_id)
                     if not winner:
-                        logger.info(f"[Userbot2] photo — not an unsent winner for {receiver_id}, skip AI")
+                        logger.info(f"[Userbot2] photo — not a winner for {receiver_id}, skip AI")
                         return
 
-                    logger.info(f"[Userbot2] Unsent winner found: {winner['user_name']} | calling AI analyze...")
+                    logger.info(f"[Userbot2] Winner found: {winner['user_name']} | calling AI analyze...")
 
-                    # AI analyze — shared from handler.py (same rotation)
                     image_base64 = await _download_tg_photo(client, msg)
                     if not image_base64:
                         logger.error(f"[Userbot2] ❌ Photo download failed for receiver={receiver_id}")
