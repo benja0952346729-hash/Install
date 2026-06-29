@@ -375,27 +375,52 @@ Respond ONLY in JSON:
 
 
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
-    # ── Step 1: Jina reader (timeout 45s) ──
-    try:
-        jina_url = f"https://r.jina.ai/{url}"
-        headers = {
-            "Accept": "text/plain",
-            "User-Agent": "Mozilla/5.0",
-        }
-        jina_key = _get_jina_key()
-        if jina_key:
-            headers["Authorization"] = f"Bearer {jina_key}"
+    fail_reason = "unknown"
 
-        async with httpx.AsyncClient(timeout=45) as client:
-            res = await client.get(jina_url, headers=headers)
+    # ── Step 1: Jina reader — JS rendering + retry ──
+    jina_url = f"https://r.jina.ai/{url}"
+    jina_key = _get_jina_key()
+    headers = {
+        "Accept": "text/plain",
+        "User-Agent": "Mozilla/5.0",
+        "X-Timeout": "30",
+        "X-Return-Format": "text",
+    }
+    if jina_key:
+        headers["Authorization"] = f"Bearer {jina_key}"
+
+    for attempt in range(len(JINA_API_KEYS) if JINA_API_KEYS else 1):
+        try:
+            async with httpx.AsyncClient(timeout=45) as client:
+                res = await client.get(jina_url, headers=headers)
+
             if res.status_code == 200 and res.text.strip():
-                logger.info("[URL Fetch] Jina succeeded")
+                logger.info(f"[URL Fetch] Jina succeeded (attempt {attempt+1})")
                 result = await _parse_html_with_groq(res.text, url)
                 if result:
                     return result
-                logger.info("[URL Fetch] Jina returned content but Groq found no amount — trying direct fetch")
-    except Exception as e:
-        logger.warning(f"[URL Fetch] Jina failed: {e} — trying direct fetch")
+                fail_reason = "jina_ok_no_amount"
+                logger.info("[URL Fetch] Jina content ok but no amount — trying direct")
+                break
+
+            elif res.status_code == 429:
+                fail_reason = f"jina_rate_limit_{attempt+1}"
+                logger.warning(f"[URL Fetch] Jina rate limited (attempt {attempt+1}) — rotating key")
+                new_key = _get_jina_key()
+                if new_key:
+                    headers["Authorization"] = f"Bearer {new_key}"
+                await asyncio.sleep(2)
+                continue
+
+            else:
+                fail_reason = f"jina_status_{res.status_code}"
+                logger.warning(f"[URL Fetch] Jina status {res.status_code} — trying direct")
+                break
+
+        except Exception as e:
+            fail_reason = f"jina_error_{type(e).__name__}"
+            logger.warning(f"[URL Fetch] Jina error (attempt {attempt+1}): {e}")
+            break
 
     # ── Step 2: Direct httpx fetch + Groq parse ──
     try:
@@ -411,12 +436,16 @@ async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
                 result = await _parse_html_with_groq(res.text, url)
                 if result:
                     return result
-                logger.info("[URL Fetch] Direct fetch returned content but no amount found")
+                fail_reason = "direct_ok_no_amount"
+                logger.info("[URL Fetch] Direct fetch — no amount found")
+            else:
+                fail_reason = f"direct_status_{res.status_code}"
     except Exception as e:
+        fail_reason = f"direct_error_{type(e).__name__}"
         logger.warning(f"[URL Fetch] Direct fetch failed: {e}")
 
-    logger.error(f"[URL Fetch] All methods failed for: {url}")
-    return None
+    logger.error(f"[URL Fetch] All methods failed for: {url} | reason: {fail_reason}")
+    return {"_fail_reason": fail_reason}
 
 
 # ============================================================
@@ -598,10 +627,12 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         payment_data = await fetch_payment_data_from_url(url)
 
         if not payment_data or not payment_data.get("amount"):
+            fail_reason = payment_data.get("_fail_reason", "unknown") if payment_data else "no_data"
             try:
                 await bot.edit_message_text(
                     chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ ደረሰኙ ሊነበብ አልቻለም።"
+                    text=f"⚠️ ደረሰኙ ሊነበብ አልቻለም።
+🔍 {fail_reason}"
                 )
             except Exception:
                 pass
