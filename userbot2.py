@@ -241,6 +241,10 @@ async def process_winner_payment(bot, group_id: int,
 
 async def _send_group_announcement(bot, group_id: int, winner: dict,
                                     amount: float, new_balance: float, is_edit: bool):
+    """
+    ✅ FIX: bot.send_message(chat_id=group_id, text=text)
+    PTB syntax ነው — keyword argument chat_id= መጠቀም አለበት
+    """
     try:
         place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(winner["place"], f"{winner['place']}ኛ")
         edit_label = " (ተስተካከለ)" if is_edit else ""
@@ -251,9 +255,16 @@ async def _send_group_announcement(bot, group_id: int, winner: dict,
             f"💰 ETB {amount}\n"
             f"💳 ቀሪ balance: ETB {new_balance}"
         )
-        await bot.send_message(group_id, text)
+
+        logger.info(f"[Userbot2] Sending announcement to group {group_id} | winner={winner['user_name']} | amount={amount} | is_edit={is_edit}")
+
+        # ✅ FIXED: chat_id= keyword argument (PTB syntax)
+        await bot.send_message(chat_id=group_id, text=text)
+
+        logger.info(f"[Userbot2] ✅ Announcement sent successfully to group {group_id}")
+
     except Exception as e:
-        logger.warning(f"[Userbot2] Group announcement error: {e}")
+        logger.error(f"[Userbot2] ❌ Group announcement FAILED | group={group_id} | winner={winner.get('user_name')} | amount={amount} | error={e}", exc_info=True)
 
 
 # ============================================================
@@ -299,14 +310,18 @@ async def _start_single_listener(bot, session: dict) -> bool:
                     receiver_id = peer.id
 
                 if not receiver_id:
+                    logger.debug(f"[Userbot2] receiver_id ጠፍቷል — skip")
                     return
+
+                logger.debug(f"[Userbot2] Outgoing msg | receiver={receiver_id} | has_photo={has_photo} | caption='{caption[:30]}'")
 
                 # ── EDIT: #/300 text only, no photo ──────────────────────
                 edit_amount = parse_edit_caption(caption)
                 if edit_amount is not None and not has_photo:
+                    logger.info(f"[Userbot2] Edit command detected | amount={edit_amount} | receiver={receiver_id}")
                     winner = get_sent_winner_by_telegram_id(receiver_id, _group_id)
                     if not winner:
-                        logger.info(f"[Userbot2] #/edit — not a sent winner, skip")
+                        logger.info(f"[Userbot2] #/edit — not a sent winner for {receiver_id}, skip")
                         return
                     await process_winner_payment(
                         bot=bot,
@@ -319,33 +334,38 @@ async def _start_single_listener(bot, session: dict) -> bool:
 
                 # ── SEND: photo, no caption ───────────────────────────────
                 if has_photo and not caption:
-                    # ድጋሚ same photo እንዳይቀنስ
+                    # ድጋሚ same photo እንዳይቀንስ
                     photo_uid = msg.photo.id
                     if photo_uid in _processed_photo_ids:
-                        logger.info(f"[Userbot2] photo already processed — skip")
+                        logger.info(f"[Userbot2] photo {photo_uid} already processed — skip")
                         return
                     _processed_photo_ids.add(photo_uid)
 
+                    logger.info(f"[Userbot2] Photo detected | receiver={receiver_id} | checking winner...")
                     winner = get_unsent_winner_by_telegram_id(receiver_id, _group_id)
                     if not winner:
-                        logger.info(f"[Userbot2] photo — not an unsent winner, skip AI")
+                        logger.info(f"[Userbot2] photo — not an unsent winner for {receiver_id}, skip AI")
                         return
+
+                    logger.info(f"[Userbot2] Unsent winner found: {winner['user_name']} | calling AI analyze...")
 
                     # AI analyze — shared from handler.py (same rotation)
                     image_base64 = await _download_tg_photo(client, msg)
                     if not image_base64:
+                        logger.error(f"[Userbot2] ❌ Photo download failed for receiver={receiver_id}")
                         return
 
                     analysis = await analyze_screenshot(image_base64)
                     if not analysis:
-                        logger.warning("[Userbot2] AI analyze returned None")
+                        logger.warning(f"[Userbot2] ❌ AI analyze returned None for receiver={receiver_id}")
                         return
 
                     amount = analysis.get("amount")
                     if not amount:
-                        logger.warning("[Userbot2] AI could not find amount in screenshot")
+                        logger.warning(f"[Userbot2] ❌ AI could not find amount in screenshot | analysis={analysis}")
                         return
 
+                    logger.info(f"[Userbot2] AI found amount={amount} for {winner['user_name']}")
                     await process_winner_payment(
                         bot=bot,
                         group_id=_group_id,
@@ -359,17 +379,20 @@ async def _start_single_listener(bot, session: dict) -> bool:
                 if not has_photo and caption:
                     url_match = re.search(r'https?://[^\s]+', caption)
                     if url_match:
+                        logger.info(f"[Userbot2] URL detected | receiver={receiver_id} | checking winner...")
                         winner = get_unsent_winner_by_telegram_id(receiver_id, _group_id)
                         if not winner:
-                            logger.info(f"[Userbot2] URL — not an unsent winner, skip")
+                            logger.info(f"[Userbot2] URL — not an unsent winner for {receiver_id}, skip")
                             return
 
                         url = url_match.group(0)
+                        logger.info(f"[Userbot2] Fetching payment data from URL: {url}")
                         payment_data = await fetch_payment_data_from_url(url)
                         if not payment_data or not payment_data.get("amount"):
-                            logger.info(f"[Userbot2] URL fetch — no amount found")
+                            logger.warning(f"[Userbot2] ❌ URL fetch — no amount found | url={url} | data={payment_data}")
                             return
 
+                        logger.info(f"[Userbot2] URL amount={payment_data['amount']} for {winner['user_name']}")
                         await process_winner_payment(
                             bot=bot,
                             group_id=_group_id,
@@ -380,14 +403,14 @@ async def _start_single_listener(bot, session: dict) -> bool:
                         return
 
             except Exception as e:
-                logger.error(f"[Userbot2] Handler error: {e}", exc_info=True)
+                logger.error(f"[Userbot2] ❌ Handler error: {e}", exc_info=True)
 
         _active_clients.append(client)
         logger.info(f"[Userbot2] ✅ Listener started for admin {admin_id} | group {group_id}")
         return True
 
     except Exception as e:
-        logger.error(f"[Userbot2] Failed to start for admin {admin_id}: {e}", exc_info=True)
+        logger.error(f"[Userbot2] ❌ Failed to start listener for admin {admin_id}: {e}", exc_info=True)
         return False
 
 
@@ -399,9 +422,11 @@ async def _download_tg_photo(client: TelegramClient, msg) -> str:
         buf = io.BytesIO()
         await client.download_media(msg, file=buf)
         buf.seek(0)
-        return base64.b64encode(buf.read()).decode("utf-8")
+        data = buf.read()
+        logger.info(f"[Userbot2] Photo downloaded successfully | size={len(data)} bytes")
+        return base64.b64encode(data).decode("utf-8")
     except Exception as e:
-        logger.error(f"[Userbot2] Photo download error: {e}", exc_info=True)
+        logger.error(f"[Userbot2] ❌ Photo download error: {e}", exc_info=True)
         return None
 
 
@@ -411,6 +436,7 @@ async def start_winner_listeners(bot):
     if not sessions:
         logger.info("[Userbot2] No winner sender sessions found")
         return
+    logger.info(f"[Userbot2] Loading {len(sessions)} session(s)...")
     for s in sessions:
         await _start_single_listener(bot, s)
 
