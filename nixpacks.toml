@@ -1,0 +1,12 @@
+[phases.setup]
+cmds = [
+  "curl -L -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod +x /usr/local/bin/lightpanda"
+]
+
+[phases.install]
+cmds = [
+  "pip install -r requirements.txt"
+]
+
+[start]
+cmd = "python bot.py"
