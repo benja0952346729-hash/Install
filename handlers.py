@@ -28,8 +28,6 @@ from database import (
     save_winner,
     log_activity,
     find_matching_sms,
-    mark_sms_as_used,
-    is_sms_already_used,
 )
 
 logger = logging.getLogger(__name__)
@@ -519,7 +517,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # ✅ group_id ግዴታ — fallback group_id=None አስወግድ
+        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount, sender_name=sender_name,
             ref=ref, pay_type=photo_type, group_id=_group_id,
@@ -527,6 +525,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         )
 
         if not match:
+            # ✅ SMS ገና አልደረሰም — screenshot save ያደርጋል ቆይቶ SMS ሲመጣ match ይሆናል
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount, sender_name=sender_name,
                 ref=ref, pay_type=photo_type,
@@ -535,17 +534,7 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             )
             return
 
-        if is_sms_already_used(match["id"]):
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።"
-                )
-            except Exception:
-                pass
-            return
-
-        mark_sms_as_used(match["id"])
+        # ✅ Match ተገኘ — notify
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
@@ -599,7 +588,7 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # ✅ group_id ግዴታ — fallback group_id=None አስወግድ
+        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount,
             sender_name=sender_name, ref=ref,
@@ -622,17 +611,7 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 pass
             return
 
-        if is_sms_already_used(match["id"]):
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ ይህ ክፍያ አስቀድሞ ተረጋግጧል።"
-                )
-            except Exception:
-                pass
-            return
-
-        mark_sms_as_used(match["id"])
+        # ✅ Match ተገኘ — notify
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
