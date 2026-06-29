@@ -358,7 +358,7 @@ async def _fetch_screenshot_with_lightpanda(url: str) -> Optional[str]:
         from playwright.async_api import async_playwright
         async with async_playwright() as p:
             browser = await asyncio.wait_for(
-                p.chromium.connect_over_cdp("http://localhost:9222"),
+                p.chromium.connect_over_cdp("http://127.0.0.1:9222"),
                 timeout=10
             )
             context = await browser.new_context()
