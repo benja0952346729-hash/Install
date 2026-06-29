@@ -354,11 +354,36 @@ Respond ONLY in this exact JSON format with no extra text:
 async def _parse_html_with_groq(html: str, url: str) -> Optional[dict]:
     """Raw HTML ወይም text ን Groq ሰጥቶ payment data ማውጣት"""
     messages = [
-        {"role": "system", "content": """Extract payment info from this Ethiopian bank receipt page.
-The content may be raw HTML or plain text. Find the payment amount, sender name, and reference number.
-Respond ONLY in JSON:
-{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<CBE/Telebirr/Awash/Dashen/etc>"}"""},
-        {"role": "user", "content": html[:3000]},
+        {"role": "system", "content": """You are an Ethiopian bank receipt parser. Extract payment info from receipt page HTML or text.
+
+Supported banks: CBE, Telebirr, Awash, BOA, Dashen, Abay, Nib, Wegagen, United, Lion, Oromia, Bunna, Berhan, Coopbank, Enat, Amhara, Zemen, and any other Ethiopian bank.
+
+AMOUNT RULES (very important):
+- Use ONLY the base transferred/sent amount
+- Do NOT use "Total amount debited" or "Total" (includes service charge)
+- Do NOT use service charge / VAT / fee amounts
+- Look for: "Transferred Amount", "Amount", "የተላከ መጠን", "ክፍያ መጠን"
+- If only total is available, subtract service charge to get base amount
+
+SENDER NAME RULES:
+- Look for: "Payer", "Sender", "From", "የላኪ ስም", "ላኪ"
+- Return full name as shown
+
+REFERENCE RULES:
+- Look for: "Reference No", "Transaction ID", "Ref", "Transaction No", "የግብይት ቁጥር"
+- Return as-is
+
+BANK DETECTION:
+- mbreciept.cbe.com.et → "CBE"
+- telebirr → "Telebirr"
+- awash → "Awash"
+- boa → "BOA"
+- dashen → "Dashen"
+- Otherwise detect from page content
+
+Respond ONLY in JSON with no extra text:
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<bank name>"}"""},
+        {"role": "user", "content": html[:4000]},
     ]
     try:
         result_text = await _call_groq_with_rotation(messages)
