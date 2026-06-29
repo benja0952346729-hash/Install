@@ -42,17 +42,12 @@ def _start_lightpanda():
     try:
         import socket
         s = socket.socket()
-        result = s.connect_ex(('localhost', 9222))
+        result = s.connect_ex(('127.0.0.1', 9222))
         s.close()
         if result == 0:
-            logger.info("[Lightpanda] Already running on port 9222 ✅")
+            logger.info("[Lightpanda] Already running ✅")
             return
-        subprocess.Popen(
-            ["lightpanda", "serve", "--host", "0.0.0.0", "--port", "9222"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-        logger.info("[Lightpanda] Started on port 9222")
+        logger.warning("[Lightpanda] Not running — started via startCommand")
     except FileNotFoundError:
         logger.warning("[Lightpanda] Binary not found — URL screenshot disabled")
     except Exception as e:
