@@ -386,11 +386,14 @@ Respond ONLY in JSON with no extra text:
         {"role": "user", "content": html[:4000]},
     ]
     try:
+        logger.info(f"[URL Fetch] HTML preview (first 600): {html[:600]!r}")
         result_text = await _call_groq_with_rotation(messages)
+        logger.info(f"[URL Fetch] Groq raw response: {result_text!r}")
         result_text = re.sub(r"^```json\s*", "", result_text)
         result_text = re.sub(r"^```\s*", "", result_text)
         result_text = re.sub(r"\s*```$", "", result_text)
         parsed = json.loads(result_text.strip())
+        logger.info(f"[URL Fetch] Groq parsed: {parsed}")
         if parsed.get("amount"):
             return parsed
         return None
