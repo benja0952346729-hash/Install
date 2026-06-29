@@ -2,15 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "python bot.py"
+startCommand = "curl -fsSL -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod +x /usr/local/bin/lightpanda && python bot.py"
 restartPolicyType = "always"
 restartPolicyMaxRetries = 3
-
-[build.nixpacksPlan.phases.setup]
-nixPkgs = ["curl"]
-
-[build.nixpacksPlan.phases.build]
-cmds = [
-    "curl -fsSL -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod +x /usr/local/bin/lightpanda",
-    "pip install -r requirements.txt"
-]
