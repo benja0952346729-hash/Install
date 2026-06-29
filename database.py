@@ -1,1012 +1,2614 @@
-import os
+import psycopg2
+import json as _json
 import re
-import json
-import base64
-import logging
-import random
-import asyncio
-import time
-from collections import defaultdict, deque
-from typing import Optional
-from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS, JINA_API_KEYS
-import httpx
-from groq import Groq
-from openai import OpenAI
-from database import (
-    save_sms_payment,
-    save_screenshot_payment,
-    get_sms_payment_by_ref,
-    is_ref_matched_already,
-    cleanup_old_payments,
-    confirm_payment,
-    get_paid_numbers,
-    get_active_settings,
-    get_taken_numbers,
-    get_user_by_number,
-    get_users_by_number,
-    add_winner_balance,
-    save_winner,
-    log_activity,
-    find_matching_sms,
-)
-
-logger = logging.getLogger(__name__)
-
-PAYMENT_SUCCESS_MESSAGES = [
-    "መልካም ዕድል, ወዳጄ 🙏",
-    "መልካም ዕድል, ይቅናህ ቤተሰብ 🙏",
-    "መልካም ዕድል 🙏",
-    "እሺ ቤተሰብ 🙏 መልካም ዕድል",
-]
+from datetime import datetime, timedelta
+from config import DATABASE_URLS, DB_ROW_LIMIT
 
 # ============================================================
-# GROQ KEY ROTATION
+# DB CONNECTION MANAGER — 4 DB rotation
 # ============================================================
 
-_groq_index = 0
-_groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS else []
-
-def _get_groq_client() -> Groq:
-    global _groq_index
-    if not _groq_clients:
-        raise RuntimeError("GROQ_API_KEY ያልተቀመጠ!")
-    client = _groq_clients[_groq_index]
-    _groq_index = (_groq_index + 1) % len(_groq_clients)
-    return client
-
-async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str:
-    total_keys = len(_groq_clients)
-    max_attempts = total_keys * 2
-    for attempt in range(max_attempts):
-        client = _get_groq_client()
-        key_num = (_groq_index - 1) % total_keys + 1
-        try:
-            response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=0.1,
-                )
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            err_str = str(e).lower()
-            if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[Groq] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
-                if (attempt + 1) % total_keys == 0:
-                    logger.info("[Groq] All keys exhausted — waiting 10s...")
-                    await asyncio.sleep(10)
-                continue
-            logger.error(f"[Groq] Non-rate error: {e}")
-            raise
-    raise RuntimeError("All Groq keys exhausted")
-
-async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str:
-    total_keys = len(_groq_clients)
-    max_attempts = total_keys * 2
-    for attempt in range(max_attempts):
-        client = _get_groq_client()
-        key_num = (_groq_index - 1) % total_keys + 1
-        try:
-            response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model="meta-llama/llama-4-scout-17b-16e-instruct",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                            {"type": "text", "text": prompt},
-                        ],
-                    }],
-                    max_tokens=300,
-                    temperature=0.1,
-                )
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            err_str = str(e).lower()
-            if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[Groq Vision] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
-                if (attempt + 1) % total_keys == 0:
-                    logger.info("[Groq Vision] All keys exhausted — waiting 10s...")
-                    await asyncio.sleep(10)
-                continue
-            logger.error(f"[Groq Vision] Non-rate error: {e}")
-            raise
-    raise RuntimeError("All Groq vision keys exhausted")
+_current_db_index = 0
 
 
-# ============================================================
-# JINA KEY ROTATION
-# ============================================================
-
-_jina_index = 0
-
-def _get_jina_key() -> str:
-    global _jina_index
-    if not JINA_API_KEYS:
-        return None
-    key = JINA_API_KEYS[_jina_index]
-    _jina_index = (_jina_index + 1) % len(JINA_API_KEYS)
-    return key
+def get_all_db_urls():
+    return DATABASE_URLS
 
 
-# ============================================================
-# NVIDIA KEY ROTATION
-# ============================================================
-
-_nvidia_index = 0
-_nvidia_clients = [
-    OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=key
-    ) for key in NVIDIA_API_KEYS
-] if NVIDIA_API_KEYS else []
-
-NVIDIA_RPM_LIMIT = 38
-NVIDIA_WINDOW_SECONDS = 60
-NVIDIA_MAX_WAIT_SECONDS = 120
-NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
-
-_nvidia_lock = asyncio.Lock()
-_nvidia_call_times = defaultdict(deque)
-_nvidia_blocked_until = {}
-_nvidia_health_task_started = False
+def get_current_db_index():
+    return _current_db_index
 
 
-def _get_nvidia_client():
-    global _nvidia_index
-    if not _nvidia_clients:
-        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
-    client = _nvidia_clients[_nvidia_index]
-    _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
-    return client
+def set_current_db_index(index: int):
+    global _current_db_index
+    _current_db_index = index % len(DATABASE_URLS)
 
 
-def _nvidia_prune_window(idx: int, now: float):
-    q = _nvidia_call_times[idx]
-    while q and now - q[0] > NVIDIA_WINDOW_SECONDS:
-        q.popleft()
+def get_conn(db_index: int = None):
+    idx = db_index if db_index is not None else _current_db_index
+    url = DATABASE_URLS[idx]
+    return psycopg2.connect(url, sslmode='require')
 
 
-async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
-    global _nvidia_index
-    deadline = time.time() + max_wait
-
-    while True:
-        async with _nvidia_lock:
-            now = time.time()
-            soonest_free_at = None
-
-            for _ in range(len(_nvidia_clients)):
-                idx = _nvidia_index
-                _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
-
-                _nvidia_prune_window(idx, now)
-                q = _nvidia_call_times[idx]
-
-                if len(q) < NVIDIA_RPM_LIMIT:
-                    q.append(now)
-                    return _nvidia_clients[idx], idx
-
-                key_free_at = q[0] + NVIDIA_WINDOW_SECONDS
-                if soonest_free_at is None or key_free_at < soonest_free_at:
-                    soonest_free_at = key_free_at
-
-        now = time.time()
-        if now >= deadline:
-            raise RuntimeError("All NVIDIA keys are at their rate limit — timed out waiting")
-
-        wait_time = max(0.5, (soonest_free_at or now + 1) - now)
-        wait_time = min(wait_time, deadline - now, 5)
-        logger.info(f"[NVIDIA] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
-        await asyncio.sleep(wait_time)
-
-
-def _nvidia_mark_blocked(idx: int):
-    _nvidia_blocked_until[idx] = time.time()
-
-
-def _nvidia_clear_blocked(idx: int):
-    _nvidia_blocked_until.pop(idx, None)
-
-
-async def _background_recheck_blocked_nvidia_keys():
-    while True:
-        try:
-            await asyncio.sleep(NVIDIA_HEALTH_RECHECK_INTERVAL)
-
-            for idx in list(_nvidia_blocked_until.keys()):
-                if idx >= len(_nvidia_clients):
-                    _nvidia_blocked_until.pop(idx, None)
-                    continue
-
-                client = _nvidia_clients[idx]
-                try:
-                    await asyncio.to_thread(
-                        lambda c=client: c.chat.completions.create(
-                            model="meta/llama-4-maverick-17b-128e-instruct",
-                            messages=[{"role": "user", "content": "ping"}],
-                            max_tokens=1,
-                        )
-                    )
-                    _nvidia_clear_blocked(idx)
-                    async with _nvidia_lock:
-                        _nvidia_call_times[idx].clear()
-                    logger.info(f"[NVIDIA Health] Key {idx} ነፃ ሆኗል — ወደ rotation ተመለሰ")
-                except Exception as e:
-                    err_str = str(e).lower()
-                    if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                        logger.info(f"[NVIDIA Health] Key {idx} ገና busy — {NVIDIA_HEALTH_RECHECK_INTERVAL//60} ደቂቃ ይጠብቅ")
-                        _nvidia_mark_blocked(idx)
-                    else:
-                        logger.warning(f"[NVIDIA Health] Key {idx} non-rate error during recheck: {e}")
-        except Exception as loop_err:
-            logger.error(f"[NVIDIA Health] background loop error: {loop_err}", exc_info=True)
-
-
-def ensure_nvidia_health_task_started():
-    global _nvidia_health_task_started
-    if _nvidia_health_task_started or not _nvidia_clients:
-        return
-    _nvidia_health_task_started = True
+def get_db_row_count(db_index: int) -> int:
     try:
-        asyncio.create_task(_background_recheck_blocked_nvidia_keys())
-        logger.info("[NVIDIA Health] background recheck task started")
-    except RuntimeError:
-        _nvidia_health_task_started = False
+        conn = get_conn(db_index)
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT SUM(n_live_tup) FROM pg_stat_user_tables
+        """)
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return int(row[0] or 0)
+    except Exception:
+        return 0
 
 
-async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
-    total_keys = len(_nvidia_clients)
-    if total_keys == 0:
-        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+def check_and_rotate_db():
+    global _current_db_index
+    count = get_db_row_count(_current_db_index)
+    if count >= DB_ROW_LIMIT and len(DATABASE_URLS) > 1:
+        next_index = (_current_db_index + 1) % len(DATABASE_URLS)
+        _migrate_active_game(_current_db_index, next_index)
+        _current_db_index = next_index
+        return True
+    return False
 
-    max_attempts = total_keys * 3
-    last_error = None
 
-    for attempt in range(max_attempts):
+def _migrate_active_game(from_idx: int, to_idx: int):
+    try:
+        from_conn = get_conn(from_idx)
+        to_conn = get_conn(to_idx)
+        from_cur = from_conn.cursor()
+        to_cur = to_conn.cursor()
+
+        _init_db_conn(to_conn, to_cur)
+
+        from_cur.execute("SELECT * FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1")
+        settings_row = from_cur.fetchone()
+        if not settings_row:
+            return
+
+        from_cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='game_settings' ORDER BY ordinal_position")
+        cols = [r[0] for r in from_cur.fetchall()]
+        settings_dict = dict(zip(cols, settings_row))
+        game_id = settings_dict["id"]
+
+        to_cur.execute("UPDATE game_settings SET is_active = FALSE")
+        to_cur.execute("""
+            INSERT INTO game_settings
+            (total_numbers, numbers_per_person, price_full, price_half,
+             prize_1st, prize_2nd, prize_3rd, payment_info,
+             board_message_id, remaining_message_id, group_id, is_active)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,TRUE)
+            RETURNING id
+        """, (
+            settings_dict["total_numbers"], settings_dict["numbers_per_person"],
+            settings_dict["price_full"], settings_dict.get("price_half"),
+            settings_dict["prize_1st"], settings_dict.get("prize_2nd"),
+            settings_dict.get("prize_3rd"), settings_dict["payment_info"],
+            settings_dict.get("board_message_id"), settings_dict.get("remaining_message_id"),
+            settings_dict.get("group_id"),
+        ))
+        new_game_id = to_cur.fetchone()[0]
+
+        from_cur.execute("SELECT * FROM registrations WHERE game_id=%s", (game_id,))
+        regs = from_cur.fetchall()
+        from_cur.execute("SELECT column_name FROM information_schema.columns WHERE table_name='registrations' ORDER BY ordinal_position")
+        reg_cols = [r[0] for r in from_cur.fetchall()]
+        for reg in regs:
+            rd = dict(zip(reg_cols, reg))
+            to_cur.execute("""
+                INSERT INTO registrations
+                (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+            """, (new_game_id, rd["user_id"], rd["user_name"], rd["number"],
+                  rd["is_half"], rd["slot"], rd["is_paid"], rd.get("is_nekay", False),
+                  rd.get("pending_upgrade", False)))
+
+        from_cur.execute("SELECT * FROM user_balance WHERE group_id=%s", (settings_dict.get("group_id"),))
+        balances = from_cur.fetchall()
+        for bal in balances:
+            to_cur.execute("""
+                INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance)
+                VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT (group_id, telegram_id) DO UPDATE
+                    SET balance=EXCLUDED.balance,
+                        carry_balance=EXCLUDED.carry_balance,
+                        prize_balance=EXCLUDED.prize_balance
+            """, (settings_dict.get("group_id"), bal[2], bal[3], bal[4], bal[5]))
+
+        from_cur.execute("SELECT * FROM winners WHERE game_id=%s", (game_id,))
+        winners = from_cur.fetchall()
+        for w in winners:
+            to_cur.execute("""
+                INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize, created_at)
+                VALUES (%s,%s,%s,%s,%s,%s,%s)
+                ON CONFLICT DO NOTHING
+            """, (new_game_id, w[2], w[3], w[4], w[5], w[6], w[7]))
+
+        to_conn.commit()
+        from_cur.close()
+        from_conn.close()
+        to_cur.close()
+        to_conn.close()
+
+    except Exception as e:
+        import logging
+        logging.error(f"[DB Migration] Error: {e}", exc_info=True)
+
+
+def _init_db_conn(conn, cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS game_settings (
+            id SERIAL PRIMARY KEY,
+            total_numbers INT,
+            numbers_per_person INT,
+            price_full INT,
+            price_half INT,
+            prize_1st INT,
+            prize_2nd INT,
+            prize_3rd INT,
+            payment_info TEXT,
+            board_message_id BIGINT,
+            remaining_message_id BIGINT,
+            group_id BIGINT,
+            is_active BOOLEAN DEFAULT TRUE,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS registrations (
+            id SERIAL PRIMARY KEY,
+            game_id INT REFERENCES game_settings(id),
+            user_id BIGINT,
+            user_name TEXT,
+            number INT,
+            is_half BOOLEAN DEFAULT FALSE,
+            slot INT DEFAULT 1,
+            is_paid BOOLEAN DEFAULT FALSE,
+            is_nekay BOOLEAN DEFAULT FALSE,
+            pending_upgrade BOOLEAN DEFAULT FALSE,
+            registered_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS user_balance (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            telegram_id BIGINT,
+            balance NUMERIC DEFAULT 0,
+            carry_balance NUMERIC DEFAULT 0,
+            prize_balance NUMERIC DEFAULT 0,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(group_id, telegram_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS sms_payments (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT,
+            game_id INT,
+            ref_no TEXT,
+            amount NUMERIC,
+            sender_name TEXT,
+            pay_type TEXT,
+            raw_sms TEXT,
+            matched BOOLEAN DEFAULT FALSE,
+            matched_data JSONB,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS winners (
+            id SERIAL PRIMARY KEY,
+            game_id INT REFERENCES game_settings(id),
+            place INT,
+            telegram_id BIGINT,
+            user_name TEXT,
+            number INT,
+            prize NUMERIC,
+            sent BOOLEAN DEFAULT FALSE,
+            group_id BIGINT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(game_id, place)
+        );
+
+        CREATE TABLE IF NOT EXISTS screenshot_payments (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT,
+            game_id INT,
+            telegram_id BIGINT,
+            ref_no TEXT,
+            amount NUMERIC,
+            sender_name TEXT,
+            pay_type TEXT,
+            description TEXT,
+            matched BOOLEAN DEFAULT FALSE,
+            matched_data JSONB,
+            created_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(group_id, telegram_id, ref_no)
+        );
+
+        CREATE TABLE IF NOT EXISTS failed_attempts (
+            id SERIAL PRIMARY KEY,
+            game_id INT REFERENCES game_settings(id),
+            user_id BIGINT,
+            number INT,
+            reason TEXT,
+            taken_by_slot1 TEXT,
+            taken_by_slot2 TEXT,
+            taken_type_slot1 TEXT,
+            taken_type_slot2 TEXT,
+            attempted_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS groups (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT UNIQUE NOT NULL,
+            group_name TEXT,
+            is_enabled BOOLEAN DEFAULT FALSE,
+            enabled_at TIMESTAMP,
+            created_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS group_admins (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            added_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(group_id, telegram_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS group_members (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            username TEXT NOT NULL,
+            first_seen TIMESTAMP DEFAULT NOW(),
+            last_seen TIMESTAMP DEFAULT NOW(),
+            is_read BOOLEAN DEFAULT FALSE,
+            UNIQUE(group_id, username)
+        );
+
+        CREATE TABLE IF NOT EXISTS group_activity (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            messages INT DEFAULT 0,
+            registrations INT DEFAULT 0,
+            payments INT DEFAULT 0,
+            last_active TIMESTAMP DEFAULT NOW(),
+            date DATE DEFAULT CURRENT_DATE,
+            UNIQUE(group_id, date)
+        );
+
+        CREATE TABLE IF NOT EXISTS complete_stickers (
+            id SERIAL PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT NOW()
+        );
+    """)
+    conn.commit()
+
+
+def init_db():
+    for i in range(len(DATABASE_URLS)):
         try:
-            client, idx = await _get_available_nvidia_client()
-        except RuntimeError as e:
-            logger.warning(f"[NVIDIA] {e} — retrying once more after short wait")
-            await asyncio.sleep(2)
+            conn = get_conn(i)
+            cur = conn.cursor()
+            _init_db_conn(conn, cur)
+
+            cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_paid BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS is_nekay BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE registrations ADD COLUMN IF NOT EXISTS pending_upgrade BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS greeted BOOLEAN DEFAULT FALSE;")
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'winners_game_id_place_key'
+                    ) THEN
+                        ALTER TABLE winners DROP CONSTRAINT winners_game_id_place_key;
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'winners_game_id_place_telegram_id_key'
+                    ) THEN
+                        ALTER TABLE winners ADD CONSTRAINT winners_game_id_place_telegram_id_key
+                        UNIQUE (game_id, place, telegram_id);
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS sent BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_enabled BOOLEAN DEFAULT TRUE;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_minutes NUMERIC DEFAULT 2;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS game_rule TEXT;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
+            cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS carry_balance NUMERIC DEFAULT 0;")
+            cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS prize_balance NUMERIC DEFAULT 0;")
+            cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'user_balance_game_id_telegram_id_key'
+                    ) THEN
+                        ALTER TABLE user_balance DROP CONSTRAINT user_balance_game_id_telegram_id_key;
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF NOT EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'user_balance_group_id_telegram_id_key'
+                    ) THEN
+                        ALTER TABLE user_balance ADD CONSTRAINT user_balance_group_id_telegram_id_key
+                        UNIQUE (group_id, telegram_id);
+                    END IF;
+                END
+                $$;
+            """)
+
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'sms_payments_ref_no_key'
+                    ) THEN
+                        ALTER TABLE sms_payments DROP CONSTRAINT sms_payments_ref_no_key;
+                    END IF;
+                END
+                $$;
+            """)
+            cur.execute("""
+                DO $$
+                BEGIN
+                    IF EXISTS (
+                        SELECT 1 FROM pg_constraint
+                        WHERE conname = 'screenshot_payments_ref_no_key'
+                    ) THEN
+                        ALTER TABLE screenshot_payments DROP CONSTRAINT screenshot_payments_ref_no_key;
+                    END IF;
+                END
+                $$;
+            """)
+
+            cur.execute("ALTER TABLE sms_payments ALTER COLUMN ref_no DROP NOT NULL;")
+            cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
+            cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS game_id INT;")
+            cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS game_id INT;")
+            cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS amount NUMERIC;")
+            cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
+
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS warning_media (
+                    id SERIAL PRIMARY KEY,
+                    minutes NUMERIC NOT NULL UNIQUE,
+                    file_id TEXT NOT NULL,
+                    media_type TEXT DEFAULT 'photo',
+                    added_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS balance_transactions (
+                    id SERIAL PRIMARY KEY,
+                    group_id BIGINT NOT NULL,
+                    game_id INT NOT NULL,
+                    telegram_id BIGINT NOT NULL,
+                    amount NUMERIC NOT NULL,
+                    reason TEXT NOT NULL,
+                    number INT,
+                    done_by TEXT DEFAULT 'system',
+                    balance_after NUMERIC,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE INDEX IF NOT EXISTS idx_bal_tx_user
+                ON balance_transactions(group_id, telegram_id, game_id)
+            """)
+            cur.execute("""
+                ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS winner_carried BOOLEAN DEFAULT FALSE;
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS complete_stickers (
+                    id SERIAL PRIMARY KEY,
+                    file_id TEXT NOT NULL,
+                    added_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS jina_embeddings (
+                    id SERIAL PRIMARY KEY,
+                    intent TEXT NOT NULL,
+                    example_index INTEGER NOT NULL,
+                    embedding JSONB NOT NULL,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(intent, example_index)
+                )
+            """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS jina_meta (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL,
+                    updated_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
+
+            conn.commit()
+            cur.close()
+            conn.close()
+        except Exception as e:
+            import logging
+            logging.warning(f"[init_db] DB {i} error: {e}")
+
+
+# ============================================================
+# COMPLETE STICKERS
+# ============================================================
+
+def add_complete_sticker(file_id: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO complete_stickers (file_id) VALUES (%s)
+    """, (file_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_complete_stickers() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id, file_id, added_at FROM complete_stickers ORDER BY added_at ASC")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"id": r[0], "file_id": r[1], "added_at": r[2]} for r in rows]
+
+
+def remove_complete_sticker_by_index(index: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT id FROM complete_stickers ORDER BY added_at ASC")
+    rows = cur.fetchall()
+    if index < 1 or index > len(rows):
+        cur.close()
+        conn.close()
+        return False
+    target_id = rows[index - 1][0]
+    cur.execute("DELETE FROM complete_stickers WHERE id=%s", (target_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+# ============================================================
+# GROUP MANAGEMENT
+# ============================================================
+
+def enable_group(group_id: int, group_name: str = None) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO groups (group_id, group_name, is_enabled, enabled_at)
+        VALUES (%s, %s, TRUE, NOW())
+        ON CONFLICT (group_id) DO UPDATE
+            SET is_enabled=TRUE, enabled_at=NOW(),
+                group_name=COALESCE(EXCLUDED.group_name, groups.group_name)
+    """, (group_id, group_name))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+def disable_group(group_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE groups SET is_enabled=FALSE WHERE group_id=%s", (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+def is_group_enabled(group_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT is_enabled FROM groups WHERE group_id=%s", (group_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return bool(row and row[0])
+
+
+def get_enabled_groups() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT group_id, group_name, enabled_at
+        FROM groups WHERE is_enabled=TRUE ORDER BY enabled_at DESC
+    """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"group_id": r[0], "group_name": r[1], "enabled_at": r[2]} for r in rows]
+
+
+def register_group(group_id: int, group_name: str = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO groups (group_id, group_name, is_enabled)
+        VALUES (%s, %s, FALSE)
+        ON CONFLICT (group_id) DO UPDATE
+            SET group_name=COALESCE(EXCLUDED.group_name, groups.group_name)
+    """, (group_id, group_name))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# GROUP ADMIN MANAGEMENT
+# ============================================================
+
+def add_group_admin(group_id: int, telegram_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO group_admins (group_id, telegram_id)
+        VALUES (%s, %s)
+        ON CONFLICT DO NOTHING
+    """, (group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+def remove_group_admin(group_id: int, telegram_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM group_admins WHERE group_id=%s AND telegram_id=%s", (group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+def is_group_admin(group_id: int, telegram_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 1 FROM group_admins WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, telegram_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def get_group_admins(group_id: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT telegram_id FROM group_admins WHERE group_id=%s", (group_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [r[0] for r in rows]
+
+
+# ============================================================
+# USERNAME TRACKING
+# ============================================================
+
+def track_username(group_id: int, username: str):
+    if not username or username.strip() == "":
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO group_members (group_id, username, first_seen, last_seen, is_read)
+        VALUES (%s, %s, NOW(), NOW(), FALSE)
+        ON CONFLICT (group_id, username) DO UPDATE
+            SET last_seen=NOW(), is_read=FALSE
+    """, (group_id, username.strip()))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_usernames(group_id: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT username, is_read, last_seen
+        FROM group_members
+        WHERE group_id=%s
+        ORDER BY last_seen DESC
+    """, (group_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"username": r[0], "is_read": r[1], "last_seen": r[2]} for r in rows]
+
+
+def mark_usernames_read(group_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE group_members SET is_read=TRUE WHERE group_id=%s", (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def clear_usernames(group_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM group_members WHERE group_id=%s", (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# GROUP ACTIVITY TRACKING
+# ============================================================
+
+def log_activity(group_id: int, messages: int = 0, registrations: int = 0, payments: int = 0):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO group_activity (group_id, messages, registrations, payments, last_active, date)
+        VALUES (%s, %s, %s, %s, NOW(), CURRENT_DATE)
+        ON CONFLICT (group_id, date) DO UPDATE
+            SET messages = group_activity.messages + EXCLUDED.messages,
+                registrations = group_activity.registrations + EXCLUDED.registrations,
+                payments = group_activity.payments + EXCLUDED.payments,
+                last_active = NOW()
+    """, (group_id, messages, registrations, payments))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_activity(group_id: int = None) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    if group_id:
+        cur.execute("""
+            SELECT group_id, SUM(messages), SUM(registrations), SUM(payments), MAX(last_active)
+            FROM group_activity
+            WHERE group_id=%s
+            GROUP BY group_id
+        """, (group_id,))
+    else:
+        cur.execute("""
+            SELECT ga.group_id, SUM(ga.messages), SUM(ga.registrations), SUM(ga.payments), MAX(ga.last_active),
+                   g.group_name
+            FROM group_activity ga
+            LEFT JOIN groups g ON g.group_id = ga.group_id
+            WHERE g.is_enabled = TRUE
+            GROUP BY ga.group_id, g.group_name
+            ORDER BY MAX(ga.last_active) DESC
+        """)
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    if group_id:
+        return [{"group_id": r[0], "messages": r[1], "registrations": r[2], "payments": r[3], "last_active": r[4]} for r in rows]
+    return [{"group_id": r[0], "messages": r[1], "registrations": r[2], "payments": r[3], "last_active": r[4], "group_name": r[5]} for r in rows]
+
+
+# ============================================================
+# DB STATUS
+# ============================================================
+
+def get_db_status() -> list:
+    result = []
+    for i, url in enumerate(DATABASE_URLS):
+        try:
+            count = get_db_row_count(i)
+            is_active = (i == _current_db_index)
+            result.append({
+                "index": i + 1,
+                "row_count": count,
+                "limit": DB_ROW_LIMIT,
+                "is_active": is_active,
+                "is_full": count >= DB_ROW_LIMIT,
+                "percent": round((count / DB_ROW_LIMIT) * 100, 1) if DB_ROW_LIMIT > 0 else 0
+            })
+        except Exception:
+            result.append({"index": i + 1, "row_count": -1, "is_active": False, "error": True})
+    return result
+
+
+def clear_db_data(db_index: int):
+    conn = get_conn(db_index - 1)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM registrations")
+    cur.execute("DELETE FROM user_balance")
+    cur.execute("DELETE FROM winners")
+    cur.execute("DELETE FROM sms_payments")
+    cur.execute("DELETE FROM screenshot_payments")
+    cur.execute("DELETE FROM failed_attempts")
+    cur.execute("DELETE FROM group_activity")
+    cur.execute("UPDATE game_settings SET is_active=FALSE")
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# GAME SETTINGS
+# ============================================================
+
+def save_settings(data: dict, group_id: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    if group_id:
+        cur.execute("UPDATE game_settings SET is_active = FALSE WHERE group_id=%s", (group_id,))
+        cur.execute("""
+            DELETE FROM sms_payments
+            WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
+        cur.execute("""
+            DELETE FROM screenshot_payments
+            WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
+    else:
+        cur.execute("UPDATE game_settings SET is_active = FALSE")
+    cur.execute("""
+        INSERT INTO game_settings
+        (total_numbers, numbers_per_person, price_full, price_half,
+         prize_1st, prize_2nd, prize_3rd, payment_info, group_id,
+         countdown_enabled, countdown_minutes, game_rule, slot_symbol, show_all_slots)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        RETURNING id
+    """, (
+        data["total_numbers"], data["numbers_per_person"],
+        data["price_full"], data.get("price_half"),
+        data["prize_1st"], data.get("prize_2nd"), data.get("prize_3rd"),
+        data["payment_info"], group_id,
+        data.get("countdown_enabled", True),
+        data.get("countdown_minutes", 2),
+        data.get("game_rule") or None,
+        data.get("slot_symbol") or "#",
+        data.get("show_all_slots", False),
+    ))
+    game_id = cur.fetchone()[0]
+    conn.commit()
+    cur.close()
+    conn.close()
+    return game_id
+
+
+def get_active_settings(group_id: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    if group_id:
+        cur.execute("""
+            SELECT * FROM game_settings
+            WHERE is_active = TRUE AND group_id=%s
+            ORDER BY id DESC LIMIT 1
+        """, (group_id,))
+    else:
+        cur.execute("""
+            SELECT * FROM game_settings
+            WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
+        """)
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    cols = ["id", "total_numbers", "numbers_per_person", "price_full", "price_half",
+            "prize_1st", "prize_2nd", "prize_3rd", "payment_info",
+            "board_message_id", "remaining_message_id", "group_id",
+            "is_active", "created_at", "countdown_enabled", "countdown_minutes",
+            "game_rule", "slot_symbol", "show_all_slots"]
+    return dict(zip(cols, row))
+
+
+def update_countdown_settings(game_id: int, enabled: bool, minutes: float):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE game_settings
+        SET countdown_enabled=%s, countdown_minutes=%s
+        WHERE id=%s
+    """, (enabled, minutes, game_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# WARNING MEDIA
+# ============================================================
+
+def set_warning_media(minutes: float, file_id: str, media_type: str, set_by: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO warning_media (minutes, file_id, media_type)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (minutes) DO UPDATE
+            SET file_id=EXCLUDED.file_id,
+                media_type=EXCLUDED.media_type,
+                added_at=NOW()
+    """, (minutes, file_id, media_type))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_warning_media(minutes: float) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT minutes, file_id, media_type
+        FROM warning_media
+        ORDER BY ABS(minutes - %s) ASC
+        LIMIT 1
+    """, (minutes,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {"minutes": float(row[0]), "file_id": row[1], "media_type": row[2]}
+
+
+def get_all_warning_media() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT minutes, file_id, media_type FROM warning_media ORDER BY minutes")
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"minutes": float(r[0]), "file_id": r[1], "media_type": r[2]} for r in rows]
+
+
+def delete_warning_media(minutes: float):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM warning_media WHERE minutes=%s", (minutes,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def update_board_message_id(game_id, msg_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE game_settings SET board_message_id=%s WHERE id=%s", (msg_id, game_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def update_remaining_message_id(game_id, msg_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE game_settings SET remaining_message_id=%s WHERE id=%s", (msg_id, game_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# REGISTRATIONS
+# ============================================================
+
+def get_registrations(game_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, user_name, is_half, slot
+        FROM registrations WHERE game_id=%s ORDER BY number, slot
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def register_number(game_id, user_id, user_name, number, is_half, force=False, allow_toggle=True, is_parsed_name=False):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT user_name, is_half, slot FROM registrations
+        WHERE game_id=%s AND number=%s ORDER BY slot
+    """, (game_id, number))
+    existing = cur.fetchall()
+
+    cur.execute("SELECT price_full, price_half, group_id FROM game_settings WHERE id=%s", (game_id,))
+    price_row = cur.fetchone()
+    price_full = float(price_row[0] or 0)
+    price_half = float(price_row[1] or 0)
+    group_id = price_row[2]
+    cost = price_half if is_half else price_full
+
+    cur.execute("""
+        SELECT balance, carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, user_id))
+    bal_row = cur.fetchone()
+    carry_balance = float(bal_row[1]) if bal_row else 0.0
+    prize_balance = float(bal_row[2]) if bal_row else 0.0
+    total_balance = carry_balance + prize_balance
+    can_pay = total_balance >= cost
+
+    if force and existing:
+        cur.execute("""
+            UPDATE registrations
+            SET user_id=%s, user_name=%s, is_half=%s, is_nekay=FALSE,
+                is_paid=%s, pending_upgrade=FALSE, registered_at=NOW()
+            WHERE game_id=%s AND number=%s AND slot=1
+        """, (user_id, user_name, is_half, can_pay, game_id, number))
+        if not is_half:
+            cur.execute("DELETE FROM registrations WHERE game_id=%s AND number=%s AND slot=2", (game_id, number))
+        if can_pay:
+            _deduct_balance(cur, group_id, user_id, cost, prize_balance, carry_balance)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return "registered"
+
+    if not existing:
+        cur.execute("""
+            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+            VALUES (%s, %s, %s, %s, %s, 1, %s, FALSE, FALSE)
+        """, (game_id, user_id, user_name, number, is_half, can_pay))
+        if can_pay:
+            _deduct_balance(cur, group_id, user_id, cost, prize_balance, carry_balance)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return "registered"
+
+    cur.execute("""
+        SELECT user_id, user_name FROM registrations
+        WHERE game_id=%s AND number=%s AND slot=1
+    """, (game_id, number))
+    owner_row = cur.fetchone()
+    if owner_row and owner_row[0] == user_id:
+        old_name = owner_row[1]
+        if is_parsed_name and user_name and user_name.strip() != old_name:
+            cur.execute("""
+                UPDATE registrations SET user_name=%s
+                WHERE game_id=%s AND number=%s AND user_id=%s
+            """, (user_name.strip(), game_id, number, user_id))
+            conn.commit()
+
+        cur.close()
+        conn.close()
+        if not allow_toggle:
+            target = "half" if is_half else "full"
+        elif is_half:
+            current_is_half = existing[0][1]
+            target = "full" if current_is_half else "half"
+        else:
+            target = "full"
+        return change_number_type(game_id, user_id, number, target)
+
+    if len(existing) == 1 and existing[0][1] == True:
+        is_half = True
+        cost = price_half
+        can_pay = total_balance >= cost
+        cur.execute("""
+            INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+            VALUES (%s, %s, %s, %s, %s, 2, %s, FALSE, FALSE)
+        """, (game_id, user_id, user_name, number, is_half, can_pay))
+        if can_pay:
+            _deduct_balance(cur, group_id, user_id, cost, prize_balance, carry_balance)
+        conn.commit()
+        cur.close()
+        conn.close()
+        return "registered_half"
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    save_failed_attempt(game_id, user_id, number, "taken", taken={number: existing})
+    return "taken"
+
+
+def _deduct_balance(cur, group_id: int, user_id: int, cost: float, prize_balance: float, carry_balance: float):
+    if prize_balance >= cost:
+        new_prize = prize_balance - cost
+        new_carry = carry_balance
+    else:
+        new_prize = 0
+        new_carry = carry_balance - (cost - prize_balance)
+
+    new_total = new_carry + new_prize
+    cur.execute("""
+        UPDATE user_balance
+        SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+        WHERE group_id=%s AND telegram_id=%s
+    """, (new_total, new_carry, new_prize, group_id, user_id))
+
+
+def get_taken_numbers(game_id):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, user_name, is_half, slot, is_paid, pending_upgrade
+        FROM registrations WHERE game_id=%s ORDER BY number, slot
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = {}
+    for number, user_name, is_half, slot, is_paid, pending_upgrade in rows:
+        if number not in result:
+            result[number] = []
+        result[number].append((user_name, is_half, slot, is_paid, pending_upgrade))
+    return result
+
+
+def all_numbers_paid(game_id: int, settings: dict) -> bool:
+    taken = get_taken_numbers(game_id)
+    total = settings["total_numbers"]
+    per_person = settings["numbers_per_person"]
+
+    if per_person == 1:
+        number_range = range(1, total + 1)
+    else:
+        number_range = range(1, total + 1, per_person)
+
+    for n in number_range:
+        entry = taken.get(n, [])
+        if not entry:
+            return False
+        for name, is_half, slot, is_paid, pending_upgrade in entry:
+            if not is_paid or pending_upgrade:
+                return False
+        if len(entry) == 1 and entry[0][1]:
+            return False
+
+    return True
+
+
+# ============================================================
+# PAYMENT CONFIRMATION
+# ============================================================
+
+def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if group_id:
+        cur.execute("""
+            SELECT id, price_full, price_half
+            FROM game_settings WHERE is_active = TRUE AND group_id=%s ORDER BY id DESC LIMIT 1
+        """, (group_id,))
+    else:
+        cur.execute("""
+            SELECT id, price_full, price_half
+            FROM game_settings WHERE is_active = TRUE ORDER BY id DESC LIMIT 1
+        """)
+    game_row = cur.fetchone()
+    if not game_row:
+        cur.close()
+        conn.close()
+        return {"confirmed": [], "remaining_balance": amount}
+
+    game_id, price_full, price_half = game_row
+    price_full = float(price_full or 0)
+    price_half = float(price_half or 0)
+
+    _group_id = group_id
+    if not _group_id:
+        cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
+        r = cur.fetchone()
+        _group_id = r[0] if r else None
+
+    cur.execute("""
+        INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance)
+        VALUES (%s, %s, %s, %s, 0)
+        ON CONFLICT (group_id, telegram_id)
+        DO UPDATE SET
+            carry_balance = user_balance.carry_balance + %s,
+            balance = user_balance.balance + %s,
+            updated_at = NOW()
+        RETURNING carry_balance, prize_balance
+    """, (_group_id, telegram_id, amount, amount, amount, amount))
+    row = cur.fetchone()
+    carry_balance = float(row[0])
+    prize_balance = float(row[1])
+    conn.commit()
+
+    remaining_prize = prize_balance
+    remaining_carry = carry_balance
+    confirmed = []
+
+    cur.execute("""
+        SELECT id, number, is_half, slot
+        FROM registrations
+        WHERE game_id = %s AND user_id = %s AND is_paid = TRUE AND pending_upgrade = TRUE
+        ORDER BY registered_at
+    """, (game_id, telegram_id))
+    pending_upgrades = cur.fetchall()
+
+    for reg_id, number, is_half, slot in pending_upgrades:
+        cost = price_half
+        total_remaining = remaining_prize + remaining_carry
+        if total_remaining >= cost:
+            cur.execute("UPDATE registrations SET pending_upgrade=FALSE, is_nekay=FALSE WHERE id=%s", (reg_id,))
+            if remaining_prize >= cost:
+                remaining_prize -= cost
+            else:
+                diff = cost - remaining_prize
+                remaining_prize = 0
+                remaining_carry -= diff
+            confirmed.append({"number": number, "is_half": False, "slot": slot})
+
+    cur.execute("""
+        SELECT id, number, is_half, slot
+        FROM registrations
+        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE AND is_nekay = FALSE
+        ORDER BY registered_at, slot
+    """, (game_id, telegram_id))
+    unpaid = cur.fetchall()
+
+    for reg_id, number, is_half, slot in unpaid:
+        cost = price_half if is_half else price_full
+        total_remaining = remaining_prize + remaining_carry
+        if total_remaining >= cost:
+            cur.execute("UPDATE registrations SET is_paid=TRUE, pending_upgrade=FALSE WHERE id=%s", (reg_id,))
+            if remaining_prize >= cost:
+                remaining_prize -= cost
+            else:
+                diff = cost - remaining_prize
+                remaining_prize = 0
+                remaining_carry -= diff
+            confirmed.append({"number": number, "is_half": is_half, "slot": slot})
+
+    cur.execute("""
+        SELECT id, number, is_half, slot
+        FROM registrations
+        WHERE game_id = %s AND user_id = %s AND is_paid = FALSE AND is_nekay = TRUE
+        ORDER BY registered_at, slot
+    """, (game_id, telegram_id))
+    nekay_unpaid = cur.fetchall()
+
+    for reg_id, number, is_half, slot in nekay_unpaid:
+        cost = price_half if is_half else price_full
+        total_remaining = remaining_prize + remaining_carry
+        if total_remaining >= cost:
+            cur.execute("UPDATE registrations SET is_paid=TRUE, is_nekay=FALSE, pending_upgrade=FALSE WHERE id=%s", (reg_id,))
+            if remaining_prize >= cost:
+                remaining_prize -= cost
+            else:
+                diff = cost - remaining_prize
+                remaining_prize = 0
+                remaining_carry -= diff
+            confirmed.append({"number": number, "is_half": is_half, "slot": slot})
+
+    new_total = remaining_carry + remaining_prize
+    cur.execute("""
+        UPDATE user_balance
+        SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+        WHERE group_id=%s AND telegram_id=%s
+    """, (new_total, remaining_carry, remaining_prize, _group_id, telegram_id))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    if confirmed and _group_id:
+        try:
+            log_activity(_group_id, payments=1)
+        except Exception:
+            pass
+
+    return {"confirmed": confirmed, "remaining_balance": new_total}
+
+
+def get_paid_numbers(game_id: int) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, slot FROM registrations
+        WHERE game_id = %s AND is_paid = TRUE
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = {}
+    for number, slot in rows:
+        if number not in result:
+            result[number] = set()
+        result[number].add(slot)
+    return result
+
+
+# ============================================================
+# UNPAID NUMBERS
+# ============================================================
+
+def get_unpaid_numbers(game_id: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, slot, is_half, pending_upgrade
+        FROM registrations
+        WHERE game_id=%s AND (is_paid=FALSE OR pending_upgrade=TRUE)
+        ORDER BY number, slot
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = {}
+    for number, slot, is_half, pending_upgrade in rows:
+        if number not in result:
+            result[number] = set()
+        if pending_upgrade:
+            result[number].add(2)
+        else:
+            result[number].add(slot)
+    return [(n, slots) for n, slots in sorted(result.items())]
+
+
+# ============================================================
+# NEKAY
+# ============================================================
+
+def mark_nekay(game_id: int, number: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE registrations
+        SET is_nekay=TRUE
+        WHERE game_id=%s AND number=%s AND is_paid=FALSE
+    """, (game_id, number))
+    cur.execute("""
+        UPDATE registrations
+        SET is_nekay=TRUE,
+            is_half=TRUE,
+            pending_upgrade=FALSE
+        WHERE game_id=%s AND number=%s AND is_paid=TRUE AND pending_upgrade=TRUE
+    """, (game_id, number))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_nekay_numbers(game_id: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, slot, is_half
+        FROM registrations
+        WHERE game_id=%s AND is_nekay=TRUE
+        ORDER BY number, slot
+    """, (game_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    result = {}
+    for number, slot, is_half in rows:
+        if number not in result:
+            result[number] = set()
+        result[number].add(slot)
+    return [(n, slots) for n, slots in sorted(result.items())]
+
+
+def admin_set_nekay(game_id: int, numbers: list) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        UPDATE registrations
+        SET is_nekay=FALSE
+        WHERE game_id=%s AND is_nekay=TRUE
+    """, (game_id,))
+
+    empty_numbers = []
+
+    for number, is_half in numbers:
+        cur.execute("""
+            SELECT id FROM registrations
+            WHERE game_id=%s AND number=%s
+        """, (game_id, number))
+        rows = cur.fetchall()
+
+        if not rows:
+            empty_numbers.append((number, is_half))
             continue
 
-        try:
-            response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model="meta/llama-4-maverick-17b-128e-instruct",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                            {"type": "text", "text": prompt},
-                        ],
-                    }],
-                    max_tokens=300,
-                    temperature=0.1,
-                )
-            )
-            _nvidia_clear_blocked(idx)
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            last_error = e
-            err_str = str(e).lower()
-            if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[NVIDIA] Key #{idx} rate limited — attempt {attempt+1}/{max_attempts}")
-                _nvidia_mark_blocked(idx)
-                continue
-            logger.error(f"[NVIDIA] Non-rate error: {e}")
-            raise
+        cur.execute("""
+            UPDATE registrations
+            SET is_nekay=TRUE
+            WHERE game_id=%s AND number=%s
+        """, (game_id, number))
 
-    raise RuntimeError(f"All NVIDIA keys exhausted after {max_attempts} attempts: {last_error}")
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"empty_numbers": empty_numbers}
 
 
 # ============================================================
-# SMS PARSER
+# WINNER FUNCTIONS
 # ============================================================
 
-async def parse_sms(sms: str) -> Optional[dict]:
-    prompt = """You are an Ethiopian bank SMS parser.
-
-Analyze this SMS and extract payment information.
-
-Rules:
-- is_incoming: true only if money was RECEIVED (credited, received). false if money was SENT (transferred, debited).
-- type: "Telebirr", "CBE", "Awash", "BOA", or "Other"
-- amount: the amount received (not including service charges/VAT)
-- sender_name: name of who sent the money (if mentioned). null if not found.
-- ref: transaction reference number. Only extract if Telebirr (transaction number). null for others.
-- url: any URL found in the SMS. null if none.
-
-Respond ONLY in this exact JSON format with no extra text:
-{
-  "is_incoming": true or false,
-  "type": "CBE" or "Telebirr" or "Awash" or "BOA" or "Other",
-  "amount": <number or null>,
-  "sender_name": "<name or null>",
-  "ref": "<ref or null>",
-  "url": "<url or null>"
-}"""
-
-    try:
-        messages = [
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": sms},
-        ]
-        text = await _call_groq_with_rotation(messages)
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text.strip())
-
-        for field in ("sender_name", "ref", "url"):
-            if parsed.get(field) in ("null", "None", "", "N/A"):
-                parsed[field] = None
-
-        return parsed
-
-    except Exception as e:
-        logger.error(f"[SMS Parse] error: {e}", exc_info=True)
+def get_user_by_number(game_id: int, number: int) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, user_name FROM registrations
+        WHERE game_id=%s AND number=%s
+        ORDER BY is_paid DESC, slot ASC
+        LIMIT 1
+    """, (game_id, number))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
         return None
+    return {"telegram_id": row[0], "user_name": row[1]}
 
 
-# ============================================================
-# JINA URL → full payment data
-# ============================================================
+def get_users_by_number(game_id: int, number: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT user_id, user_name, slot, is_half FROM registrations
+        WHERE game_id=%s AND number=%s
+        ORDER BY slot ASC
+    """, (game_id, number))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"telegram_id": r[0], "user_name": r[1], "slot": r[2], "is_half": r[3]} for r in rows]
 
-async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
-    try:
-        jina_url = f"https://r.jina.ai/{url}"
-        headers = {
-            "Accept": "text/plain",
-            "User-Agent": "Mozilla/5.0",
-        }
-        jina_key = _get_jina_key()
-        if jina_key:
-            headers["Authorization"] = f"Bearer {jina_key}"
 
-        async with httpx.AsyncClient(timeout=20) as client:
-            res = await client.get(jina_url, headers=headers)
-            if res.status_code != 200:
-                return None
-            text = res.text
+def add_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    _group_id = group_id
+    if not _group_id:
+        cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
+        r = cur.fetchone()
+        _group_id = r[0] if r else None
+    cur.execute("""
+        INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance, winner_carried)
+        VALUES (%s, %s, %s, 0, %s, FALSE)
+        ON CONFLICT (group_id, telegram_id)
+        DO UPDATE SET
+            prize_balance = user_balance.prize_balance + %s,
+            balance = user_balance.balance + %s,
+            winner_carried = FALSE,
+            updated_at = NOW()
+    """, (_group_id, telegram_id, amount, amount, amount, amount))
+    conn.commit()
+    cur.close()
+    conn.close()
 
-        messages = [
-            {"role": "system", "content": """Extract payment info from this Ethiopian bank receipt page text.
-Respond ONLY in JSON:
-{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<CBE/Telebirr/Awash/etc>"}"""},
-            {"role": "user", "content": text[:2000]},
-        ]
-        result_text = await _call_groq_with_rotation(messages)
-        result_text = re.sub(r"^```json\s*", "", result_text)
-        result_text = re.sub(r"^```\s*", "", result_text)
-        result_text = re.sub(r"\s*```$", "", result_text)
-        return json.loads(result_text.strip())
-    except Exception as e:
-        logger.error(f"[URL Fetch] Error: {e}")
+
+def get_winner_by_place(game_id: int, place: int) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT w.telegram_id, w.user_name, w.prize,
+               COALESCE(ub.balance, 0) as balance, w.group_id
+        FROM winners w
+        LEFT JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
+        WHERE w.game_id = %s AND w.place = %s
+    """, (game_id, place))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
         return None
-
-
-# ============================================================
-# SMS WEBHOOK
-# ============================================================
-
-async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: int = None) -> dict:
-    logger.info(f"[SMS] Received: {raw_sms}")
-
-    parsed = await parse_sms(raw_sms)
-    if not parsed:
-        return {"success": False, "reason": "unparseable"}
-
-    if not parsed.get("is_incoming"):
-        logger.info("[SMS] Outgoing SMS — skipping")
-        return {"success": False, "reason": "outgoing"}
-
-    amount = parsed.get("amount")
-    sender_name = parsed.get("sender_name")
-    ref = parsed.get("ref")
-    sms_type = parsed.get("type")
-    url = parsed.get("url")
-
-    if not amount:
-        return {"success": False, "reason": "no_amount"}
-
-    if url and (not sender_name or len(sender_name.split()) < 2):
-        logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
-        url_data = await fetch_payment_data_from_url(url)
-        if url_data:
-            if url_data.get("sender_name"):
-                sender_name = url_data["sender_name"]
-            if url_data.get("amount") and not amount:
-                amount = url_data["amount"]
-            if url_data.get("ref") and not ref:
-                ref = url_data["ref"]
-
-    logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref} | group={group_id}")
-
-    settings = get_active_settings(group_id=group_id)
-    game_id = settings["id"] if settings else None
-
-    result = save_sms_payment(
-        amount=amount,
-        sender_name=sender_name,
-        ref=ref,
-        sms_type=sms_type,
-        raw_sms=raw_sms,
-        group_id=group_id,
-        game_id=game_id,
-    )
-
-    if result.get("matched") and bot:
-        matched = result["matched"]
-        target_chat = matched.get("group_id") or group_id or GROUP_CHAT_ID
-        await notify_match(bot, matched, chat_id=target_chat, nekay_cb=nekay_cb)
-
     return {
-        "success": True,
-        "matched": result.get("matched"),
-        "amount": amount,
-        "sender_name": sender_name,
-        "ref": ref,
-        "type": sms_type,
+        "telegram_id": row[0],
+        "user_name": row[1],
+        "prize": float(row[2]) if row[2] else 0,
+        "balance": float(row[3]) if row[3] else 0,
+        "group_id": row[4],
     }
 
 
+def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
+                number: int, prize: float, group_id: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize, group_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (game_id, place, telegram_id) DO UPDATE
+            SET user_name=EXCLUDED.user_name,
+                number=EXCLUDED.number,
+                prize=EXCLUDED.prize,
+                group_id=EXCLUDED.group_id
+    """, (game_id, place, telegram_id, user_name, number, prize, group_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_recent_winners(group_id: int, hours: int = 24) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=hours)
+    cur.execute("""
+        SELECT w.place, w.user_name, w.prize, w.created_at,
+               COALESCE(ub.balance, 0) as balance, w.sent,
+               w.telegram_id, w.number
+        FROM winners w
+        LEFT JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
+        WHERE w.group_id=%s AND w.created_at >= %s
+        ORDER BY w.created_at DESC
+    """, (group_id, cutoff))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{
+        "place": r[0], "user_name": r[1], "prize": float(r[2] or 0),
+        "created_at": r[3], "balance": float(r[4] or 0), "sent": r[5],
+        "telegram_id": r[6], "number": r[7]
+    } for r in rows]
+
+
+def cleanup_old_winners():
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=24)
+    cur.execute("""
+        DELETE FROM winners w
+        USING user_balance ub
+        WHERE w.telegram_id = ub.telegram_id
+          AND w.group_id = ub.group_id
+          AND w.created_at < %s
+          AND COALESCE(ub.balance, 0) <= 0
+    """, (cutoff,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE winners SET sent=TRUE WHERE game_id=%s AND telegram_id=%s
+    """, (game_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    _group_id = group_id
+    if not _group_id:
+        cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
+        r = cur.fetchone()
+        _group_id = r[0] if r else None
+
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (_group_id, telegram_id))
+    bal_row = cur.fetchone()
+    if not bal_row:
+        cur.close()
+        conn.close()
+        return {"new_balance": 0, "nekay_numbers": []}
+
+    carry_balance = float(bal_row[0])
+    prize_balance = float(bal_row[1])
+
+    if prize_balance >= amount:
+        new_prize = prize_balance - amount
+        new_carry = carry_balance
+    else:
+        new_prize = 0
+        new_carry = carry_balance - (amount - prize_balance)
+
+    new_total = new_carry + new_prize
+
+    cur.execute("""
+        UPDATE user_balance
+        SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+        WHERE group_id=%s AND telegram_id=%s
+    """, (new_total, new_carry, new_prize, _group_id, telegram_id))
+    conn.commit()
+
+    unpaid_numbers = []
+
+    if new_carry < 0:
+        cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
+        price_row = cur.fetchone()
+        price_full = float(price_row[0] or 0)
+        price_half = float(price_row[1] or 0)
+
+        cur.execute("""
+            SELECT id, number, is_half, slot
+            FROM registrations
+            WHERE game_id = %s AND user_id = %s AND is_paid = TRUE AND is_nekay = FALSE
+            ORDER BY
+                CASE WHEN is_half THEN %s ELSE %s END ASC,
+                registered_at DESC
+        """, (game_id, telegram_id, price_half, price_full))
+        paid_regs = cur.fetchall()
+
+        remaining_debt = abs(new_carry)
+        for reg_id, number, is_half, slot in paid_regs:
+            if remaining_debt <= 0:
+                break
+            cost = price_half if is_half else price_full
+            cur.execute("UPDATE registrations SET is_paid=FALSE, is_nekay=FALSE WHERE id=%s", (reg_id,))
+            remaining_debt -= cost
+            new_carry += cost
+            unpaid_numbers.append(number)
+
+        new_total = new_carry + new_prize
+        cur.execute("""
+            UPDATE user_balance
+            SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+            WHERE group_id=%s AND telegram_id=%s
+        """, (new_total, new_carry, new_prize, _group_id, telegram_id))
+        conn.commit()
+
+    cur.close()
+    conn.close()
+    return {"new_balance": new_total, "nekay_numbers": unpaid_numbers}
+
+
 # ============================================================
-# PAYMENT PHOTO HANDLER
+# CLEAR PRIZE BALANCE ON NEW GAME
 # ============================================================
 
-async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
-    chat_id = msg.chat.id
-    telegram_id = msg.from_user.id
-    username = msg.from_user.username or msg.from_user.first_name or "Unknown"
-    _group_id = group_id or chat_id
+def clear_prize_balance(group_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE user_balance
+        SET prize_balance=0,
+            balance=carry_balance,
+            updated_at=NOW()
+        WHERE group_id=%s AND winner_carried=TRUE
+    """, (group_id,))
+    cur.execute("""
+        UPDATE user_balance
+        SET winner_carried=TRUE,
+            updated_at=NOW()
+        WHERE group_id=%s AND winner_carried=FALSE AND prize_balance > 0
+    """, (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
 
+
+# ============================================================
+# ADMIN — CLEAR, REMOVE, PAY
+# ============================================================
+
+def clear_game(game_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM registrations WHERE game_id=%s", (game_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def admin_remove_player(game_id: int, number: int, slot: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    if slot is None:
+        cur.execute("DELETE FROM registrations WHERE game_id=%s AND number=%s", (game_id, number))
+    else:
+        cur.execute("DELETE FROM registrations WHERE game_id=%s AND number=%s AND slot=%s", (game_id, number, slot))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def admin_mark_paid(game_id: int, number: int, slot: int, is_paid: bool = True):
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if not is_paid:
+        cur.execute("""
+            UPDATE registrations SET is_paid=%s
+            WHERE game_id=%s AND number=%s AND slot=%s
+        """, (is_paid, game_id, number, slot))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    cur.execute("""
+        SELECT r.user_id, r.is_half, r.is_paid,
+               gs.price_full, gs.price_half, gs.group_id
+        FROM registrations r
+        JOIN game_settings gs ON gs.id = r.game_id
+        WHERE r.game_id=%s AND r.number=%s AND r.slot=%s
+    """, (game_id, number, slot))
+    row = cur.fetchone()
+
+    if not row:
+        cur.close()
+        conn.close()
+        return
+
+    user_id, is_half, already_paid, price_full, price_half, group_id = row
+    price_full = float(price_full or 0)
+    price_half = float(price_half or 0)
+
+    cur.execute("""
+        UPDATE registrations SET is_paid=TRUE, pending_upgrade=FALSE
+        WHERE game_id=%s AND number=%s AND slot=%s
+    """, (game_id, number, slot))
+
+    if already_paid or not user_id or user_id == 0:
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    cost = price_half if is_half else price_full
+
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, user_id))
+    bal_row = cur.fetchone()
+    if not bal_row:
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    carry_balance = float(bal_row[0])
+    prize_balance = float(bal_row[1])
+    total_balance = carry_balance + prize_balance
+
+    if total_balance <= 0:
+        conn.commit()
+        cur.close()
+        conn.close()
+        return
+
+    deduct = min(cost, total_balance)
+    _deduct_balance(cur, group_id, user_id, deduct, prize_balance, carry_balance)
+
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# TYPE CHANGE
+# ============================================================
+
+def change_number_type(game_id: int, user_id: int, number: int, target: str) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT id, is_half, slot, is_paid, pending_upgrade
+        FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s
+        ORDER BY slot
+    """, (game_id, user_id, number))
+    rows = cur.fetchall()
+
+    if not rows:
+        cur.close()
+        conn.close()
+        return {"status": "not_yours"}
+
+    cur.execute("SELECT price_full, price_half, group_id FROM game_settings WHERE id=%s", (game_id,))
+    price_row = cur.fetchone()
+    price_full = float(price_row[0] or 0)
+    price_half = float(price_row[1] or 0)
+    group_id = price_row[2]
+
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, user_id))
+    bal_row = cur.fetchone()
+    carry_balance = float(bal_row[0]) if bal_row else 0.0
+    prize_balance = float(bal_row[1]) if bal_row else 0.0
+    total_balance = carry_balance + prize_balance
+
+    reg_id, is_half, slot, is_paid, is_pending = rows[0]
+
+    if target == "half" and not is_half:
+        if len(rows) > 1:
+            cur.close()
+            conn.close()
+            return {"status": "conflict"}
+
+        cur.execute("UPDATE registrations SET is_half=TRUE, pending_upgrade=FALSE WHERE id=%s", (reg_id,))
+
+        if is_paid and not is_pending:
+            refund = price_full - price_half
+            if refund > 0:
+                new_carry = carry_balance + refund
+                new_prize = prize_balance
+                new_total = new_carry + new_prize
+
+                cur.execute("""
+                    UPDATE user_balance
+                    SET carry_balance=%s, balance=%s, updated_at=NOW()
+                    WHERE group_id=%s AND telegram_id=%s
+                """, (new_carry, new_total, group_id, user_id))
+
+                cur.execute("""
+                    SELECT id, number, is_half, slot
+                    FROM registrations
+                    WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND number != %s
+                    ORDER BY registered_at, slot
+                """, (game_id, user_id, number))
+                unpaid_own = cur.fetchall()
+
+                remaining_carry = new_carry
+                remaining_prize = new_prize
+                for reg_id2, reg_num, reg_is_half, reg_slot in unpaid_own:
+                    cost2 = price_half if reg_is_half else price_full
+                    if remaining_carry + remaining_prize >= cost2:
+                        cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id2,))
+                        if remaining_prize >= cost2:
+                            remaining_prize -= cost2
+                        else:
+                            diff = cost2 - remaining_prize
+                            remaining_prize = 0
+                            remaining_carry -= diff
+
+                new_total2 = remaining_carry + remaining_prize
+                cur.execute("""
+                    UPDATE user_balance
+                    SET carry_balance=%s, prize_balance=%s, balance=%s, updated_at=NOW()
+                    WHERE group_id=%s AND telegram_id=%s
+                """, (remaining_carry, remaining_prize, new_total2, group_id, user_id))
+
+        elif not is_paid:
+            if total_balance >= price_half:
+                cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id,))
+                _deduct_balance(cur, group_id, user_id, price_half, prize_balance, carry_balance)
+                is_paid = True
+
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"status": "ok", "refund": 0, "charge": 0, "is_paid": is_paid}
+
+    if target == "full" and is_half:
+        charge = price_full - price_half
+        if total_balance >= charge:
+            cur.execute("""
+                UPDATE registrations SET is_half=FALSE, is_paid=TRUE, is_nekay=FALSE, pending_upgrade=FALSE
+                WHERE id=%s
+            """, (reg_id,))
+            _deduct_balance(cur, group_id, user_id, charge, prize_balance, carry_balance)
+
+            cur.execute("""
+                SELECT carry_balance, prize_balance FROM user_balance
+                WHERE group_id=%s AND telegram_id=%s
+            """, (group_id, user_id))
+            updated_bal = cur.fetchone()
+            if updated_bal:
+                rem_carry = float(updated_bal[0])
+                rem_prize = float(updated_bal[1])
+
+                cur.execute("""
+                    SELECT id, number, is_half, slot
+                    FROM registrations
+                    WHERE game_id=%s AND user_id=%s AND is_paid=FALSE AND number != %s
+                    ORDER BY registered_at, slot
+                """, (game_id, user_id, number))
+                unpaid_own = cur.fetchall()
+
+                for reg_id2, reg_num, reg_is_half, reg_slot in unpaid_own:
+                    cost2 = price_half if reg_is_half else price_full
+                    if rem_carry + rem_prize >= cost2:
+                        cur.execute("UPDATE registrations SET is_paid=TRUE WHERE id=%s", (reg_id2,))
+                        if rem_prize >= cost2:
+                            rem_prize -= cost2
+                        else:
+                            diff = cost2 - rem_prize
+                            rem_prize = 0
+                            rem_carry -= diff
+
+                new_total2 = rem_carry + rem_prize
+                cur.execute("""
+                    UPDATE user_balance
+                    SET carry_balance=%s, prize_balance=%s, balance=%s, updated_at=NOW()
+                    WHERE group_id=%s AND telegram_id=%s
+                """, (rem_carry, rem_prize, new_total2, group_id, user_id))
+
+            conn.commit()
+            cur.close()
+            conn.close()
+            return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True}
+
+        else:
+            if is_paid:
+                cur.execute("""
+                    UPDATE registrations
+                    SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=TRUE
+                    WHERE id=%s
+                """, (reg_id,))
+                conn.commit()
+                cur.close()
+                conn.close()
+                return {"status": "ok", "refund": 0, "charge": charge, "is_paid": True, "pending_upgrade": True}
+            else:
+                cur.execute("""
+                    UPDATE registrations
+                    SET is_half=FALSE, is_nekay=FALSE, pending_upgrade=FALSE
+                    WHERE id=%s
+                """, (reg_id,))
+                conn.commit()
+                cur.close()
+                conn.close()
+                return {"status": "ok", "refund": 0, "charge": charge, "is_paid": False, "pending_upgrade": False}
+
+    cur.close()
+    conn.close()
+    return {"status": "no_change", "refund": 0, "charge": 0, "is_paid": is_paid}
+
+
+# ============================================================
+# FAILED ATTEMPTS
+# ============================================================
+
+def save_failed_attempt(game_id: int, user_id: int, number: int, reason: str, taken: dict = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    slot1_name = slot2_name = slot1_type = slot2_type = None
+    if reason == "taken" and taken:
+        entry = taken.get(number, [])
+        for name, is_half, slot in entry:
+            if slot == 1:
+                slot1_name = name
+                slot1_type = "half" if is_half else "full"
+            elif slot == 2:
+                slot2_name = name
+                slot2_type = "half"
+    cur.execute("""
+        INSERT INTO failed_attempts
+        (game_id, user_id, number, reason, taken_by_slot1, taken_by_slot2, taken_type_slot1, taken_type_slot2)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+    """, (game_id, user_id, number, reason, slot1_name, slot2_name, slot1_type, slot2_type))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_failed_attempts(game_id: int, user_id: int, number: int = None) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    if number:
+        cur.execute("""
+            SELECT number, reason, taken_by_slot1, taken_by_slot2,
+                   taken_type_slot1, taken_type_slot2, attempted_at
+            FROM failed_attempts
+            WHERE game_id=%s AND user_id=%s AND number=%s
+            ORDER BY attempted_at DESC LIMIT 1
+        """, (game_id, user_id, number))
+    else:
+        cur.execute("""
+            SELECT DISTINCT ON (number) number, reason, taken_by_slot1, taken_by_slot2,
+                   taken_type_slot1, taken_type_slot2, attempted_at
+            FROM failed_attempts
+            WHERE game_id=%s AND user_id=%s
+            ORDER BY number, attempted_at DESC
+        """, (game_id, user_id))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [{"number": r[0], "reason": r[1], "slot1_name": r[2], "slot2_name": r[3],
+             "slot1_type": r[4], "slot2_type": r[5], "attempted_at": r[6]} for r in rows]
+
+
+# ============================================================
+# USER BALANCE
+# ============================================================
+
+def get_user_balance(group_id: int, telegram_id: int) -> float:
     try:
-        photo = msg.photo[-1]
-        image_base64 = await download_image_as_base64(photo.file_id)
-        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
-        analysis = await analyze_screenshot(image_base64)
-
-        if not analysis:
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።"
-                )
-            except Exception:
-                pass
-            return
-
-        photo_type = analysis.get("photoType", "other")
-
-        if photo_type == "other":
-            description = analysis.get("description", "ክፍያ ያልሆነ ምስል")
-            try:
-                desc = await describe_photo_in_amharic(description)
-            except Exception as e:
-                logger.warning(f"[Describe] Failed: {e}")
-                desc = "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id, text=desc
-                )
-            except Exception:
-                pass
-            return
-
-        amount = analysis.get("amount")
-        sender_name = analysis.get("sender_name")
-        ref = analysis.get("ref")
-
-        if not amount:
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።"
-                )
-            except Exception:
-                pass
-            return
-
-        logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
-
-        settings = get_active_settings(group_id=_group_id)
-        game_id = settings["id"] if settings else None
-
-        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
-        match = find_matching_sms(
-            telegram_id=telegram_id, amount=amount, sender_name=sender_name,
-            ref=ref, pay_type=photo_type, group_id=_group_id,
-            game_id=game_id,
-        )
-
-        if not match:
-            # ✅ SMS ገና አልደረሰም — screenshot save ያደርጋል ቆይቶ SMS ሲመጣ match ይሆናል
-            save_screenshot_payment(
-                telegram_id=telegram_id, amount=amount, sender_name=sender_name,
-                ref=ref, pay_type=photo_type,
-                description=analysis.get("description", ""), group_id=_group_id,
-                game_id=game_id,
-            )
-            return
-
-        # ✅ Match ተገኘ — notify
-        await notify_match(
-            bot,
-            {**match, "telegram_id": telegram_id, "group_id": _group_id},
-            msg.message_id, _group_id,
-            nekay_cb=nekay_cb,
-            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
-            receipt_msg_id=receipt_msg.message_id,
-            receipt_chat_id=chat_id,
-        )
-
-        try:
-            log_activity(_group_id, payments=1)
-        except Exception:
-            pass
-
-    except Exception as e:
-        logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
-        await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT balance FROM user_balance
+            WHERE group_id=%s AND telegram_id=%s
+        """, (group_id, telegram_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+        return float(row[0]) if row else 0.0
+    except Exception:
+        return 0.0
 
 
 # ============================================================
-# Receipt URL handler
+# PAYMENT MATCHING
 # ============================================================
 
-async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int, nekay_cb=None):
-    chat_id = msg.chat.id
-    _group_id = group_id or chat_id
-
-    try:
-        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
-
-        payment_data = await fetch_payment_data_from_url(url)
-
-        if not payment_data or not payment_data.get("amount"):
-            try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ ደረሰኙ ሊነበብ አልቻለም።"
-                )
-            except Exception:
-                pass
-            return
-
-        amount = payment_data["amount"]
-        sender_name = payment_data.get("sender_name")
-        ref = payment_data.get("ref")
-        bank = payment_data.get("bank", "Bank")
-
-        logger.info(f"[Receipt URL] bank={bank} | amount={amount} | sender={sender_name} | ref={ref} | group={_group_id}")
-
-        settings = get_active_settings(group_id=_group_id)
-        game_id = settings["id"] if settings else None
-
-        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
-        match = find_matching_sms(
-            telegram_id=telegram_id, amount=amount,
-            sender_name=sender_name, ref=ref,
-            pay_type=bank, group_id=_group_id,
-            game_id=game_id,
-        )
-
-        if not match:
-            save_screenshot_payment(
-                telegram_id=telegram_id, amount=amount,
-                sender_name=sender_name, ref=ref,
-                pay_type=bank,
-                description=f"Receipt URL: {url}",
-                group_id=_group_id,
-                game_id=game_id,
-            )
-            try:
-                await bot.delete_message(chat_id=chat_id, message_id=receipt_msg.message_id)
-            except Exception:
-                pass
-            return
-
-        # ✅ Match ተገኘ — notify
-        await notify_match(
-            bot,
-            {**match, "telegram_id": telegram_id, "group_id": _group_id},
-            msg.message_id, _group_id,
-            nekay_cb=nekay_cb,
-            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
-            receipt_msg_id=receipt_msg.message_id,
-            receipt_chat_id=chat_id,
-        )
-
-        try:
-            log_activity(_group_id, payments=1)
-        except Exception:
-            pass
-
-    except Exception as e:
-        logger.error(f"[Receipt URL] Error: {e}", exc_info=True)
-        await msg.reply_text("❌ Error ተፈጥሯል።")
+AMOUNT_TOLERANCE = 20
 
 
-# ============================================================
-# SCREENSHOT ANALYZER — NVIDIA + Groq fallback
-# ============================================================
-
-async def analyze_screenshot(image_base64: str) -> dict:
-    prompt = """You are a payment receipt analyzer for Ethiopian banks.
-
-You must recognize ALL Ethiopian bank receipts including but not limited to:
-- CBE, Telebirr, Awash, BOA, Dashen, Abay, Nib, Wegagen, United, Lion,
-  Oromia, Bunna, Berhan, Coopbank, Enat, Amhara, ZemenBank and any other Ethiopian bank.
-
-RULES:
-- If image is ANY Ethiopian bank receipt → extract info, never return "other"
-- photoType: use bank name like "CBE", "Telebirr", "Awash", "BOA", "Dashen", etc.
-- amount: transferred amount (number only)
-- sender_name: name of sender/payer. null if not found.
-- ref: transaction ref (Telebirr only). null for others.
-- description: brief English description
-- lang: is the receipt text in "amharic" or "english"?
-
-CRITICAL:
-- ONLY return photoType = "other" if image is clearly NOT a bank receipt
-
-Respond ONLY in JSON:
-{
-  "photoType": "<bank name or other>",
-  "amount": <number or null>,
-  "sender_name": "<name or null>",
-  "ref": "<ref or null>",
-  "description": "<description>",
-  "lang": "amharic" or "english"
-}"""
-
-    try:
-        text = await _call_nvidia_with_rotation(image_base64, prompt)
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text.strip())
-
-        for field in ("sender_name", "ref"):
-            if parsed.get(field) in ("null", "None", "", "N/A"):
-                parsed[field] = None
-
-        if parsed.get("lang") == "amharic":
-            logger.info("[Screenshot] አማርኛ detected → Groq fallback")
-            text2 = await _call_groq_vision_with_rotation(image_base64, prompt)
-            text2 = re.sub(r"^```json\s*", "", text2)
-            text2 = re.sub(r"^```\s*", "", text2)
-            text2 = re.sub(r"\s*```$", "", text2)
-            parsed = json.loads(text2.strip())
-            for field in ("sender_name", "ref"):
-                if parsed.get(field) in ("null", "None", "", "N/A"):
-                    parsed[field] = None
-
-        return parsed
-
-    except json.JSONDecodeError as e:
-        logger.error(f"[Screenshot] JSON parse error: {e}")
-        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not parse"}
-    except Exception as e:
-        logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
-        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
+def _normalize_name(name: str) -> set:
+    if not name:
+        return set()
+    cleaned = re.sub(r"[^a-zA-Z\u1200-\u137F\s]", "", name.lower())
+    return set(w for w in cleaned.split() if len(w) > 1)
 
 
-# ============================================================
-# WINNER PHOTO ANALYZER — Groq only
-# ============================================================
+def _levenshtein(s1: str, s2: str) -> int:
+    if len(s1) < len(s2):
+        s1, s2 = s2, s1
+    if not s2:
+        return len(s1)
+    prev = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        curr = [i + 1]
+        for j, c2 in enumerate(s2):
+            curr.append(min(prev[j] + (c1 != c2), curr[j] + 1, prev[j + 1] + 1))
+        prev = curr
+    return prev[-1]
 
-async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
-    prize_1st = settings.get("prize_1st", 0)
-    prize_2nd = settings.get("prize_2nd")
-    prize_3rd = settings.get("prize_3rd")
 
-    prizes_desc = f"1st prize: {prize_1st} ETB"
-    if prize_2nd:
-        prizes_desc += f", 2nd: {prize_2nd} ETB"
-    if prize_3rd:
-        prizes_desc += f", 3rd: {prize_3rd} ETB"
+def _names_match(name1: str, name2: str) -> bool:
+    n1, n2 = _normalize_name(name1), _normalize_name(name2)
+    if not n1 or not n2:
+        return False
+    if n1 & n2:
+        return True
+    for w1 in n1:
+        for w2 in n2:
+            if len(w1) < 4 or len(w2) < 4:
+                continue
+            if _levenshtein(w1, w2) <= 2:
+                return True
+    return False
 
-    prompt = f"""You are a lottery ticket analyzer for Ethiopian lottery.
-Game prizes: {prizes_desc}
 
-A REAL lottery ticket: small physical paper cubes with Amharic series label and numbers.
-NOT lottery → return type "other": bank receipts, screenshots, phone screens.
+def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str, group_id: int = None, game_id: int = None) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
 
-CRITICAL ORDER RULES:
-- If numbers arranged VERTICALLY: TOP = 1st, MIDDLE = 2nd, BOTTOM = 3rd
-- If numbers arranged HORIZONTALLY: LEFT = 1st, MIDDLE = 2nd, RIGHT = 3rd
+    # group_id ከሌለ insert ብቻ እናድርግ — match አንሞክር
+    if not group_id:
+        cur.execute("""
+            INSERT INTO sms_payments (group_id, game_id, ref_no, amount, sender_name, pay_type, raw_sms, matched)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+        """, (group_id, game_id, ref, amount, sender_name, sms_type, raw_sms))
+        conn.commit()
+        cur.close()
+        conn.close()
+        return {"matched": None}
 
-Respond ONLY in this exact JSON format:
-{{
-  "type": "lottery" or "other",
-  "first": <top number as integer or null>,
-  "second": <middle number as integer or null>,
-  "third": <bottom number as integer or null>
-}}"""
+    cur.execute("""
+        INSERT INTO sms_payments (group_id, game_id, ref_no, amount, sender_name, pay_type, raw_sms, matched)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+        RETURNING id
+    """, (group_id, game_id, ref, amount, sender_name, sms_type, raw_sms))
+    sms_id = cur.fetchone()[0]
+    conn.commit()
 
-    try:
-        text = await _call_groq_vision_with_rotation(image_base64, prompt)
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text.strip())
+    # screenshot_payments ውስጥ candidate ፈልግ
+    if game_id is not None:
+        cur.execute("""
+            SELECT id, telegram_id, ref_no, amount, sender_name
+            FROM screenshot_payments
+            WHERE matched=FALSE AND group_id=%s
+              AND (game_id=%s OR game_id IS NULL)
+              AND amount BETWEEN %s AND %s
+            ORDER BY created_at ASC
+        """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
+    else:
+        cur.execute("""
+            SELECT id, telegram_id, ref_no, amount, sender_name
+            FROM screenshot_payments
+            WHERE matched=FALSE AND group_id=%s
+              AND game_id IS NULL
+              AND amount BETWEEN %s AND %s
+            ORDER BY created_at ASC
+        """, (group_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
 
-        if parsed.get("type") != "lottery":
-            return None
+    candidates = cur.fetchall()
+    chosen = None
 
-        result = {}
-        if parsed.get("first") is not None:
-            result[1] = int(parsed["first"])
-        if parsed.get("second") is not None:
-            result[2] = int(parsed["second"])
-        if parsed.get("third") is not None:
-            result[3] = int(parsed["third"])
+    # 1️⃣ Ref match
+    if ref:
+        for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
+            if scr_ref and scr_ref == ref:
+                chosen = (scr_id, telegram_id, scr_sender)
+                break
 
-        return result if result else None
+    # 2️⃣ Name match — ስም ከሌለ match አናደርግም
+    if not chosen:
+        if sender_name:
+            for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
+                if _names_match(sender_name, scr_sender):
+                    chosen = (scr_id, telegram_id, scr_sender)
+                    break
 
-    except Exception as e:
-        logger.error(f"[Winner] Analyze error: {e}", exc_info=True)
+    matched_data = None
+    if chosen:
+        scr_id, telegram_id, scr_sender = chosen
+        # ✅ Match ሆነ — ሁለቱንም DELETE
+        cur.execute("DELETE FROM sms_payments WHERE id=%s", (sms_id,))
+        cur.execute("DELETE FROM screenshot_payments WHERE id=%s", (scr_id,))
+        conn.commit()
+        matched_data = {
+            "telegram_id": telegram_id,
+            "amount": float(amount),
+            "type": sms_type,
+            "sender_name": sender_name or scr_sender,
+            "group_id": group_id,
+        }
+
+    cur.close()
+    conn.close()
+    return {"matched": matched_data}
+
+
+def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_type: str, group_id: int = None, game_id: int = None):
+    # group_id ከሌለ match አናደርግም
+    if not group_id:
         return None
 
+    conn = get_conn()
+    cur = conn.cursor()
 
-# ============================================================
-# WINNER PHOTO HANDLER
-# ============================================================
-
-async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
-    try:
-        photo = msg.photo[-1]
-        image_base64 = await download_image_as_base64(photo.file_id)
-        await msg.reply_text("⏳ Winner እየተለየ ነው...")
-
-        winners = await analyze_winner_photo(image_base64, settings)
-        if not winners:
-            await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
-            return False
-
-        prize_map = {
-            1: settings.get("prize_1st", 0),
-            2: settings.get("prize_2nd"),
-            3: settings.get("prize_3rd"),
-        }
-        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-        per_person = settings.get("numbers_per_person", 1)
-        lines = ["🏆 Winners!\n"]
-        _group_id = group_id or settings.get("group_id")
-
-        for place in sorted(winners.keys()):
-            number = winners[place]
-            prize = prize_map.get(place)
-            medal = medals.get(place, "🎖️")
-
-            if not prize:
-                lines.append(f"{medal} {place}ኛ: #{number} — prize አልተቀመጠም")
-                continue
-
-            if per_person > 1:
-                from board import get_group_start
-                lookup_number = get_group_start(number, per_person)
-            else:
-                lookup_number = number
-
-            users = get_users_by_number(settings["id"], lookup_number)
-
-            if not users:
-                lines.append(f"{medal} {place}ኛ: #{number} — user አልተገኘም")
-                continue
-
-            split_prize = round(prize / len(users), 2)
-
-            winner_parts = []
-            for u in users:
-                telegram_id = u["telegram_id"]
-                user_name = u["user_name"]
-                is_half = u["is_half"]
-
-                add_winner_balance(settings["id"], telegram_id, split_prize, group_id=_group_id)
-                save_winner(
-                    settings["id"], place, telegram_id, user_name,
-                    number, split_prize, group_id=_group_id
-                )
-
-                half_label = " (በግማሽ)" if is_half else ""
-                winner_parts.append(f"{user_name}{half_label} → ETB {split_prize} ✅")
-
-                try:
-                    from ai_fallback import log_transaction
-                    if _group_id:
-                        log_transaction(
-                            group_id=_group_id, game_id=settings["id"],
-                            telegram_id=telegram_id, amount=split_prize,
-                            reason="winner_prize", number=number,
-                            done_by="system", balance_after=split_prize,
-                        )
-                except Exception as _log_err:
-                    logger.warning(f"[log_transaction] Error: {_log_err}")
-
-            if len(users) == 1:
-                lines.append(f"{medal} {place}ኛ: #{number} — {winner_parts[0]}")
-            else:
-                lines.append(f"{medal} {place}ኛ: #{number} (prize ÷ {len(users)})")
-                for part in winner_parts:
-                    lines.append(f"   • {part}")
-
-        announcement = "\n".join(lines)
-        await msg.reply_text(announcement)
-
-        if _group_id:
-            try:
-                await bot.send_message(chat_id=_group_id, text=announcement)
-            except Exception:
-                pass
-
-        return True
-
-    except Exception as e:
-        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
-        await msg.reply_text("❌ Error ተፈጥሯል።")
-        return False
-
-
-# ============================================================
-# MATCH NOTIFICATION
-# ============================================================
-
-async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None, success_msg: str = None, receipt_msg_id: int = None, receipt_chat_id: int = None):
-    from board import build_board
-
-    telegram_id = match_data["telegram_id"]
-    amount = match_data["amount"]
-    _group_id = match_data.get("group_id") or chat_id or GROUP_CHAT_ID
-
-    result = confirm_payment(telegram_id, amount, group_id=_group_id)
-    confirmed = result["confirmed"]
-    remaining_balance = result["remaining_balance"]
-
-    logger.info(f"[Match] ✅ TelegramID: {telegram_id} | ETB {amount} | confirmed: {len(confirmed)}")
-
-    target_chat = _group_id
-
-    if confirmed:
-        final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
-        if receipt_msg_id and receipt_chat_id:
-            try:
-                await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
-            except Exception:
-                pass
-        if target_chat:
-            if reply_msg_id:
-                await bot.send_message(chat_id=target_chat, text=final_msg, reply_to_message_id=reply_msg_id)
-            else:
-                await bot.send_message(chat_id=target_chat, text=final_msg)
+    # ✅ game_id None ሲሆን IS NULL ተጠቀም
+    if game_id is not None:
+        cur.execute("""
+            SELECT id, ref_no, amount, sender_name, pay_type
+            FROM sms_payments
+            WHERE matched=FALSE
+              AND group_id=%s
+              AND (game_id=%s OR game_id IS NULL)
+              AND amount BETWEEN %s AND %s
+            ORDER BY created_at ASC
+        """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     else:
-        settings_check = get_active_settings(group_id=_group_id)
-        needed_msg = ""
-        if settings_check:
-            price_full = float(settings_check.get("price_full") or 0)
-            price_half = float(settings_check.get("price_half") or 0)
-            if remaining_balance < price_half and price_half > 0:
-                short = price_half - remaining_balance
-                needed_msg = f"\n⚠️ ቀሪ: ETB {short:.0f} ይላኩ (ለግማሽ)"
-            elif remaining_balance < price_full:
-                short = price_full - remaining_balance
-                needed_msg = f"\n⚠️ ቀሪ: ETB {short:.0f} ይላኩ (ለሙሉ)"
+        cur.execute("""
+            SELECT id, ref_no, amount, sender_name, pay_type
+            FROM sms_payments
+            WHERE matched=FALSE
+              AND group_id=%s
+              AND game_id IS NULL
+              AND amount BETWEEN %s AND %s
+            ORDER BY created_at ASC
+        """, (group_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
 
-        message = (
-            f"💰 ETB {amount} ደረሰ።\n"
-            f"💳 ባላንስ: ETB {remaining_balance}"
-            + needed_msg
-        )
-        if receipt_msg_id and receipt_chat_id:
-            try:
-                await bot.edit_message_text(
-                    chat_id=receipt_chat_id, message_id=receipt_msg_id, text=message
-                )
-            except Exception:
-                try:
-                    await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
-                except Exception:
-                    pass
-                if target_chat:
-                    if reply_msg_id:
-                        await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
-                    else:
-                        await bot.send_message(chat_id=target_chat, text=message)
-        elif target_chat:
-            if reply_msg_id:
-                await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
+    candidates = cur.fetchall()
+
+    if not candidates:
+        cur.close()
+        conn.close()
+        return None
+
+    chosen = None
+
+    # 1️⃣ Ref match
+    if ref:
+        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+            if sms_ref and sms_ref == ref:
+                chosen = (sms_id, sms_amount, sms_type, sms_sender)
+                break
+
+    # 2️⃣ Name match — ስም ከሌለ match አናደርግም
+    if not chosen and sender_name:
+        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+            if _names_match(sender_name, sms_sender):
+                chosen = (sms_id, sms_amount, sms_type, sms_sender)
+                break
+
+    if not chosen:
+        cur.close()
+        conn.close()
+        return None
+
+    sms_id, sms_amount, sms_type, sms_sender = chosen
+
+    # ✅ Match ሆነ — sms record DELETE
+    cur.execute("DELETE FROM sms_payments WHERE id=%s", (sms_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "id": sms_id,
+        "amount": float(sms_amount),
+        "type": sms_type,
+        "sender_name": sender_name or sms_sender,
+    }
+
+
+def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
+                             ref: str, pay_type: str, description: str, group_id: int = None, game_id: int = None) -> dict:
+    import uuid
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if group_id:
+        cur.execute("""
+            DELETE FROM screenshot_payments
+            WHERE telegram_id=%s AND group_id=%s AND matched=FALSE
+        """, (telegram_id, group_id))
+    else:
+        cur.execute("""
+            DELETE FROM screenshot_payments
+            WHERE telegram_id=%s AND matched=FALSE
+        """, (telegram_id,))
+
+    safe_ref = ref if (pay_type == "Telebirr" and ref) else str(uuid.uuid4())
+
+    cur.execute("""
+        INSERT INTO screenshot_payments
+        (group_id, game_id, telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
+    """, (group_id, game_id, telegram_id, safe_ref, amount, sender_name, pay_type, description))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return {"matched": None}
+
+
+def get_sms_payment_by_ref(ref_no: str):
+    if not ref_no:
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, ref_no, amount, sender_name, pay_type
+        FROM sms_payments WHERE ref_no = %s
+    """, (ref_no,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0], "refNo": row[1],
+        "amount": float(row[2]) if row[2] is not None else None,
+        "sender_name": row[3], "type": row[4],
+    }
+
+
+def is_ref_matched_already(ref_no: str) -> bool:
+    if not ref_no:
+        return False
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 1 FROM sms_payments WHERE ref_no = %s
+        UNION
+        SELECT 1 FROM screenshot_payments WHERE ref_no = %s
+    """, (ref_no, ref_no))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def cleanup_old_payments(days: int = 7):
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(days=days)
+    cur.execute("DELETE FROM sms_payments WHERE created_at < %s", (cutoff,))
+    cur.execute("DELETE FROM screenshot_payments WHERE created_at < %s", (cutoff,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# USER NUMBERS
+# ============================================================
+
+def get_user_numbers(game_id: int, user_id: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, is_half, slot, is_paid
+        FROM registrations WHERE game_id=%s AND user_id=%s ORDER BY number, slot
+    """, (game_id, user_id))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return rows
+
+
+def user_owns_number(game_id: int, user_id: int, number: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM registrations WHERE game_id=%s AND user_id=%s AND number=%s LIMIT 1",
+                (game_id, user_id, number))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def remove_number(game_id: int, user_id: int, number: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, is_half, slot, is_paid, pending_upgrade FROM registrations
+        WHERE game_id=%s AND user_id=%s AND number=%s ORDER BY slot
+    """, (game_id, user_id, number))
+    rows = cur.fetchall()
+    if not rows:
+        cur.close()
+        conn.close()
+        return False
+    cur.execute("SELECT price_full, price_half, group_id FROM game_settings WHERE id=%s", (game_id,))
+    price_row = cur.fetchone()
+    price_full = float(price_row[0] or 0)
+    price_half = float(price_row[1] or 0)
+    group_id = price_row[2]
+
+    refund = 0
+    for r in rows:
+        reg_id, r_is_half, r_slot, r_is_paid, r_pending = r
+        if r_is_paid:
+            if r_pending:
+                refund += price_half
+            elif r_is_half:
+                refund += price_half
             else:
-                await bot.send_message(chat_id=target_chat, text=message)
+                refund += price_full
 
-    if nekay_cb and confirmed:
-        await nekay_cb(confirmed)
+    cur.execute("DELETE FROM registrations WHERE game_id=%s AND user_id=%s AND number=%s", (game_id, user_id, number))
 
-    try:
-        from ai_fallback import log_transaction
-        if confirmed and _group_id:
-            settings_log = get_active_settings(group_id=_group_id)
-            if settings_log:
-                game_id_log = settings_log["id"]
-                price_full_log = float(settings_log.get("price_full") or 0)
-                price_half_log = float(settings_log.get("price_half") or 0)
-                log_transaction(
-                    group_id=_group_id, game_id=game_id_log,
-                    telegram_id=telegram_id, amount=amount,
-                    reason="payment_confirmed", done_by="user",
-                    balance_after=remaining_balance,
-                )
-                for c in confirmed:
-                    cost = price_half_log if c["is_half"] else price_full_log
-                    reason = f"number_registered_{'half' if c['is_half'] else 'full'}"
-                    log_transaction(
-                        group_id=_group_id, game_id=game_id_log,
-                        telegram_id=telegram_id, amount=-cost,
-                        reason=reason, number=c["number"],
-                        done_by="user", balance_after=remaining_balance,
-                    )
-    except Exception as _log_err:
-        logger.warning(f"[log_transaction] Error: {_log_err}")
+    if refund > 0:
+        cur.execute("""
+            SELECT carry_balance, prize_balance FROM user_balance
+            WHERE group_id=%s AND telegram_id=%s
+        """, (group_id, user_id))
+        bal_row = cur.fetchone()
+        carry_balance = float(bal_row[0]) if bal_row else 0.0
+        prize_balance = float(bal_row[1]) if bal_row else 0.0
 
-    if confirmed and target_chat:
-        settings = get_active_settings(group_id=_group_id)
-        if settings:
-            game_id = settings["id"]
-            taken = get_taken_numbers(game_id)
-            paid = get_paid_numbers(game_id)
-            board_text = build_board(settings, taken, paid)
-            board_msg_id = settings.get("board_message_id")
+        new_carry = carry_balance + refund
+        new_total = new_carry + prize_balance
 
-            if board_msg_id:
-                try:
-                    await bot.edit_message_text(
-                        chat_id=target_chat,
-                        message_id=board_msg_id,
-                        text=board_text
-                    )
-                except Exception:
-                    new_msg = await bot.send_message(chat_id=target_chat, text=board_text)
-                    from database import update_board_message_id
-                    update_board_message_id(game_id, new_msg.message_id)
+        cur.execute("""
+            INSERT INTO user_balance (group_id, telegram_id, balance, carry_balance, prize_balance)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (group_id, telegram_id)
+            DO UPDATE SET carry_balance=%s, balance=%s, updated_at=NOW()
+        """, (group_id, user_id, new_total, new_carry, prize_balance, new_carry, new_total))
 
+        cur.execute("""
+            SELECT id, number, is_half, slot, pending_upgrade
+            FROM registrations
+            WHERE game_id=%s AND user_id=%s AND (is_paid=FALSE OR pending_upgrade=TRUE)
+            ORDER BY registered_at, slot
+        """, (game_id, user_id))
+        unpaid = cur.fetchall()
 
-# ============================================================
-# GROQ — አማርኛ ማብራሪያ
-# ============================================================
+        remaining_carry = new_carry
+        remaining_prize = prize_balance
+        for reg_id, reg_number, reg_is_half, reg_slot, reg_pending in unpaid:
+            cost = price_half if (reg_is_half or reg_pending) else price_full
+            total_remaining = remaining_carry + remaining_prize
+            if total_remaining >= cost:
+                cur.execute("""
+                    UPDATE registrations SET is_paid=TRUE, pending_upgrade=FALSE
+                    WHERE id=%s
+                """, (reg_id,))
+                if remaining_prize >= cost:
+                    remaining_prize -= cost
+                else:
+                    diff = cost - remaining_prize
+                    remaining_prize = 0
+                    remaining_carry -= diff
 
-async def describe_photo_in_amharic(description: str) -> str:
-    try:
-        messages = [{
-            "role": "user",
-            "content": (
-                f'ይህ ምስል "{description}" ነው። '
-                "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
-            ),
-        }]
-        return await _call_groq_with_rotation(messages, max_tokens=100)
-    except Exception as e:
-        logger.error(f"[Describe] Error: {e}")
-        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
+        new_total = remaining_carry + remaining_prize
+        cur.execute("""
+            UPDATE user_balance
+            SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+            WHERE group_id=%s AND telegram_id=%s
+        """, (new_total, remaining_carry, remaining_prize, group_id, user_id))
+
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
 
 
 # ============================================================
-# HELPERS
+# WINNER GREETING
 # ============================================================
 
-async def download_image_as_base64(file_id: str) -> str:
-    async with httpx.AsyncClient(timeout=30) as client:
-        get_file_res = await client.get(
-            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
-            params={"file_id": file_id}
+def get_ungreeted_winner(game_id: int, telegram_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id FROM winners
+        WHERE telegram_id=%s AND place=1 AND greeted=FALSE AND game_id != %s
+        ORDER BY game_id DESC LIMIT 1
+    """, (telegram_id, game_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def mark_winner_greeted(telegram_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE winners SET greeted=TRUE WHERE telegram_id=%s AND place=1 AND greeted=FALSE", (telegram_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# BALANCE CLEAR
+# ============================================================
+
+def clear_balance_all(group_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE user_balance SET balance=0, carry_balance=0, prize_balance=0, updated_at=NOW()
+        WHERE group_id=%s
+    """, (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def clear_balance_by_username(group_id: int, username: str) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT gm.username, r.user_id
+        FROM group_members gm
+        JOIN registrations r ON r.user_name = gm.username
+        JOIN game_settings gs ON gs.id = r.game_id
+        WHERE gm.group_id=%s AND LOWER(gm.username)=LOWER(%s)
+        LIMIT 1
+    """, (group_id, username.lstrip("@")))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return False
+    user_id = row[1]
+    cur.execute("""
+        UPDATE user_balance SET balance=0, carry_balance=0, prize_balance=0, updated_at=NOW()
+        WHERE telegram_id=%s AND group_id=%s
+    """, (user_id, group_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return True
+
+
+# ============================================================
+# GROUP ON/OFF
+# ============================================================
+
+def set_group_active(group_id: int, is_active: bool):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("UPDATE groups SET is_active=%s WHERE group_id=%s", (is_active, group_id))
+    if cur.rowcount == 0:
+        cur.execute("""
+            INSERT INTO groups (group_id, is_enabled, is_active)
+            VALUES (%s, TRUE, %s)
+            ON CONFLICT (group_id) DO UPDATE SET is_active=EXCLUDED.is_active
+        """, (group_id, is_active))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def is_group_active(group_id: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT is_active FROM groups WHERE group_id=%s", (group_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if row is None:
+        return False
+    return bool(row[0]) if row[0] is not None else True
+
+
+# ============================================================
+# REPORT
+# ============================================================
+
+def save_game_report(group_id: int, game_id: int, total_bet: float,
+                     prize_total: float, profit: float, registered_count: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS game_reports (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            game_id INT,
+            total_bet NUMERIC DEFAULT 0,
+            prize_total NUMERIC DEFAULT 0,
+            profit NUMERIC DEFAULT 0,
+            registered_count INT DEFAULT 0,
+            created_at TIMESTAMP DEFAULT NOW()
         )
-        get_file_res.raise_for_status()
-        file_path = get_file_res.json()["result"]["file_path"]
-        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
-        res = await client.get(file_url)
-        res.raise_for_status()
-        return base64.b64encode(res.content).decode("utf-8")
+    """)
+    cur.execute("""
+        INSERT INTO game_reports
+        (group_id, game_id, total_bet, prize_total, profit, registered_count)
+        VALUES (%s, %s, %s, %s, %s, %s)
+    """, (group_id, game_id, total_bet, prize_total, profit, registered_count))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_report(group_id: int) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=24)
+
+    try:
+        cur.execute("""
+            SELECT COUNT(*), COALESCE(SUM(total_bet),0),
+                   COALESCE(SUM(prize_total),0), COALESCE(SUM(profit),0),
+                   COALESCE(SUM(registered_count),0)
+            FROM game_reports
+            WHERE group_id=%s AND created_at >= %s
+        """, (group_id, cutoff))
+        row = cur.fetchone()
+        games_count = int(row[0] or 0)
+        total_bet = float(row[1] or 0)
+        prize_total = float(row[2] or 0)
+        profit = float(row[3] or 0)
+        registered_count = int(row[4] or 0)
+    except Exception:
+        games_count = total_bet = prize_total = profit = registered_count = 0
+
+    cur.execute("""
+        SELECT gs.id, gs.price_full, gs.price_half,
+               gs.prize_1st, gs.prize_2nd, gs.prize_3rd,
+               gs.numbers_per_person, gs.total_numbers
+        FROM game_settings gs
+        WHERE gs.group_id=%s AND gs.is_active=TRUE
+        ORDER BY gs.id DESC LIMIT 1
+    """, (group_id,))
+    active = cur.fetchone()
+
+    active_data = None
+    if active:
+        (game_id, price_full, price_half,
+         prize_1st, prize_2nd, prize_3rd,
+         per_person, total_numbers) = active
+
+        price_full = float(price_full or 0)
+        prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
+
+        cur.execute("""
+            SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
+        """, (game_id,))
+        filled_groups = cur.fetchone()[0] or 0
+
+        cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
+        total_slots = cur.fetchone()[0] or 0
+
+        total_bet = filled_groups * price_full
+        active_profit = total_bet - prize_total if total_slots >= 15 else 0
+
+        active_data = {
+            "game_id": game_id,
+            "total_slots": total_slots,
+            "filled_groups": filled_groups,
+            "total_bet": total_bet,
+            "prize_total": prize_total,
+            "profit": active_profit,
+            "counted": total_slots >= 15,
+        }
+
+    cur.close()
+    conn.close()
+
+    return {
+        "games_count": games_count,
+        "total_bet": total_bet,
+        "prize_total": prize_total,
+        "profit": profit,
+        "registered_count": registered_count,
+        "active": active_data,
+    }
+
+
+def cleanup_old_reports():
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=24)
+    try:
+        cur.execute("DELETE FROM game_reports WHERE created_at < %s", (cutoff,))
+        conn.commit()
+    except Exception:
+        pass
+    cur.close()
+    conn.close()
+
+
+def calculate_game_profit(game_id: int) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT price_full, price_half, prize_1st, prize_2nd, prize_3rd,
+               numbers_per_person, total_numbers, group_id
+        FROM game_settings WHERE id=%s
+    """, (game_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {}
+
+    price_full, price_half, prize_1st, prize_2nd, prize_3rd, \
+        per_person, total_numbers, group_id = row
+
+    price_full = float(price_full or 0)
+    prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
+
+    cur.execute("""
+        SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
+    """, (game_id,))
+    filled_groups = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
+    registered_count = cur.fetchone()[0] or 0
+
+    total_bet = filled_groups * price_full
+    profit = total_bet - prize_total
+
+    cur.close()
+    conn.close()
+
+    return {
+        "game_id": game_id,
+        "group_id": group_id,
+        "filled_groups": filled_groups,
+        "total_bet": total_bet,
+        "prize_total": prize_total,
+        "profit": profit,
+        "registered_count": registered_count,
+        "counted": registered_count >= 15,
+            }
