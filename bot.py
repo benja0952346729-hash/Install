@@ -84,24 +84,6 @@ handled_winner_photos = set()
 
 low_remaining_trackers = {}
 
-ETHIOPIAN_BANK_RECEIPT_DOMAINS = [
-    "mbreciept.cbe.com.et",
-    "receipt.telebirr.com",
-    "minieapp.telebirr.com",
-    "receipt.awashbank.com",
-    "receipt.dashenbank.com",
-    "receipt.bankofabyssinia.com",
-    "receipt.wegagenbank.com",
-    "receipt.nibbank.com",
-    "receipt.unitedbank.com.et",
-    "receipt.oromiabank.com",
-    "receipt.amharabank.com.et",
-    "receipt.coopbankoromia.com",
-    "receipt.bunnabank.com",
-    "receipt.berhanbank.com",
-    "receipt.zemenbank.com",
-]
-
 URGENCY_MESSAGES = [
     "ቤተሰብ ገባ ገባ በሉ🙏",
     "ቤተሰብ ጫወታውን አናድምቅ 🙏",
@@ -959,14 +941,15 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     game_id = settings["id"]
 
     import re as _re_url
-    _url_pattern = _re_url.compile(r'https?://\S+')
+    _url_pattern = _re_url.compile(r'https?://[^\s\u1200-\u137F]+')
     _urls_in_msg = _url_pattern.findall(text)
+
+    # ✅ ማናቸውም URL → fetch ይሞክራል (domain check የለም)
     for _url in _urls_in_msg:
-        if any(domain in _url for domain in ETHIOPIAN_BANK_RECEIPT_DOMAINS):
-            async def _nekay_cb_url(confirmed):
-                await nekay_payment_cb(ctx.bot, game_id, user_id, confirmed)
-            await handle_receipt_url(ctx.bot, msg, _url, user_id, group_id, nekay_cb=_nekay_cb_url)
-            return
+        async def _nekay_cb_url(confirmed):
+            await nekay_payment_cb(ctx.bot, game_id, user_id, confirmed)
+        await handle_receipt_url(ctx.bot, msg, _url, user_id, group_id, nekay_cb=_nekay_cb_url)
+        return
 
     if get_ungreeted_winner(game_id, user_id):
         mark_winner_greeted(user_id)
@@ -2361,11 +2344,6 @@ async def handle_dbclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
 
 
-def get_all_db_urls():
-    from config import DATABASE_URLS
-    return DATABASE_URLS
-
-
 async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     chat_type = update.effective_chat.type
@@ -2472,7 +2450,7 @@ async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f"📈 Profit: ETB {report['profit']:,.0f}"
         )
     else:
-        lines.append("🎮 ዛሬ ጨዋታ የለም (15+ registered)")
+        lines.append("🎮 ዛሬ ጨዋታ አልተጫወተም")
 
     active = report.get("active")
     if active:
@@ -3019,12 +2997,12 @@ async def start_server():
 def main():
     init_db()
     init_userbot_db()
-    init_userbot2_db()  # ← ተጨምሯል
+    init_userbot2_db()
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
 
     register_userbot_handlers(app)
-    register_userbot2_handlers(app, app.bot)  # ← ተጨምሯል
+    register_userbot2_handlers(app, app.bot)
 
     setup_conv = ConversationHandler(
         entry_points=[CommandHandler("setgame", setgame_start)],
@@ -3128,7 +3106,7 @@ def main():
     loop = asyncio.get_event_loop()
     loop.run_until_complete(start_server())
     loop.run_until_complete(start_listeners())
-    loop.run_until_complete(start_winner_listeners(app.bot))  # ← ተጨምሯል
+    loop.run_until_complete(start_winner_listeners(app.bot))
 
     global _bot_instance
     _bot_instance = app.bot
@@ -3144,7 +3122,6 @@ def main():
 
     loop.create_task(_init_jina_background())
 
-    # ✅ NEW — NVIDIA rate-limit health check background task
     from handlers import ensure_nvidia_health_task_started
     ensure_nvidia_health_task_started()
 
