@@ -29,6 +29,7 @@ from database import (
     log_activity,
     find_matching_sms,
 )
+from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
 
@@ -118,18 +119,11 @@ async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str
 
 
 # ============================================================
-# JINA KEY ROTATION
+# JINA KEY ROTATION — shared with jina_brain.py
 # ============================================================
 
-_jina_index = 0
-
 def _get_jina_key() -> str:
-    global _jina_index
-    if not JINA_API_KEYS:
-        return None
-    key = JINA_API_KEYS[_jina_index]
-    _jina_index = (_jina_index + 1) % len(JINA_API_KEYS)
-    return key
+    return get_shared_jina_key()
 
 
 # ============================================================
@@ -357,7 +351,31 @@ Respond ONLY in this exact JSON format with no extra text:
 # JINA URL → full payment data
 # ============================================================
 
+async def _parse_html_with_groq(html: str, url: str) -> Optional[dict]:
+    """Raw HTML ወይም text ን Groq ሰጥቶ payment data ማውጣት"""
+    messages = [
+        {"role": "system", "content": """Extract payment info from this Ethiopian bank receipt page.
+The content may be raw HTML or plain text. Find the payment amount, sender name, and reference number.
+Respond ONLY in JSON:
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<CBE/Telebirr/Awash/Dashen/etc>"}"""},
+        {"role": "user", "content": html[:3000]},
+    ]
+    try:
+        result_text = await _call_groq_with_rotation(messages)
+        result_text = re.sub(r"^```json\s*", "", result_text)
+        result_text = re.sub(r"^```\s*", "", result_text)
+        result_text = re.sub(r"\s*```$", "", result_text)
+        parsed = json.loads(result_text.strip())
+        if parsed.get("amount"):
+            return parsed
+        return None
+    except Exception as e:
+        logger.warning(f"[URL Fetch] Groq parse error: {e}")
+        return None
+
+
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
+    # ── Step 1: Jina reader (timeout 45s) ──
     try:
         jina_url = f"https://r.jina.ai/{url}"
         headers = {
@@ -368,26 +386,37 @@ async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
         if jina_key:
             headers["Authorization"] = f"Bearer {jina_key}"
 
-        async with httpx.AsyncClient(timeout=20) as client:
+        async with httpx.AsyncClient(timeout=45) as client:
             res = await client.get(jina_url, headers=headers)
-            if res.status_code != 200:
-                return None
-            text = res.text
-
-        messages = [
-            {"role": "system", "content": """Extract payment info from this Ethiopian bank receipt page text.
-Respond ONLY in JSON:
-{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<CBE/Telebirr/Awash/etc>"}"""},
-            {"role": "user", "content": text[:2000]},
-        ]
-        result_text = await _call_groq_with_rotation(messages)
-        result_text = re.sub(r"^```json\s*", "", result_text)
-        result_text = re.sub(r"^```\s*", "", result_text)
-        result_text = re.sub(r"\s*```$", "", result_text)
-        return json.loads(result_text.strip())
+            if res.status_code == 200 and res.text.strip():
+                logger.info("[URL Fetch] Jina succeeded")
+                result = await _parse_html_with_groq(res.text, url)
+                if result:
+                    return result
+                logger.info("[URL Fetch] Jina returned content but Groq found no amount — trying direct fetch")
     except Exception as e:
-        logger.error(f"[URL Fetch] Error: {e}")
-        return None
+        logger.warning(f"[URL Fetch] Jina failed: {e} — trying direct fetch")
+
+    # ── Step 2: Direct httpx fetch + Groq parse ──
+    try:
+        headers_direct = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            res = await client.get(url, headers=headers_direct)
+            if res.status_code == 200 and res.text.strip():
+                logger.info("[URL Fetch] Direct fetch succeeded")
+                result = await _parse_html_with_groq(res.text, url)
+                if result:
+                    return result
+                logger.info("[URL Fetch] Direct fetch returned content but no amount found")
+    except Exception as e:
+        logger.warning(f"[URL Fetch] Direct fetch failed: {e}")
+
+    logger.error(f"[URL Fetch] All methods failed for: {url}")
+    return None
 
 
 # ============================================================
