@@ -278,7 +278,7 @@ async def _start_single_listener(bot, session: dict) -> bool:
             logger.warning(f"[Userbot2] Session not authorized for admin {admin_id}")
             return False
 
-        @client.on(events.MessageSent(outgoing=True))
+        @client.on(events.NewMessage(outgoing=True))
         async def handler(event, _group_id=group_id, _admin_id=admin_id):
             try:
                 if not event.message.photo:
