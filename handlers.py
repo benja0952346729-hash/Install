@@ -40,6 +40,13 @@ logger = logging.getLogger(__name__)
 
 def _start_lightpanda():
     try:
+        import socket
+        s = socket.socket()
+        result = s.connect_ex(('localhost', 9222))
+        s.close()
+        if result == 0:
+            logger.info("[Lightpanda] Already running on port 9222 ✅")
+            return
         subprocess.Popen(
             ["lightpanda", "serve", "--host", "0.0.0.0", "--port", "9222"],
             stdout=subprocess.DEVNULL,
