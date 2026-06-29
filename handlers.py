@@ -6,6 +6,7 @@ import logging
 import random
 import asyncio
 import time
+import subprocess
 from collections import defaultdict, deque
 from typing import Optional
 from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS, JINA_API_KEYS
@@ -32,6 +33,29 @@ from database import (
 from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# LIGHTPANDA — START ONCE ON IMPORT
+# ============================================================
+
+def _start_lightpanda():
+    try:
+        subprocess.Popen(
+            ["lightpanda", "serve", "--host", "0.0.0.0", "--port", "9222"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        logger.info("[Lightpanda] Started on port 9222")
+    except FileNotFoundError:
+        logger.warning("[Lightpanda] Binary not found — URL screenshot disabled")
+    except Exception as e:
+        logger.warning(f"[Lightpanda] Failed to start: {e}")
+
+_start_lightpanda()
+
+# ============================================================
+# CONSTANTS
+# ============================================================
 
 PAYMENT_SUCCESS_MESSAGES = [
     "መልካም ዕድል, ወዳጄ 🙏",
@@ -119,7 +143,7 @@ async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str
 
 
 # ============================================================
-# JINA KEY ROTATION — shared with jina_brain.py
+# JINA KEY ROTATION
 # ============================================================
 
 def _get_jina_key() -> str:
@@ -299,6 +323,81 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
 
 
 # ============================================================
+# LIGHTPANDA — SCREENSHOT + NVIDIA VISION
+# ============================================================
+
+_VISION_PROMPT = """You are an Ethiopian bank receipt analyzer.
+Extract payment info from this bank receipt screenshot.
+
+Supported banks: CBE, Telebirr, Awash, BOA, Dashen, Abay, Nib, Wegagen,
+United, Lion, Oromia, Bunna, Berhan, Coopbank, Enat, Amhara, Zemen, and any other Ethiopian bank.
+
+AMOUNT RULES:
+- Use ONLY the base transferred/sent amount
+- Do NOT use "Total amount debited" (includes service charge)
+- Look for: "Transferred Amount", "Amount", "የተላከ መጠን"
+
+SENDER NAME: Look for "Payer", "Sender", "From", "የላኪ ስም"
+REFERENCE: Look for "Reference No", "Transaction ID", "Ref"
+BANK: Detect from URL or page content
+
+Respond ONLY in JSON, no extra text:
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<bank name>"}"""
+
+
+async def _fetch_screenshot_with_lightpanda(url: str) -> Optional[str]:
+    """Lightpanda CDP ተጠቅሞ screenshot base64 ይመልሳል"""
+    try:
+        from playwright.async_api import async_playwright
+        async with async_playwright() as p:
+            browser = await asyncio.wait_for(
+                p.chromium.connect_over_cdp("http://localhost:9222"),
+                timeout=10
+            )
+            context = await browser.new_context()
+            page = await context.new_page()
+            await asyncio.wait_for(
+                page.goto(url, wait_until="networkidle"),
+                timeout=25
+            )
+            await asyncio.sleep(2)  # JS render ጠብቅ
+            screenshot = await page.screenshot(full_page=True)
+            await context.close()
+            await browser.close()
+            return base64.b64encode(screenshot).decode()
+    except Exception as e:
+        logger.warning(f"[Lightpanda] Screenshot error: {e}")
+        return None
+
+
+async def _parse_url_with_lightpanda(url: str) -> Optional[dict]:
+    """Lightpanda screenshot → NVIDIA vision → payment data"""
+    logger.info(f"[Lightpanda] Trying: {url}")
+    image_base64 = await _fetch_screenshot_with_lightpanda(url)
+    if not image_base64:
+        logger.warning("[Lightpanda] Screenshot failed")
+        return None
+
+    try:
+        text = await _call_nvidia_with_rotation(image_base64, _VISION_PROMPT)
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+        for field in ("sender_name", "ref"):
+            if parsed.get(field) in ("null", "None", "", "N/A"):
+                parsed[field] = None
+        if parsed.get("amount"):
+            logger.info(f"[Lightpanda] ✅ Success: {parsed}")
+            return parsed
+        logger.warning("[Lightpanda] NVIDIA returned no amount")
+        return None
+    except Exception as e:
+        logger.warning(f"[Lightpanda] NVIDIA parse error: {e}")
+        return None
+
+
+# ============================================================
 # SMS PARSER
 # ============================================================
 
@@ -405,7 +504,19 @@ Respond ONLY in JSON with no extra text:
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
     fail_reason = "unknown"
 
-    # ── Step 1: Jina reader — JS rendering + retry ──
+    # ── Step 1: Lightpanda screenshot → NVIDIA vision ──
+    try:
+        result = await _parse_url_with_lightpanda(url)
+        if result and result.get("amount"):
+            logger.info("[URL Fetch] ✅ Lightpanda succeeded")
+            return result
+        fail_reason = "lightpanda_no_amount"
+        logger.info("[URL Fetch] Lightpanda — no amount, trying Jina")
+    except Exception as e:
+        fail_reason = f"lightpanda_error_{type(e).__name__}"
+        logger.warning(f"[URL Fetch] Lightpanda error: {e}")
+
+    # ── Step 2: Jina reader ──
     jina_url = f"https://r.jina.ai/{url}"
     jina_key = _get_jina_key()
     headers = {
@@ -450,7 +561,7 @@ async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
             logger.warning(f"[URL Fetch] Jina error (attempt {attempt+1}): {e}")
             break
 
-    # ── Step 2: Direct httpx fetch + Groq parse ──
+    # ── Step 3: Direct httpx fetch + Groq parse ──
     try:
         headers_direct = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
@@ -603,7 +714,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount, sender_name=sender_name,
             ref=ref, pay_type=photo_type, group_id=_group_id,
@@ -611,7 +721,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         )
 
         if not match:
-            # ✅ SMS ገና አልደረሰም — screenshot save ያደርጋል ቆይቶ SMS ሲመጣ match ይሆናል
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount, sender_name=sender_name,
                 ref=ref, pay_type=photo_type,
@@ -620,7 +729,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             )
             return
 
-        # ✅ Match ተገኘ — notify
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
@@ -675,7 +783,6 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount,
             sender_name=sender_name, ref=ref,
@@ -698,7 +805,6 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 pass
             return
 
-        # ✅ Match ተገኘ — notify
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
