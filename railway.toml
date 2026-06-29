@@ -2,6 +2,6 @@
 builder = "nixpacks"
 
 [deploy]
-startCommand = "curl -fsSL -o /usr/local/bin/lightpanda https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod +x /usr/local/bin/lightpanda && python bot.py"
+startCommand = "curl -fsSL -o /tmp/lp https://github.com/lightpanda-io/browser/releases/download/nightly/lightpanda-x86_64-linux && chmod +x /tmp/lp && /tmp/lp serve --host 0.0.0.0 --port 9222 & sleep 2 && python bot.py"
 restartPolicyType = "always"
 restartPolicyMaxRetries = 3
