@@ -8,3 +8,4 @@ regex
 pytz
 openai
 telethon
+playwright
