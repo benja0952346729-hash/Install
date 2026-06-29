@@ -1617,6 +1617,22 @@ def clear_game(game_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM registrations WHERE game_id=%s", (game_id,))
+
+    # ✅ FIX: game_id → group_id ፈልግ፣ ያልተዛመደ (unmatched) sms/screenshot payments ጽዳ
+    cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
+    row = cur.fetchone()
+    group_id = row[0] if row else None
+
+    if group_id:
+        cur.execute("""
+            DELETE FROM sms_payments
+            WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
+        cur.execute("""
+            DELETE FROM screenshot_payments
+            WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
+
     conn.commit()
     cur.close()
     conn.close()
@@ -2611,4 +2627,4 @@ def calculate_game_profit(game_id: int) -> dict:
         "profit": profit,
         "registered_count": registered_count,
         "counted": registered_count >= 15,
-            }
+    }
