@@ -1,5 +1,5 @@
 """
-userbot2.py — Winner payment auto-listener (Telethon-based)
+userbot2.py — Winner payment auto-listener (Telethon-based) [FIXED]
 
 ፍሰት:
 1. Main admin አንድ ጊዜ /setwinnerapi api_id api_hash ያስቀምጣል (ለሁሉም shared)
@@ -9,10 +9,10 @@ userbot2.py — Winner payment auto-listener (Telethon-based)
    (2FA ካለ: /verify2fa2 +phone password)
 
 Payment logic:
-- Photo (no caption) + winner → AI analyzes screenshot → send
-- #/300 (no photo)  + sent winner   → caption amount → edit
-- URL outgoing      + unsent winner → fetch amount → send
-- Normal chat / not winner          → ምንም አይሰራም, AI አይጠራም
+- Photo (no caption) + winner (sent ወይም unsent) → AI analyzes screenshot → send, balance ይቀነሳል
+- #/300 reply to photo   + sent winner             → correct AI amount → balance adjust
+- URL outgoing           + winner (sent ወይም unsent) → fetch amount → send
+- Normal chat / not winner                          → ምንም አይሰራም
 """
 
 import asyncio
@@ -23,7 +23,6 @@ from telethon.sessions import StringSession
 from telethon.errors import SessionPasswordNeededError
 from database import get_conn, deduct_winner_balance, mark_winner_sent
 
-# AI functions shared with handler.py — same clients, same rotation
 from handlers import (
     analyze_screenshot,
     fetch_payment_data_from_url,
@@ -48,6 +47,16 @@ def init_userbot2_db():
             api_id BIGINT NOT NULL,
             api_hash TEXT NOT NULL,
             CHECK (id = 1)
+        )
+    """)
+    # FIX: photo_id → last processed payment amount ለ #/ correction
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS winner_photo_amounts (
+            photo_id BIGINT PRIMARY KEY,
+            telegram_id BIGINT NOT NULL,
+            group_id BIGINT NOT NULL,
+            ai_amount FLOAT NOT NULL,
+            created_at TIMESTAMP DEFAULT NOW()
         )
     """)
     conn.commit()
@@ -118,31 +127,6 @@ def save_session_string(group_id: int, admin_id: int, session_string: str):
 # WINNER LOOKUP
 # ============================================================
 
-def get_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
-    """sent ምንም ይሁን winner ያምጣ"""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT id, game_id, place, user_name, prize
-        FROM winners
-        WHERE telegram_id=%s AND group_id=%s
-        ORDER BY created_at DESC
-        LIMIT 1
-    """, (telegram_id, group_id))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not row:
-        return None
-    return {
-        "id": row[0],
-        "game_id": row[1],
-        "place": row[2],
-        "user_name": row[3],
-        "prize": float(row[4]) if row[4] else 0,
-    }
-
-
 def get_unsent_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
     """Winners table ላይ sent=FALSE ያለውን winner ያምጣ"""
     conn = get_conn()
@@ -151,7 +135,7 @@ def get_unsent_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
         SELECT id, game_id, place, user_name, prize
         FROM winners
         WHERE telegram_id=%s AND group_id=%s AND sent=FALSE
-        ORDER BY created_at DESC
+        ORDER BY place ASC, created_at DESC
         LIMIT 1
     """, (telegram_id, group_id))
     row = cur.fetchone()
@@ -168,15 +152,72 @@ def get_unsent_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
     }
 
 
+def get_any_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
+    """
+    FIX #1 + #3: sent=FALSE ወይም sent=TRUE ያለውን winner ያምጣ
+    ብዙ places ካሉ → lowest place (1ኛ) ይምጣ
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, game_id, place, user_name, prize, sent
+        FROM winners
+        WHERE telegram_id=%s AND group_id=%s
+        ORDER BY place ASC, created_at DESC
+        LIMIT 1
+    """, (telegram_id, group_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "id": row[0],
+        "game_id": row[1],
+        "place": row[2],
+        "user_name": row[3],
+        "prize": float(row[4]) if row[4] else 0,
+        "sent": row[5],
+    }
+
+
+def get_all_winners_by_telegram_id(telegram_id: int, group_id: int) -> list:
+    """
+    FIX #3: አንድ user ብዙ places ካሸነፈ ሁሉንም ያምጣ
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, game_id, place, user_name, prize, sent
+        FROM winners
+        WHERE telegram_id=%s AND group_id=%s
+        ORDER BY place ASC
+    """, (telegram_id, group_id))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "id": r[0],
+            "game_id": r[1],
+            "place": r[2],
+            "user_name": r[3],
+            "prize": float(r[4]) if r[4] else 0,
+            "sent": r[5],
+        }
+        for r in rows
+    ]
+
+
 def get_sent_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
-    """Winners table ላይ sent=TRUE ያለውን winner ያምጣ"""
+    """Winners table ላይ sent=TRUE ያለውን winner ያምጣ (lowest place)"""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         SELECT id, game_id, place, user_name, prize
         FROM winners
         WHERE telegram_id=%s AND group_id=%s AND sent=TRUE
-        ORDER BY created_at DESC
+        ORDER BY place ASC, created_at DESC
         LIMIT 1
     """, (telegram_id, group_id))
     row = cur.fetchone()
@@ -191,6 +232,41 @@ def get_sent_winner_by_telegram_id(telegram_id: int, group_id: int) -> dict:
         "user_name": row[3],
         "prize": float(row[4]) if row[4] else 0,
     }
+
+
+# ============================================================
+# PHOTO AMOUNT TRACKING (for #/ correction)
+# ============================================================
+
+def save_photo_amount(photo_id: int, telegram_id: int, group_id: int, ai_amount: float):
+    """AI ያነበበውን amount ለ photo_id ያስቀምጥ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO winner_photo_amounts (photo_id, telegram_id, group_id, ai_amount)
+        VALUES (%s, %s, %s, %s)
+        ON CONFLICT (photo_id) DO UPDATE SET ai_amount=%s
+    """, (photo_id, telegram_id, group_id, ai_amount, ai_amount))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_photo_amount(photo_id: int) -> dict:
+    """photo_id ላይ AI ያነበበውን amount ያምጣ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT telegram_id, group_id, ai_amount
+        FROM winner_photo_amounts
+        WHERE photo_id=%s
+    """, (photo_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {"telegram_id": row[0], "group_id": row[1], "ai_amount": row[2]}
 
 
 # ============================================================
@@ -212,56 +288,71 @@ def parse_edit_caption(caption: str):
 
 
 # ============================================================
-# PROCESS WINNER PAYMENT
+# PROCESS WINNER PAYMENT — FIXED
 # ============================================================
 
 async def process_winner_payment(bot, group_id: int,
                                   receiver_id: int, amount: float,
-                                  is_edit: bool):
-    """Winner payment ያስተናግዳል"""
+                                  is_edit: bool = False,
+                                  photo_ai_amount: float = None):
+    """
+    FIX #1: sent=TRUE ከሆነም ይቀጥላል (extra payment)
+    FIX #3: አንድ user ብዙ places ካሸነፈ → total deduct, lowest place announce
+    FIX #2: is_edit=True → photo_ai_amount vs actual → diff adjust
+    """
 
     if is_edit:
-        winner = get_sent_winner_by_telegram_id(receiver_id, group_id)
-        if not winner:
-            logger.info(f"[Userbot2] edit — no sent winner for {receiver_id} in group {group_id}")
+        # #/ correction: reply photo ላይ AI ያነበበው vs actual
+        if photo_ai_amount is None:
+            logger.warning(f"[Userbot2] edit — no photo_ai_amount provided for {receiver_id}")
             return
 
-        game_id = winner["game_id"]
-        old_prize = winner["prize"]
-        difference = amount - old_prize
+        winner = get_any_winner_by_telegram_id(receiver_id, group_id)
+        if not winner:
+            logger.info(f"[Userbot2] edit — no winner for {receiver_id} in group {group_id}")
+            return
 
-        if difference == 0:
+        # diff = actual - ai_read → positive means more to deduct, negative means refund
+        diff = amount - photo_ai_amount
+        if diff == 0:
             logger.info(f"[Userbot2] edit — no change for {receiver_id}")
             return
 
-        result = deduct_winner_balance(game_id, receiver_id, -difference, group_id=group_id)
+        game_id = winner["game_id"]
+        result = deduct_winner_balance(game_id, receiver_id, diff, group_id=group_id)
         new_balance = result["new_balance"]
 
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("""
-            UPDATE winners SET prize=%s WHERE game_id=%s AND telegram_id=%s AND group_id=%s
-        """, (amount, game_id, receiver_id, group_id))
-        conn.commit()
-        cur.close()
-        conn.close()
-
-        logger.info(f"[Userbot2] edit — {winner['user_name']} | old={old_prize} new={amount} diff={difference} | balance={new_balance}")
+        logger.info(
+            f"[Userbot2] edit correction | {winner['user_name']} | "
+            f"ai_read={photo_ai_amount} actual={amount} diff={diff} | balance={new_balance}"
+        )
         await _send_group_announcement(bot, group_id, winner, amount, new_balance, is_edit=True)
 
     else:
-        winner = get_unsent_winner_by_telegram_id(receiver_id, group_id)
-        if not winner:
-            logger.info(f"[Userbot2] send — no unsent winner for {receiver_id} in group {group_id}")
+        # FIX #3: ሁሉም winners ያምጣ (ብዙ place ካሸነፈ)
+        all_winners = get_all_winners_by_telegram_id(receiver_id, group_id)
+        if not all_winners:
+            logger.info(f"[Userbot2] send — no winner for {receiver_id} in group {group_id}")
             return
 
-        game_id = winner["game_id"]
+        # Lowest place (1ኛ) announcement ይጠቀም
+        primary_winner = all_winners[0]  # already sorted by place ASC
+        game_id = primary_winner["game_id"]
+
+        # FIX #1 + #3: ሁሉንም winners deduct ባንዴ
         result = deduct_winner_balance(game_id, receiver_id, amount, group_id=group_id)
         new_balance = result["new_balance"]
-        mark_winner_sent(game_id, receiver_id, amount)
 
-        logger.info(f"[Userbot2] send — {winner['user_name']} | amount={amount} | balance={new_balance}")
-        await _send_group_announcement(bot, group_id, winner, amount, new_balance, is_edit=False)
+        # mark all unsent winners as sent
+        for w in all_winners:
+            if not w["sent"]:
+                mark_winner_sent(w["game_id"], receiver_id, w["prize"])
+
+        logger.info(
+            f"[Userbot2] send | {primary_winner['user_name']} | "
+            f"places={[w['place'] for w in all_winners]} | amount={amount} | balance={new_balance}"
+        )
+        await _send_group_announcement(bot, group_id, primary_winner, amount, new_balance, is_edit=False)
 
 
 async def _send_group_announcement(bot, group_id: int, winner: dict,
@@ -277,14 +368,20 @@ async def _send_group_announcement(bot, group_id: int, winner: dict,
             f"💳 ቀሪ balance: ETB {new_balance}"
         )
 
-        logger.info(f"[Userbot2] Sending announcement to group {group_id} | winner={winner['user_name']} | amount={amount} | is_edit={is_edit}")
+        logger.info(
+            f"[Userbot2] Sending announcement to group {group_id} | "
+            f"winner={winner['user_name']} | amount={amount} | is_edit={is_edit}"
+        )
 
         await bot.send_message(chat_id=group_id, text=text)
-
         logger.info(f"[Userbot2] ✅ Announcement sent successfully to group {group_id}")
 
     except Exception as e:
-        logger.error(f"[Userbot2] ❌ Group announcement FAILED | group={group_id} | winner={winner.get('user_name')} | amount={amount} | error={e}", exc_info=True)
+        logger.error(
+            f"[Userbot2] ❌ Group announcement FAILED | group={group_id} | "
+            f"winner={winner.get('user_name')} | amount={amount} | error={e}",
+            exc_info=True
+        )
 
 
 # ============================================================
@@ -293,7 +390,7 @@ async def _send_group_announcement(bot, group_id: int, winner: dict,
 
 _active_clients = []
 _pending_sessions2: dict = {}
-_processed_photo_ids: set = set()  # ድጋሚ አንድኑ screenshot እንዳይቀንስ
+_processed_photo_ids: set = set()
 
 
 async def _start_single_listener(bot, session: dict) -> bool:
@@ -333,28 +430,53 @@ async def _start_single_listener(bot, session: dict) -> bool:
                     logger.debug(f"[Userbot2] receiver_id ጠፍቷል — skip")
                     return
 
-                logger.debug(f"[Userbot2] Outgoing msg | receiver={receiver_id} | has_photo={has_photo} | caption='{caption[:30]}'")
+                logger.debug(
+                    f"[Userbot2] Outgoing msg | receiver={receiver_id} | "
+                    f"has_photo={has_photo} | caption='{caption[:30]}'"
+                )
 
-                # ── EDIT: #/300 text only, no photo ──────────────────────
+                # ── FIX #2: #/ correction — reply to photo ብቻ ──────────
                 edit_amount = parse_edit_caption(caption)
                 if edit_amount is not None and not has_photo:
-                    logger.info(f"[Userbot2] Edit command detected | amount={edit_amount} | receiver={receiver_id}")
-                    winner = get_sent_winner_by_telegram_id(receiver_id, _group_id)
-                    if not winner:
-                        logger.info(f"[Userbot2] #/edit — not a sent winner for {receiver_id}, skip")
+                    # reply_to ያለ photo id ያምጣ
+                    replied_photo_id = None
+                    if msg.reply_to and msg.reply_to.reply_to_msg_id:
+                        try:
+                            replied_msg = await client.get_messages(
+                                msg.peer_id,
+                                ids=msg.reply_to.reply_to_msg_id
+                            )
+                            if replied_msg and replied_msg.photo:
+                                replied_photo_id = replied_msg.photo.id
+                        except Exception as e:
+                            logger.warning(f"[Userbot2] Could not get replied message: {e}")
+
+                    if not replied_photo_id:
+                        logger.info(f"[Userbot2] #/ without reply to photo — skip")
                         return
+
+                    # ያ photo ላይ AI ያነበበውን amount ያምጣ
+                    photo_data = get_photo_amount(replied_photo_id)
+                    if not photo_data:
+                        logger.info(f"[Userbot2] #/ replied photo not in DB — skip")
+                        return
+
+                    logger.info(
+                        f"[Userbot2] Edit correction | photo={replied_photo_id} | "
+                        f"ai_read={photo_data['ai_amount']} | actual={edit_amount} | receiver={receiver_id}"
+                    )
                     await process_winner_payment(
                         bot=bot,
                         group_id=_group_id,
                         receiver_id=receiver_id,
                         amount=edit_amount,
                         is_edit=True,
+                        photo_ai_amount=photo_data["ai_amount"],
                     )
                     return
 
-                # ── SEND: photo, no caption ───────────────────────────────
+                # ── FIX #1 + #3: photo — sent ወይም unsent winner ─────────
                 if has_photo and not caption:
-                    # አንድኑ screenshot ድጋሚ እንዳይቀንስ
                     photo_uid = msg.photo.id
                     if photo_uid in _processed_photo_ids:
                         logger.info(f"[Userbot2] photo {photo_uid} already processed — skip")
@@ -363,13 +485,15 @@ async def _start_single_listener(bot, session: dict) -> bool:
 
                     logger.info(f"[Userbot2] Photo detected | receiver={receiver_id} | checking winner...")
 
-                    # ✅ sent ምንም ይሁን winner ያምጣ
-                    winner = get_winner_by_telegram_id(receiver_id, _group_id)
-                    if not winner:
-                        logger.info(f"[Userbot2] photo — not a winner for {receiver_id}, skip AI")
+                    # FIX #1: sent ወይም unsent — ሁሉም winner ያምጣ
+                    all_winners = get_all_winners_by_telegram_id(receiver_id, _group_id)
+                    if not all_winners:
+                        logger.info(f"[Userbot2] photo — no winner for {receiver_id}, skip AI")
                         return
 
-                    logger.info(f"[Userbot2] Winner found: {winner['user_name']} | calling AI analyze...")
+                    logger.info(
+                        f"[Userbot2] Winner(s) found: {[w['user_name'] for w in all_winners]} | calling AI analyze..."
+                    )
 
                     image_base64 = await _download_tg_photo(client, msg)
                     if not image_base64:
@@ -383,42 +507,58 @@ async def _start_single_listener(bot, session: dict) -> bool:
 
                     amount = analysis.get("amount")
                     if not amount:
-                        logger.warning(f"[Userbot2] ❌ AI could not find amount in screenshot | analysis={analysis}")
+                        logger.warning(
+                            f"[Userbot2] ❌ AI could not find amount | analysis={analysis}"
+                        )
                         return
 
-                    logger.info(f"[Userbot2] AI found amount={amount} for {winner['user_name']}")
+                    amount = float(amount)
+                    logger.info(
+                        f"[Userbot2] AI found amount={amount} for {all_winners[0]['user_name']}"
+                    )
+
+                    # FIX #2: AI amount ለ #/ correction ያስቀምጥ
+                    save_photo_amount(photo_uid, receiver_id, _group_id, amount)
+
                     await process_winner_payment(
                         bot=bot,
                         group_id=_group_id,
                         receiver_id=receiver_id,
-                        amount=float(amount),
+                        amount=amount,
                         is_edit=False,
                     )
                     return
 
-                # ── SEND: URL in text ─────────────────────────────────────
+                # ── URL in text ───────────────────────────────────────────
                 if not has_photo and caption:
                     url_match = re.search(r'https?://[^\s]+', caption)
                     if url_match:
                         logger.info(f"[Userbot2] URL detected | receiver={receiver_id} | checking winner...")
-                        winner = get_unsent_winner_by_telegram_id(receiver_id, _group_id)
-                        if not winner:
-                            logger.info(f"[Userbot2] URL — not an unsent winner for {receiver_id}, skip")
+
+                        # FIX #1: sent ወይም unsent winner ያምጣ
+                        all_winners = get_all_winners_by_telegram_id(receiver_id, _group_id)
+                        if not all_winners:
+                            logger.info(f"[Userbot2] URL — no winner for {receiver_id}, skip")
                             return
 
                         url = url_match.group(0)
                         logger.info(f"[Userbot2] Fetching payment data from URL: {url}")
                         payment_data = await fetch_payment_data_from_url(url)
                         if not payment_data or not payment_data.get("amount"):
-                            logger.warning(f"[Userbot2] ❌ URL fetch — no amount found | url={url} | data={payment_data}")
+                            logger.warning(
+                                f"[Userbot2] ❌ URL fetch — no amount | url={url} | data={payment_data}"
+                            )
                             return
 
-                        logger.info(f"[Userbot2] URL amount={payment_data['amount']} for {winner['user_name']}")
+                        amount = float(payment_data["amount"])
+                        logger.info(
+                            f"[Userbot2] URL amount={amount} for {all_winners[0]['user_name']}"
+                        )
                         await process_winner_payment(
                             bot=bot,
                             group_id=_group_id,
                             receiver_id=receiver_id,
-                            amount=float(payment_data["amount"]),
+                            amount=amount,
                             is_edit=False,
                         )
                         return
@@ -431,12 +571,14 @@ async def _start_single_listener(bot, session: dict) -> bool:
         return True
 
     except Exception as e:
-        logger.error(f"[Userbot2] ❌ Failed to start listener for admin {admin_id}: {e}", exc_info=True)
+        logger.error(
+            f"[Userbot2] ❌ Failed to start listener for admin {admin_id}: {e}",
+            exc_info=True
+        )
         return False
 
 
 async def _download_tg_photo(client: TelegramClient, msg) -> str:
-    """Telethon message ላይ ያለውን photo base64 አርጎ ይመልሳል"""
     import base64
     import io
     try:
@@ -452,7 +594,6 @@ async def _download_tg_photo(client: TelegramClient, msg) -> str:
 
 
 async def start_winner_listeners(bot):
-    """ቦት ሲነሳ ያሉትን session ሁሉ ይጭናል"""
     sessions = get_all_winner_sessions()
     if not sessions:
         logger.info("[Userbot2] No winner sender sessions found")
@@ -472,7 +613,6 @@ def register_userbot2_handlers(app, bot):
     from telegram.ext import ContextTypes
     from bot import is_admin, is_main_admin, get_admin_group_id
 
-    # ── /setwinnerapi ────────────────────────────────────────
     async def handle_setwinnerapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if not is_main_admin(update.effective_user.id):
             await update.message.reply_text("❌ Main admin ብቻ ነው!")
@@ -499,7 +639,6 @@ def register_userbot2_handlers(app, bot):
             f"እያንዳንዱ group admin አሁን /startsession2 +phone መጠቀም ይችላል።"
         )
 
-    # ── /startsession2 ───────────────────────────────────────
     async def handle_startsession2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         user_id = update.effective_user.id
         if update.effective_chat.type != "private":
@@ -538,7 +677,6 @@ def register_userbot2_handlers(app, bot):
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
 
-    # ── /verifycode2 ─────────────────────────────────────────
     async def handle_verifycode2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type != "private":
             await update.message.reply_text("❌ Private chat ብቻ ነው!")
@@ -566,7 +704,6 @@ def register_userbot2_handlers(app, bot):
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
 
-    # ── /verify2fa2 ──────────────────────────────────────────
     async def handle_verify2fa2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type != "private":
             await update.message.reply_text("❌ Private chat ብቻ ነው!")
@@ -590,7 +727,6 @@ def register_userbot2_handlers(app, bot):
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {e}")
 
-    # ── Login finish ─────────────────────────────────────────
     async def _finish_login(update: Update, client: TelegramClient, phone: str, pending: dict):
         session_string = client.session.save()
         group_id = pending["group_id"]
