@@ -1,368 +1,1041 @@
-"""
-jina_brain.py
-=============
-Jina embedding fallback brain ለ responder.py intent detection።
-TF-IDF score ዝቅ ሲሆን (< 0.75) ብቻ ይጠራል።
-Multi-key rotation ይደግፋል።
-DB caching + hash-based auto re-embed ይደግፋል።
-
-Setup:
-    pip install httpx
-"""
-
-import math
-import hashlib
+import os
+import re
 import json
+import base64
 import logging
+import random
 import asyncio
-
+import time
+from collections import defaultdict, deque
+from typing import Optional
+from config import BOT_TOKEN, GROUP_CHAT_ID, GROQ_API_KEYS, NVIDIA_API_KEYS, JINA_API_KEYS
 import httpx
-
-from database import get_conn
+from groq import Groq
+from openai import OpenAI
+from database import (
+    save_sms_payment,
+    save_screenshot_payment,
+    get_sms_payment_by_ref,
+    is_ref_matched_already,
+    cleanup_old_payments,
+    confirm_payment,
+    get_paid_numbers,
+    get_active_settings,
+    get_taken_numbers,
+    get_user_by_number,
+    get_users_by_number,
+    add_winner_balance,
+    save_winner,
+    log_activity,
+    find_matching_sms,
+)
+from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
 
-# ================================================================
-# CONFIG
-# ================================================================
+PAYMENT_SUCCESS_MESSAGES = [
+    "መልካም ዕድል, ወዳጄ 🙏",
+    "መልካም ዕድል, ይቅናህ ቤተሰብ 🙏",
+    "መልካም ዕድል 🙏",
+    "እሺ ቤተሰብ 🙏 መልካም ዕድል",
+]
 
-JINA_MODEL      = "jina-embeddings-v3"
-JINA_URL        = "https://api.jina.ai/v1/embeddings"
-JINA_TASK       = "text-matching"
-JINA_BATCH_SIZE = 500
+# ============================================================
+# GROQ KEY ROTATION
+# ============================================================
 
-# TF-IDF score ከዚህ በታች ሲሆን ብቻ Jina ይጠራል
-JINA_FALLBACK_THRESHOLD = 0.75
+_groq_index = 0
+_groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS else []
 
-# Jina minimum similarity score
-JINA_MIN_SCORE = 0.35
+def _get_groq_client() -> Groq:
+    global _groq_index
+    if not _groq_clients:
+        raise RuntimeError("GROQ_API_KEY ያልተቀመጠ!")
+    client = _groq_clients[_groq_index]
+    _groq_index = (_groq_index + 1) % len(_groq_clients)
+    return client
 
-# ================================================================
-# KEY ROTATION
-# ================================================================
-
-_jina_keys: list[str] = []
-_jina_index = 0
-
-def _next_key() -> str:
-    global _jina_index
-    if not _jina_keys:
-        raise RuntimeError("Jina brain not initialized — await init_jina_brain() first")
-    key = _jina_keys[_jina_index]
-    _jina_index = (_jina_index + 1) % len(_jina_keys)
-    return key
-
-# ================================================================
-# IN-MEMORY STORE
-# ================================================================
-
-_intent_embeddings: dict[str, list[list[float]]] = {}
-_is_ready = False
-
-# ================================================================
-# COSINE SIMILARITY
-# ================================================================
-
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = math.sqrt(sum(x * x for x in a))
-    norm_b = math.sqrt(sum(x * x for x in b))
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-# ================================================================
-# HASH — INTENT_EXAMPLES ተቀይሯል?
-# ================================================================
-
-def _compute_hash(intent_examples: dict) -> str:
-    content = json.dumps(intent_examples, ensure_ascii=False, sort_keys=True)
-    return hashlib.md5(content.encode("utf-8")).hexdigest()
-
-# ================================================================
-# DB — CREATE TABLE
-# ================================================================
-
-def _ensure_table():
-    try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SET statement_timeout = '10000'")
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS jina_embeddings (
-                id SERIAL PRIMARY KEY,
-                intent TEXT NOT NULL,
-                example_index INTEGER NOT NULL,
-                embedding JSONB NOT NULL,
-                created_at TIMESTAMP DEFAULT NOW(),
-                UNIQUE(intent, example_index)
+async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str:
+    total_keys = len(_groq_clients)
+    max_attempts = total_keys * 2
+    for attempt in range(max_attempts):
+        client = _get_groq_client()
+        key_num = (_groq_index - 1) % total_keys + 1
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.1,
+                )
             )
-        """)
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS jina_meta (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL,
-                updated_at TIMESTAMP DEFAULT NOW()
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[Groq] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                if (attempt + 1) % total_keys == 0:
+                    logger.info("[Groq] All keys exhausted — waiting 10s...")
+                    await asyncio.sleep(10)
+                continue
+            logger.error(f"[Groq] Non-rate error: {e}")
+            raise
+    raise RuntimeError("All Groq keys exhausted")
+
+async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str:
+    total_keys = len(_groq_clients)
+    max_attempts = total_keys * 2
+    for attempt in range(max_attempts):
+        client = _get_groq_client()
+        key_num = (_groq_index - 1) % total_keys + 1
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model="meta-llama/llama-4-scout-17b-16e-instruct",
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                    max_tokens=300,
+                    temperature=0.1,
+                )
             )
-        """)
-        conn.commit()
-        cur.close()
-        conn.close()
-    except Exception as e:
-        logger.warning(f"[JinaBrain] ensure_table error: {e}")
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[Groq Vision] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                if (attempt + 1) % total_keys == 0:
+                    logger.info("[Groq Vision] All keys exhausted — waiting 10s...")
+                    await asyncio.sleep(10)
+                continue
+            logger.error(f"[Groq Vision] Non-rate error: {e}")
+            raise
+    raise RuntimeError("All Groq vision keys exhausted")
 
-# ================================================================
-# DB — LOAD / SAVE / CLEAR
-# ================================================================
 
-def _load_hash_from_db() -> str | None:
+# ============================================================
+# JINA KEY ROTATION — shared with jina_brain.py
+# ============================================================
+
+def _get_jina_key() -> str:
+    return get_shared_jina_key()
+
+
+# ============================================================
+# NVIDIA KEY ROTATION
+# ============================================================
+
+_nvidia_index = 0
+_nvidia_clients = [
+    OpenAI(
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=key
+    ) for key in NVIDIA_API_KEYS
+] if NVIDIA_API_KEYS else []
+
+NVIDIA_RPM_LIMIT = 38
+NVIDIA_WINDOW_SECONDS = 60
+NVIDIA_MAX_WAIT_SECONDS = 120
+NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
+
+_nvidia_lock = asyncio.Lock()
+_nvidia_call_times = defaultdict(deque)
+_nvidia_blocked_until = {}
+_nvidia_health_task_started = False
+
+
+def _get_nvidia_client():
+    global _nvidia_index
+    if not _nvidia_clients:
+        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+    client = _nvidia_clients[_nvidia_index]
+    _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
+    return client
+
+
+def _nvidia_prune_window(idx: int, now: float):
+    q = _nvidia_call_times[idx]
+    while q and now - q[0] > NVIDIA_WINDOW_SECONDS:
+        q.popleft()
+
+
+async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
+    global _nvidia_index
+    deadline = time.time() + max_wait
+
+    while True:
+        async with _nvidia_lock:
+            now = time.time()
+            soonest_free_at = None
+
+            for _ in range(len(_nvidia_clients)):
+                idx = _nvidia_index
+                _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
+
+                _nvidia_prune_window(idx, now)
+                q = _nvidia_call_times[idx]
+
+                if len(q) < NVIDIA_RPM_LIMIT:
+                    q.append(now)
+                    return _nvidia_clients[idx], idx
+
+                key_free_at = q[0] + NVIDIA_WINDOW_SECONDS
+                if soonest_free_at is None or key_free_at < soonest_free_at:
+                    soonest_free_at = key_free_at
+
+        now = time.time()
+        if now >= deadline:
+            raise RuntimeError("All NVIDIA keys are at their rate limit — timed out waiting")
+
+        wait_time = max(0.5, (soonest_free_at or now + 1) - now)
+        wait_time = min(wait_time, deadline - now, 5)
+        logger.info(f"[NVIDIA] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
+        await asyncio.sleep(wait_time)
+
+
+def _nvidia_mark_blocked(idx: int):
+    _nvidia_blocked_until[idx] = time.time()
+
+
+def _nvidia_clear_blocked(idx: int):
+    _nvidia_blocked_until.pop(idx, None)
+
+
+async def _background_recheck_blocked_nvidia_keys():
+    while True:
+        try:
+            await asyncio.sleep(NVIDIA_HEALTH_RECHECK_INTERVAL)
+
+            for idx in list(_nvidia_blocked_until.keys()):
+                if idx >= len(_nvidia_clients):
+                    _nvidia_blocked_until.pop(idx, None)
+                    continue
+
+                client = _nvidia_clients[idx]
+                try:
+                    await asyncio.to_thread(
+                        lambda c=client: c.chat.completions.create(
+                            model="meta/llama-4-maverick-17b-128e-instruct",
+                            messages=[{"role": "user", "content": "ping"}],
+                            max_tokens=1,
+                        )
+                    )
+                    _nvidia_clear_blocked(idx)
+                    async with _nvidia_lock:
+                        _nvidia_call_times[idx].clear()
+                    logger.info(f"[NVIDIA Health] Key {idx} ነፃ ሆኗል — ወደ rotation ተመለሰ")
+                except Exception as e:
+                    err_str = str(e).lower()
+                    if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                        logger.info(f"[NVIDIA Health] Key {idx} ገና busy — {NVIDIA_HEALTH_RECHECK_INTERVAL//60} ደቂቃ ይጠብቅ")
+                        _nvidia_mark_blocked(idx)
+                    else:
+                        logger.warning(f"[NVIDIA Health] Key {idx} non-rate error during recheck: {e}")
+        except Exception as loop_err:
+            logger.error(f"[NVIDIA Health] background loop error: {loop_err}", exc_info=True)
+
+
+def ensure_nvidia_health_task_started():
+    global _nvidia_health_task_started
+    if _nvidia_health_task_started or not _nvidia_clients:
+        return
+    _nvidia_health_task_started = True
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SET statement_timeout = '5000'")
-        cur.execute("SELECT value FROM jina_meta WHERE key='intent_hash'")
-        row = cur.fetchone()
-        cur.close()
-        conn.close()
-        return row[0] if row else None
+        asyncio.create_task(_background_recheck_blocked_nvidia_keys())
+        logger.info("[NVIDIA Health] background recheck task started")
+    except RuntimeError:
+        _nvidia_health_task_started = False
+
+
+async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
+    total_keys = len(_nvidia_clients)
+    if total_keys == 0:
+        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+
+    max_attempts = total_keys * 3
+    last_error = None
+
+    for attempt in range(max_attempts):
+        try:
+            client, idx = await _get_available_nvidia_client()
+        except RuntimeError as e:
+            logger.warning(f"[NVIDIA] {e} — retrying once more after short wait")
+            await asyncio.sleep(2)
+            continue
+
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model="meta/llama-4-maverick-17b-128e-instruct",
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                    max_tokens=300,
+                    temperature=0.1,
+                )
+            )
+            _nvidia_clear_blocked(idx)
+            return response.choices[0].message.content.strip()
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[NVIDIA] Key #{idx} rate limited — attempt {attempt+1}/{max_attempts}")
+                _nvidia_mark_blocked(idx)
+                continue
+            logger.error(f"[NVIDIA] Non-rate error: {e}")
+            raise
+
+    raise RuntimeError(f"All NVIDIA keys exhausted after {max_attempts} attempts: {last_error}")
+
+
+# ============================================================
+# SMS PARSER
+# ============================================================
+
+async def parse_sms(sms: str) -> Optional[dict]:
+    prompt = """You are an Ethiopian bank SMS parser.
+
+Analyze this SMS and extract payment information.
+
+Rules:
+- is_incoming: true only if money was RECEIVED (credited, received). false if money was SENT (transferred, debited).
+- type: "Telebirr", "CBE", "Awash", "BOA", or "Other"
+- amount: the amount received (not including service charges/VAT)
+- sender_name: name of who sent the money (if mentioned). null if not found.
+- ref: transaction reference number. Only extract if Telebirr (transaction number). null for others.
+- url: any URL found in the SMS. null if none.
+
+Respond ONLY in this exact JSON format with no extra text:
+{
+  "is_incoming": true or false,
+  "type": "CBE" or "Telebirr" or "Awash" or "BOA" or "Other",
+  "amount": <number or null>,
+  "sender_name": "<name or null>",
+  "ref": "<ref or null>",
+  "url": "<url or null>"
+}"""
+
+    try:
+        messages = [
+            {"role": "system", "content": prompt},
+            {"role": "user", "content": sms},
+        ]
+        text = await _call_groq_with_rotation(messages)
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+
+        for field in ("sender_name", "ref", "url"):
+            if parsed.get(field) in ("null", "None", "", "N/A"):
+                parsed[field] = None
+
+        return parsed
+
     except Exception as e:
-        logger.warning(f"[JinaBrain] Hash load error: {e}")
+        logger.error(f"[SMS Parse] error: {e}", exc_info=True)
         return None
 
-def _save_hash_to_db(hash_str: str):
+
+# ============================================================
+# JINA URL → full payment data
+# ============================================================
+
+async def _parse_html_with_groq(html: str, url: str) -> Optional[dict]:
+    """Raw HTML ወይም text ን Groq ሰጥቶ payment data ማውጣት"""
+    messages = [
+        {"role": "system", "content": """Extract payment info from this Ethiopian bank receipt page.
+The content may be raw HTML or plain text. Find the payment amount, sender name, and reference number.
+Respond ONLY in JSON:
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<CBE/Telebirr/Awash/Dashen/etc>"}"""},
+        {"role": "user", "content": html[:3000]},
+    ]
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SET statement_timeout = '5000'")
-        cur.execute("""
-            INSERT INTO jina_meta (key, value, updated_at)
-            VALUES ('intent_hash', %s, NOW())
-            ON CONFLICT (key) DO UPDATE SET value=%s, updated_at=NOW()
-        """, (hash_str, hash_str))
-        conn.commit()
-        cur.close()
-        conn.close()
+        result_text = await _call_groq_with_rotation(messages)
+        result_text = re.sub(r"^```json\s*", "", result_text)
+        result_text = re.sub(r"^```\s*", "", result_text)
+        result_text = re.sub(r"\s*```$", "", result_text)
+        parsed = json.loads(result_text.strip())
+        if parsed.get("amount"):
+            return parsed
+        return None
     except Exception as e:
-        logger.warning(f"[JinaBrain] Hash save error: {e}")
+        logger.warning(f"[URL Fetch] Groq parse error: {e}")
+        return None
 
-def _load_embeddings_from_db(intent_examples: dict) -> dict[str, list[list[float]]] | None:
+
+async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
+    # ── Step 1: Jina reader (timeout 45s) ──
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SET statement_timeout = '10000'")
-        cur.execute("""
-            SELECT intent, example_index, embedding
-            FROM jina_embeddings
-            ORDER BY intent, example_index
-        """)
-        rows = cur.fetchall()
-        cur.close()
-        conn.close()
+        jina_url = f"https://r.jina.ai/{url}"
+        headers = {
+            "Accept": "text/plain",
+            "User-Agent": "Mozilla/5.0",
+        }
+        jina_key = _get_jina_key()
+        if jina_key:
+            headers["Authorization"] = f"Bearer {jina_key}"
 
-        if not rows:
+        async with httpx.AsyncClient(timeout=45) as client:
+            res = await client.get(jina_url, headers=headers)
+            if res.status_code == 200 and res.text.strip():
+                logger.info("[URL Fetch] Jina succeeded")
+                result = await _parse_html_with_groq(res.text, url)
+                if result:
+                    return result
+                logger.info("[URL Fetch] Jina returned content but Groq found no amount — trying direct fetch")
+    except Exception as e:
+        logger.warning(f"[URL Fetch] Jina failed: {e} — trying direct fetch")
+
+    # ── Step 2: Direct httpx fetch + Groq parse ──
+    try:
+        headers_direct = {
+            "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.5",
+        }
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            res = await client.get(url, headers=headers_direct)
+            if res.status_code == 200 and res.text.strip():
+                logger.info("[URL Fetch] Direct fetch succeeded")
+                result = await _parse_html_with_groq(res.text, url)
+                if result:
+                    return result
+                logger.info("[URL Fetch] Direct fetch returned content but no amount found")
+    except Exception as e:
+        logger.warning(f"[URL Fetch] Direct fetch failed: {e}")
+
+    logger.error(f"[URL Fetch] All methods failed for: {url}")
+    return None
+
+
+# ============================================================
+# SMS WEBHOOK
+# ============================================================
+
+async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: int = None) -> dict:
+    logger.info(f"[SMS] Received: {raw_sms}")
+
+    parsed = await parse_sms(raw_sms)
+    if not parsed:
+        return {"success": False, "reason": "unparseable"}
+
+    if not parsed.get("is_incoming"):
+        logger.info("[SMS] Outgoing SMS — skipping")
+        return {"success": False, "reason": "outgoing"}
+
+    amount = parsed.get("amount")
+    sender_name = parsed.get("sender_name")
+    ref = parsed.get("ref")
+    sms_type = parsed.get("type")
+    url = parsed.get("url")
+
+    if not amount:
+        return {"success": False, "reason": "no_amount"}
+
+    if url and (not sender_name or len(sender_name.split()) < 2):
+        logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
+        url_data = await fetch_payment_data_from_url(url)
+        if url_data:
+            if url_data.get("sender_name"):
+                sender_name = url_data["sender_name"]
+            if url_data.get("amount") and not amount:
+                amount = url_data["amount"]
+            if url_data.get("ref") and not ref:
+                ref = url_data["ref"]
+
+    logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref} | group={group_id}")
+
+    settings = get_active_settings(group_id=group_id)
+    game_id = settings["id"] if settings else None
+
+    result = save_sms_payment(
+        amount=amount,
+        sender_name=sender_name,
+        ref=ref,
+        sms_type=sms_type,
+        raw_sms=raw_sms,
+        group_id=group_id,
+        game_id=game_id,
+    )
+
+    if result.get("matched") and bot:
+        matched = result["matched"]
+        target_chat = matched.get("group_id") or group_id or GROUP_CHAT_ID
+        await notify_match(bot, matched, chat_id=target_chat, nekay_cb=nekay_cb)
+
+    return {
+        "success": True,
+        "matched": result.get("matched"),
+        "amount": amount,
+        "sender_name": sender_name,
+        "ref": ref,
+        "type": sms_type,
+    }
+
+
+# ============================================================
+# PAYMENT PHOTO HANDLER
+# ============================================================
+
+async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
+    chat_id = msg.chat.id
+    telegram_id = msg.from_user.id
+    username = msg.from_user.username or msg.from_user.first_name or "Unknown"
+    _group_id = group_id or chat_id
+
+    try:
+        photo = msg.photo[-1]
+        image_base64 = await download_image_as_base64(photo.file_id)
+        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
+        analysis = await analyze_screenshot(image_base64)
+
+        if not analysis:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ ምስሉ ሊተነተን አልቻለም። ግልጽ screenshot ይላኩ።"
+                )
+            except Exception:
+                pass
+            return
+
+        photo_type = analysis.get("photoType", "other")
+
+        if photo_type == "other":
+            description = analysis.get("description", "ክፍያ ያልሆነ ምስል")
+            try:
+                desc = await describe_photo_in_amharic(description)
+            except Exception as e:
+                logger.warning(f"[Describe] Failed: {e}")
+                desc = "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id, text=desc
+                )
+            except Exception:
+                pass
+            return
+
+        amount = analysis.get("amount")
+        sender_name = analysis.get("sender_name")
+        ref = analysis.get("ref")
+
+        if not amount:
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ Amount ሊነበብ አልቻለም። ግልጽ screenshot ይላኩ።"
+                )
+            except Exception:
+                pass
+            return
+
+        logger.info(f"[Payment] type={photo_type} | amount={amount} | sender={sender_name} | ref={ref} | user={username} | group={_group_id}")
+
+        settings = get_active_settings(group_id=_group_id)
+        game_id = settings["id"] if settings else None
+
+        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
+        match = find_matching_sms(
+            telegram_id=telegram_id, amount=amount, sender_name=sender_name,
+            ref=ref, pay_type=photo_type, group_id=_group_id,
+            game_id=game_id,
+        )
+
+        if not match:
+            # ✅ SMS ገና አልደረሰም — screenshot save ያደርጋል ቆይቶ SMS ሲመጣ match ይሆናል
+            save_screenshot_payment(
+                telegram_id=telegram_id, amount=amount, sender_name=sender_name,
+                ref=ref, pay_type=photo_type,
+                description=analysis.get("description", ""), group_id=_group_id,
+                game_id=game_id,
+            )
+            return
+
+        # ✅ Match ተገኘ — notify
+        await notify_match(
+            bot,
+            {**match, "telegram_id": telegram_id, "group_id": _group_id},
+            msg.message_id, _group_id,
+            nekay_cb=nekay_cb,
+            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
+            receipt_msg_id=receipt_msg.message_id,
+            receipt_chat_id=chat_id,
+        )
+
+        try:
+            log_activity(_group_id, payments=1)
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
+
+
+# ============================================================
+# Receipt URL handler
+# ============================================================
+
+async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int, nekay_cb=None):
+    chat_id = msg.chat.id
+    _group_id = group_id or chat_id
+
+    try:
+        receipt_msg = await msg.reply_text("እሺ ቤተሰብ 🙏")
+
+        payment_data = await fetch_payment_data_from_url(url)
+
+        if not payment_data or not payment_data.get("amount"):
+            try:
+                await bot.edit_message_text(
+                    chat_id=chat_id, message_id=receipt_msg.message_id,
+                    text="⚠️ ደረሰኙ ሊነበብ አልቻለም።"
+                )
+            except Exception:
+                pass
+            return
+
+        amount = payment_data["amount"]
+        sender_name = payment_data.get("sender_name")
+        ref = payment_data.get("ref")
+        bank = payment_data.get("bank", "Bank")
+
+        logger.info(f"[Receipt URL] bank={bank} | amount={amount} | sender={sender_name} | ref={ref} | group={_group_id}")
+
+        settings = get_active_settings(group_id=_group_id)
+        game_id = settings["id"] if settings else None
+
+        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
+        match = find_matching_sms(
+            telegram_id=telegram_id, amount=amount,
+            sender_name=sender_name, ref=ref,
+            pay_type=bank, group_id=_group_id,
+            game_id=game_id,
+        )
+
+        if not match:
+            save_screenshot_payment(
+                telegram_id=telegram_id, amount=amount,
+                sender_name=sender_name, ref=ref,
+                pay_type=bank,
+                description=f"Receipt URL: {url}",
+                group_id=_group_id,
+                game_id=game_id,
+            )
+            try:
+                await bot.delete_message(chat_id=chat_id, message_id=receipt_msg.message_id)
+            except Exception:
+                pass
+            return
+
+        # ✅ Match ተገኘ — notify
+        await notify_match(
+            bot,
+            {**match, "telegram_id": telegram_id, "group_id": _group_id},
+            msg.message_id, _group_id,
+            nekay_cb=nekay_cb,
+            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
+            receipt_msg_id=receipt_msg.message_id,
+            receipt_chat_id=chat_id,
+        )
+
+        try:
+            log_activity(_group_id, payments=1)
+        except Exception:
+            pass
+
+    except Exception as e:
+        logger.error(f"[Receipt URL] Error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል።")
+
+
+# ============================================================
+# SCREENSHOT ANALYZER — NVIDIA + Groq fallback
+# ============================================================
+
+async def analyze_screenshot(image_base64: str) -> dict:
+    prompt = """You are a payment receipt analyzer for Ethiopian banks.
+
+You must recognize ALL Ethiopian bank receipts including but not limited to:
+- CBE, Telebirr, Awash, BOA, Dashen, Abay, Nib, Wegagen, United, Lion,
+  Oromia, Bunna, Berhan, Coopbank, Enat, Amhara, ZemenBank and any other Ethiopian bank.
+
+RULES:
+- If image is ANY Ethiopian bank receipt → extract info, never return "other"
+- photoType: use bank name like "CBE", "Telebirr", "Awash", "BOA", "Dashen", etc.
+- amount: transferred amount (number only)
+- sender_name: name of sender/payer. null if not found.
+- ref: transaction ref (Telebirr only). null for others.
+- description: brief English description
+- lang: is the receipt text in "amharic" or "english"?
+
+CRITICAL:
+- ONLY return photoType = "other" if image is clearly NOT a bank receipt
+
+Respond ONLY in JSON:
+{
+  "photoType": "<bank name or other>",
+  "amount": <number or null>,
+  "sender_name": "<name or null>",
+  "ref": "<ref or null>",
+  "description": "<description>",
+  "lang": "amharic" or "english"
+}"""
+
+    try:
+        text = await _call_nvidia_with_rotation(image_base64, prompt)
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+
+        for field in ("sender_name", "ref"):
+            if parsed.get(field) in ("null", "None", "", "N/A"):
+                parsed[field] = None
+
+        if parsed.get("lang") == "amharic":
+            logger.info("[Screenshot] አማርኛ detected → Groq fallback")
+            text2 = await _call_groq_vision_with_rotation(image_base64, prompt)
+            text2 = re.sub(r"^```json\s*", "", text2)
+            text2 = re.sub(r"^```\s*", "", text2)
+            text2 = re.sub(r"\s*```$", "", text2)
+            parsed = json.loads(text2.strip())
+            for field in ("sender_name", "ref"):
+                if parsed.get(field) in ("null", "None", "", "N/A"):
+                    parsed[field] = None
+
+        return parsed
+
+    except json.JSONDecodeError as e:
+        logger.error(f"[Screenshot] JSON parse error: {e}")
+        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not parse"}
+    except Exception as e:
+        logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
+        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
+
+
+# ============================================================
+# WINNER PHOTO ANALYZER — Groq only
+# ============================================================
+
+async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
+    prize_1st = settings.get("prize_1st", 0)
+    prize_2nd = settings.get("prize_2nd")
+    prize_3rd = settings.get("prize_3rd")
+
+    prizes_desc = f"1st prize: {prize_1st} ETB"
+    if prize_2nd:
+        prizes_desc += f", 2nd: {prize_2nd} ETB"
+    if prize_3rd:
+        prizes_desc += f", 3rd: {prize_3rd} ETB"
+
+    prompt = f"""You are a lottery ticket analyzer for Ethiopian lottery.
+Game prizes: {prizes_desc}
+
+A REAL lottery ticket: small physical paper cubes with Amharic series label and numbers.
+NOT lottery → return type "other": bank receipts, screenshots, phone screens.
+
+CRITICAL ORDER RULES:
+- If numbers arranged VERTICALLY: TOP = 1st, MIDDLE = 2nd, BOTTOM = 3rd
+- If numbers arranged HORIZONTALLY: LEFT = 1st, MIDDLE = 2nd, RIGHT = 3rd
+
+Respond ONLY in this exact JSON format:
+{{
+  "type": "lottery" or "other",
+  "first": <top number as integer or null>,
+  "second": <middle number as integer or null>,
+  "third": <bottom number as integer or null>
+}}"""
+
+    try:
+        text = await _call_groq_vision_with_rotation(image_base64, prompt)
+        text = re.sub(r"^```json\s*", "", text)
+        text = re.sub(r"^```\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+        parsed = json.loads(text.strip())
+
+        if parsed.get("type") != "lottery":
             return None
 
         result = {}
-        for intent, idx, emb in rows:
-            if intent not in result:
-                result[intent] = []
-            result[intent].append(emb)
+        if parsed.get("first") is not None:
+            result[1] = int(parsed["first"])
+        if parsed.get("second") is not None:
+            result[2] = int(parsed["second"])
+        if parsed.get("third") is not None:
+            result[3] = int(parsed["third"])
 
-        for intent in intent_examples:
-            if intent not in result:
-                return None
+        return result if result else None
 
-        return result
     except Exception as e:
-        logger.warning(f"[JinaBrain] Load from DB error: {e}")
+        logger.error(f"[Winner] Analyze error: {e}", exc_info=True)
         return None
 
-def _save_embeddings_to_db(intent_embeddings: dict[str, list[list[float]]]):
+
+# ============================================================
+# WINNER PHOTO HANDLER
+# ============================================================
+
+async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) -> bool:
     try:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("SET statement_timeout = '30000'")
-        cur.execute("DELETE FROM jina_embeddings")
-        for intent, embeddings in intent_embeddings.items():
-            for idx, emb in enumerate(embeddings):
-                cur.execute("""
-                    INSERT INTO jina_embeddings (intent, example_index, embedding)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (intent, example_index) DO UPDATE SET embedding=%s
-                """, (intent, idx, json.dumps(emb), json.dumps(emb)))
-        conn.commit()
-        cur.close()
-        conn.close()
-        logger.info("✅ Embeddings saved to DB")
-    except Exception as e:
-        logger.warning(f"[JinaBrain] Save to DB error: {e}")
+        photo = msg.photo[-1]
+        image_base64 = await download_image_as_base64(photo.file_id)
+        await msg.reply_text("⏳ Winner እየተለየ ነው...")
 
-# ================================================================
-# JINA API CALL — ASYNC BATCH
-# ================================================================
+        winners = await analyze_winner_photo(image_base64, settings)
+        if not winners:
+            await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
+            return False
 
-async def _get_embeddings_async(texts: list[str]) -> list[list[float]]:
-    api_key = _next_key()
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {api_key}",
-    }
-    payload = {
-        "model": JINA_MODEL,
-        "input": texts,
-        "task": JINA_TASK,
-    }
-    async with httpx.AsyncClient(timeout=60) as client:
-        resp = await client.post(JINA_URL, json=payload, headers=headers)
-        if resp.status_code == 429:
-            logger.warning("⚠️  Jina rate limit — rotating key...")
-            api_key = _next_key()
-            headers["Authorization"] = f"Bearer {api_key}"
-            resp = await client.post(JINA_URL, json=payload, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-    items = sorted(data["data"], key=lambda x: x["index"])
-    return [item["embedding"] for item in items]
+        prize_map = {
+            1: settings.get("prize_1st", 0),
+            2: settings.get("prize_2nd"),
+            3: settings.get("prize_3rd"),
+        }
+        medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+        per_person = settings.get("numbers_per_person", 1)
+        lines = ["🏆 Winners!\n"]
+        _group_id = group_id or settings.get("group_id")
 
-# ================================================================
-# INITIALIZE
-# ================================================================
+        for place in sorted(winners.keys()):
+            number = winners[place]
+            prize = prize_map.get(place)
+            medal = medals.get(place, "🎖️")
 
-async def init_jina_brain(intent_examples: dict, api_keys: list[str]) -> bool:
-    global _intent_embeddings, _is_ready, _jina_keys, _jina_index
+            if not prize:
+                lines.append(f"{medal} {place}ኛ: #{number} — prize አልተቀመጠም")
+                continue
 
-    if not api_keys:
-        logger.warning("⚠️  JINA_API_KEYS የለም — Jina brain disabled")
-        return False
+            if per_person > 1:
+                from board import get_group_start
+                lookup_number = get_group_start(number, per_person)
+            else:
+                lookup_number = number
 
-    _jina_keys = api_keys
-    _jina_index = 0
-    logger.info(f"🔑 Jina keys loaded: {len(api_keys)} key(s)")
+            users = get_users_by_number(settings["id"], lookup_number)
 
-    try:
-        await asyncio.wait_for(
-            asyncio.to_thread(_ensure_table),
-            timeout=10.0
-        )
-    except asyncio.TimeoutError:
-        logger.warning("⚠️ DB ensure_table timeout — continuing")
-    except Exception as e:
-        logger.warning(f"⚠️ DB ensure_table error: {e}")
+            if not users:
+                lines.append(f"{medal} {place}ኛ: #{number} — user አልተገኘም")
+                continue
 
-    current_hash = _compute_hash(intent_examples)
-    db_hash = None
-    try:
-        db_hash = await asyncio.wait_for(
-            asyncio.to_thread(_load_hash_from_db),
-            timeout=5.0
-        )
-    except asyncio.TimeoutError:
-        logger.warning("⚠️ DB hash load timeout — will re-embed")
-    except Exception as e:
-        logger.warning(f"⚠️ DB hash load error: {e}")
+            split_prize = round(prize / len(users), 2)
 
-    if db_hash == current_hash:
-        logger.info("✅ Intent examples unchanged — loading from DB...")
-        cached = None
-        try:
-            cached = await asyncio.wait_for(
-                asyncio.to_thread(_load_embeddings_from_db, intent_examples),
-                timeout=15.0
-            )
-        except asyncio.TimeoutError:
-            logger.warning("⚠️ DB embeddings load timeout — will re-embed")
-        except Exception as e:
-            logger.warning(f"⚠️ DB embeddings load error: {e}")
+            winner_parts = []
+            for u in users:
+                telegram_id = u["telegram_id"]
+                user_name = u["user_name"]
+                is_half = u["is_half"]
 
-        if cached:
-            _intent_embeddings = cached
-            _is_ready = True
-            total = sum(len(v) for v in _intent_embeddings.values())
-            logger.info(f"🎉 Jina brain ready (from DB) — {len(_intent_embeddings)} intents, {total} embeddings")
-            return True
-        else:
-            logger.info("⚠️ DB cache incomplete — re-embedding...")
+                add_winner_balance(settings["id"], telegram_id, split_prize, group_id=_group_id)
+                save_winner(
+                    settings["id"], place, telegram_id, user_name,
+                    number, split_prize, group_id=_group_id
+                )
 
-    logger.info(f"🧠 Jina brain initializing... embedding {sum(len(v) for v in intent_examples.values())} texts")
+                half_label = " (በግማሽ)" if is_half else ""
+                winner_parts.append(f"{user_name}{half_label} → ETB {split_prize} ✅")
 
-    try:
-        all_texts = []
-        intent_map = []
-        for intent, examples in intent_examples.items():
-            for ex in examples:
-                all_texts.append(ex)
-                intent_map.append(intent)
+                try:
+                    from ai_fallback import log_transaction
+                    if _group_id:
+                        log_transaction(
+                            group_id=_group_id, game_id=settings["id"],
+                            telegram_id=telegram_id, amount=split_prize,
+                            reason="winner_prize", number=number,
+                            done_by="system", balance_after=split_prize,
+                        )
+                except Exception as _log_err:
+                    logger.warning(f"[log_transaction] Error: {_log_err}")
 
-        total_texts = len(all_texts)
-        all_embeddings = []
-        processed = 0
+            if len(users) == 1:
+                lines.append(f"{medal} {place}ኛ: #{number} — {winner_parts[0]}")
+            else:
+                lines.append(f"{medal} {place}ኛ: #{number} (prize ÷ {len(users)})")
+                for part in winner_parts:
+                    lines.append(f"   • {part}")
 
-        for i in range(0, total_texts, JINA_BATCH_SIZE):
-            batch = all_texts[i:i + JINA_BATCH_SIZE]
-            batch_embeddings = await _get_embeddings_async(batch)
-            all_embeddings.extend(batch_embeddings)
-            processed += len(batch)
-            logger.info(f"  📦 {processed}/{total_texts} embedded...")
+        announcement = "\n".join(lines)
+        await msg.reply_text(announcement)
 
-        new_embeddings: dict[str, list[list[float]]] = {}
-        for idx, (intent, emb) in enumerate(zip(intent_map, all_embeddings)):
-            if intent not in new_embeddings:
-                new_embeddings[intent] = []
-            new_embeddings[intent].append(emb)
+        if _group_id:
+            try:
+                await bot.send_message(chat_id=_group_id, text=announcement)
+            except Exception:
+                pass
 
-        _intent_embeddings = new_embeddings
-        _is_ready = True
-
-        asyncio.create_task(_save_to_db_background(current_hash))
-
-        total = sum(len(v) for v in _intent_embeddings.values())
-        logger.info(f"🎉 Jina brain ready — {len(_intent_embeddings)} intents, {total} embeddings")
         return True
 
     except Exception as e:
-        logger.error(f"❌ Jina brain init failed: {e}")
-        _is_ready = False
+        logger.error(f"[Winner] Handler error: {e}", exc_info=True)
+        await msg.reply_text("❌ Error ተፈጥሯል።")
         return False
 
 
-async def _save_to_db_background(current_hash: str):
+# ============================================================
+# MATCH NOTIFICATION
+# ============================================================
+
+async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None, success_msg: str = None, receipt_msg_id: int = None, receipt_chat_id: int = None):
+    from board import build_board
+
+    telegram_id = match_data["telegram_id"]
+    amount = match_data["amount"]
+    _group_id = match_data.get("group_id") or chat_id or GROUP_CHAT_ID
+
+    result = confirm_payment(telegram_id, amount, group_id=_group_id)
+    confirmed = result["confirmed"]
+    remaining_balance = result["remaining_balance"]
+
+    logger.info(f"[Match] ✅ TelegramID: {telegram_id} | ETB {amount} | confirmed: {len(confirmed)}")
+
+    target_chat = _group_id
+
+    if confirmed:
+        final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
+        if receipt_msg_id and receipt_chat_id:
+            try:
+                await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
+            except Exception:
+                pass
+        if target_chat:
+            if reply_msg_id:
+                await bot.send_message(chat_id=target_chat, text=final_msg, reply_to_message_id=reply_msg_id)
+            else:
+                await bot.send_message(chat_id=target_chat, text=final_msg)
+    else:
+        settings_check = get_active_settings(group_id=_group_id)
+        needed_msg = ""
+        if settings_check:
+            price_full = float(settings_check.get("price_full") or 0)
+            price_half = float(settings_check.get("price_half") or 0)
+            if remaining_balance < price_half and price_half > 0:
+                short = price_half - remaining_balance
+                needed_msg = f"\n⚠️ ቀሪ: ETB {short:.0f} ይላኩ (ለግማሽ)"
+            elif remaining_balance < price_full:
+                short = price_full - remaining_balance
+                needed_msg = f"\n⚠️ ቀሪ: ETB {short:.0f} ይላኩ (ለሙሉ)"
+
+        message = (
+            f"💰 ETB {amount} ደረሰ።\n"
+            f"💳 ባላንስ: ETB {remaining_balance}"
+            + needed_msg
+        )
+        if receipt_msg_id and receipt_chat_id:
+            try:
+                await bot.edit_message_text(
+                    chat_id=receipt_chat_id, message_id=receipt_msg_id, text=message
+                )
+            except Exception:
+                try:
+                    await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
+                except Exception:
+                    pass
+                if target_chat:
+                    if reply_msg_id:
+                        await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
+                    else:
+                        await bot.send_message(chat_id=target_chat, text=message)
+        elif target_chat:
+            if reply_msg_id:
+                await bot.send_message(chat_id=target_chat, text=message, reply_to_message_id=reply_msg_id)
+            else:
+                await bot.send_message(chat_id=target_chat, text=message)
+
+    if nekay_cb and confirmed:
+        await nekay_cb(confirmed)
+
     try:
-        await asyncio.to_thread(_save_embeddings_to_db, _intent_embeddings)
-        await asyncio.to_thread(_save_hash_to_db, current_hash)
-        logger.info("✅ Embeddings saved to DB (background)")
-    except Exception as e:
-        logger.warning(f"⚠️ Background DB save error: {e}")
+        from ai_fallback import log_transaction
+        if confirmed and _group_id:
+            settings_log = get_active_settings(group_id=_group_id)
+            if settings_log:
+                game_id_log = settings_log["id"]
+                price_full_log = float(settings_log.get("price_full") or 0)
+                price_half_log = float(settings_log.get("price_half") or 0)
+                log_transaction(
+                    group_id=_group_id, game_id=game_id_log,
+                    telegram_id=telegram_id, amount=amount,
+                    reason="payment_confirmed", done_by="user",
+                    balance_after=remaining_balance,
+                )
+                for c in confirmed:
+                    cost = price_half_log if c["is_half"] else price_full_log
+                    reason = f"number_registered_{'half' if c['is_half'] else 'full'}"
+                    log_transaction(
+                        group_id=_group_id, game_id=game_id_log,
+                        telegram_id=telegram_id, amount=-cost,
+                        reason=reason, number=c["number"],
+                        done_by="user", balance_after=remaining_balance,
+                    )
+    except Exception as _log_err:
+        logger.warning(f"[log_transaction] Error: {_log_err}")
+
+    if confirmed and target_chat:
+        settings = get_active_settings(group_id=_group_id)
+        if settings:
+            game_id = settings["id"]
+            taken = get_taken_numbers(game_id)
+            paid = get_paid_numbers(game_id)
+            board_text = build_board(settings, taken, paid)
+            board_msg_id = settings.get("board_message_id")
+
+            if board_msg_id:
+                try:
+                    await bot.edit_message_text(
+                        chat_id=target_chat,
+                        message_id=board_msg_id,
+                        text=board_text
+                    )
+                except Exception:
+                    new_msg = await bot.send_message(chat_id=target_chat, text=board_text)
+                    from database import update_board_message_id
+                    update_board_message_id(game_id, new_msg.message_id)
 
 
-# ================================================================
-# DETECT INTENT VIA JINA — ASYNC
-# ================================================================
+# ============================================================
+# GROQ — አማርኛ ማብራሪያ
+# ============================================================
 
-async def jina_detect_intent(text: str) -> tuple[str, float]:
-    if not _is_ready or not _intent_embeddings:
-        return "unknown", 0.0
-
+async def describe_photo_in_amharic(description: str) -> str:
     try:
-        query_emb = (await _get_embeddings_async([text]))[0]
-
-        best_intent = "unknown"
-        best_score  = 0.0
-
-        for intent, embeddings in _intent_embeddings.items():
-            intent_score = max(_cosine(query_emb, emb) for emb in embeddings)
-            if intent_score > best_score:
-                best_score  = intent_score
-                best_intent = intent
-
-        if best_score < JINA_MIN_SCORE:
-            return "unknown", best_score
-
-        return best_intent, best_score
-
+        messages = [{
+            "role": "user",
+            "content": (
+                f'ይህ ምስል "{description}" ነው። '
+                "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
+            ),
+        }]
+        return await _call_groq_with_rotation(messages, max_tokens=100)
     except Exception as e:
-        logger.error(f"❌ Jina detect failed: {e}")
-        return "unknown", 0.0
+        logger.error(f"[Describe] Error: {e}")
+        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
 
 
-def jina_is_ready() -> bool:
-    return _is_ready
+# ============================================================
+# HELPERS
+# ============================================================
+
+async def download_image_as_base64(file_id: str) -> str:
+    async with httpx.AsyncClient(timeout=30) as client:
+        get_file_res = await client.get(
+            f"https://api.telegram.org/bot{BOT_TOKEN}/getFile",
+            params={"file_id": file_id}
+        )
+        get_file_res.raise_for_status()
+        file_path = get_file_res.json()["result"]["file_path"]
+        file_url = f"https://api.telegram.org/file/bot{BOT_TOKEN}/{file_path}"
+        res = await client.get(file_url)
+        res.raise_for_status()
+        return base64.b64encode(res.content).decode("utf-8")
