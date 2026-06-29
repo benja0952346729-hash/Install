@@ -119,7 +119,7 @@ async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str
 
 
 # ============================================================
-# JINA KEY ROTATION — shared with jina_brain.py
+# JINA KEY ROTATION
 # ============================================================
 
 def _get_jina_key() -> str:
@@ -352,7 +352,6 @@ Respond ONLY in this exact JSON format with no extra text:
 # ============================================================
 
 async def _parse_html_with_groq(html: str, url: str) -> Optional[dict]:
-    """Raw HTML ወይም text ን Groq ሰጥቶ payment data ማውጣት"""
     messages = [
         {"role": "system", "content": """You are an Ethiopian bank receipt parser. Extract payment info from receipt page HTML or text.
 
@@ -381,8 +380,13 @@ BANK DETECTION:
 - dashen → "Dashen"
 - Otherwise detect from page content
 
+If the page is NOT a bank receipt at all, return:
+{"amount": null, "sender_name": null, "ref": null, "bank": null}
+
+Only return amount if you are confident this is a payment receipt.
+
 Respond ONLY in JSON with no extra text:
-{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<bank name>"}"""},
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<bank name or null>"}"""},
         {"role": "user", "content": html[:4000]},
     ]
     try:
@@ -405,7 +409,6 @@ Respond ONLY in JSON with no extra text:
 async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
     fail_reason = "unknown"
 
-    # ── Step 1: Jina reader — JS rendering + retry ──
     jina_url = f"https://r.jina.ai/{url}"
     jina_key = _get_jina_key()
     headers = {
@@ -450,7 +453,6 @@ async def fetch_payment_data_from_url(url: str) -> Optional[dict]:
             logger.warning(f"[URL Fetch] Jina error (attempt {attempt+1}): {e}")
             break
 
-    # ── Step 2: Direct httpx fetch + Groq parse ──
     try:
         headers_direct = {
             "User-Agent": "Mozilla/5.0 (Linux; Android 10) AppleWebKit/537.36 Chrome/120 Mobile Safari/537.36",
@@ -603,7 +605,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount, sender_name=sender_name,
             ref=ref, pay_type=photo_type, group_id=_group_id,
@@ -611,7 +612,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         )
 
         if not match:
-            # ✅ SMS ገና አልደረሰም — screenshot save ያደርጋል ቆይቶ SMS ሲመጣ match ይሆናል
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount, sender_name=sender_name,
                 ref=ref, pay_type=photo_type,
@@ -620,7 +620,6 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
             )
             return
 
-        # ✅ Match ተገኘ — notify
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
@@ -654,12 +653,10 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
 
         payment_data = await fetch_payment_data_from_url(url)
 
+        # ባንክ ያልሆነ URL → ዝም በል
         if not payment_data or not payment_data.get("amount"):
             try:
-                await bot.edit_message_text(
-                    chat_id=chat_id, message_id=receipt_msg.message_id,
-                    text="⚠️ ሊንኩ ሊነበብ አልቻለም።\n📸 እባክዎ የደረሰኙን screenshot ያንሱና ይላኩ።"
-                )
+                await bot.delete_message(chat_id=chat_id, message_id=receipt_msg.message_id)
             except Exception:
                 pass
             return
@@ -674,7 +671,6 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
         settings = get_active_settings(group_id=_group_id)
         game_id = settings["id"] if settings else None
 
-        # ✅ SMS ቀድሞ ከደረሰ match ያደርጋል — match ሲሆን sms record DELETE ይሆናል
         match = find_matching_sms(
             telegram_id=telegram_id, amount=amount,
             sender_name=sender_name, ref=ref,
@@ -697,7 +693,6 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 pass
             return
 
-        # ✅ Match ተገኘ — notify
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
@@ -784,7 +779,7 @@ Respond ONLY in JSON:
 
 
 # ============================================================
-# WINNER PHOTO ANALYZER — Groq only
+# WINNER PHOTO ANALYZER
 # ============================================================
 
 async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
