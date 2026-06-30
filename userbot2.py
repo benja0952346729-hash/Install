@@ -9,9 +9,11 @@ userbot2.py — Winner payment auto-listener (Telethon-based) [FIXED]
    (2FA ካለ: /verify2fa2 +phone password)
 
 Payment logic:
-- Photo (no caption) + winner (sent ወይም unsent) → AI analyzes screenshot → send, balance ይቀነሳል
+- Photo (no caption) + winner (sent ወይም unsent) + active balance → AI analyzes screenshot
+  → amount round down to nearest 10 (VAT tolerance) → send, balance ይቀነሳል
 - #/300 reply to photo   + sent winner             → correct AI amount → balance adjust
-- URL outgoing           + winner (sent ወይም unsent) → fetch amount → send
+- URL outgoing           + winner (sent ወይም unsent) + active balance → fetch amount → send
+- Winner balance cleared (round 3+, prize expired)   → AI/processing skip ይደረጋል
 - Normal chat / not winner                          → ምንም አይሰራም
 """
 
@@ -288,21 +290,62 @@ def parse_edit_caption(caption: str):
 
 
 # ============================================================
+# FIX A: ROUND DOWN TO NEAREST 10 (VAT/service charge tolerance)
+# ============================================================
+
+def round_down_to_10(amount: float) -> float:
+    """
+    AI ያነበበው amount VAT/service charge ምክንያት ትንሽ ይበልጣል (እስከ 10 ብር)።
+    Round down to nearest 10.
+    109 → 100, 1701.20 → 1700, 1710 → 1710, 95 → 90
+    """
+    return float(int(amount // 10) * 10)
+
+
+# ============================================================
+# FIX B: STALE WINNER CHECK (prize cleared by new round)
+# ============================================================
+
+def has_active_winner_balance(telegram_id: int, group_id: int) -> bool:
+    """
+    user_balance ላይ prize_balance ወይም carry_balance ካለ True ይመልስ።
+    Round 3+ ላይ clear_prize_balance ስለሚያጠፋው፣ winners row ቢቀርም
+    balance ከሌለ ይህ False ይመልሳል → AI መጥራት አያስፈልግም።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, telegram_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return False
+    carry_balance = float(row[0] or 0)
+    prize_balance = float(row[1] or 0)
+    return (carry_balance + prize_balance) > 0
+
+
+# ============================================================
 # PROCESS WINNER PAYMENT — FIXED
 # ============================================================
 
 async def process_winner_payment(bot, group_id: int,
                                   receiver_id: int, amount: float,
                                   is_edit: bool = False,
-                                  photo_ai_amount: float = None):
+                                  photo_ai_amount: float = None,
+                                  edit_photo_id: int = None):
     """
     FIX #1: sent=TRUE ከሆነም ይቀጥላል (extra payment)
     FIX #3: አንድ user ብዙ places ካሸነፈ → total deduct, lowest place announce
-    FIX #2: is_edit=True → photo_ai_amount vs actual → diff adjust
+    FIX #2: is_edit=True → photo_ai_amount (last known) vs actual → diff adjust,
+            ከዛ stored amount ይዘምናል (chain correction, no double-counting)
     """
 
     if is_edit:
-        # #/ correction: reply photo ላይ AI ያነበበው vs actual
+        # #/ correction: reply photo ላይ AI ያነበበው (ወይም last corrected) vs actual
         if photo_ai_amount is None:
             logger.warning(f"[Userbot2] edit — no photo_ai_amount provided for {receiver_id}")
             return
@@ -312,7 +355,7 @@ async def process_winner_payment(bot, group_id: int,
             logger.info(f"[Userbot2] edit — no winner for {receiver_id} in group {group_id}")
             return
 
-        # diff = actual - ai_read → positive means more to deduct, negative means refund
+        # diff = actual - last_known_amount → positive means more to deduct, negative means refund
         diff = amount - photo_ai_amount
         if diff == 0:
             logger.info(f"[Userbot2] edit — no change for {receiver_id}")
@@ -322,9 +365,14 @@ async def process_winner_payment(bot, group_id: int,
         result = deduct_winner_balance(game_id, receiver_id, diff, group_id=group_id)
         new_balance = result["new_balance"]
 
+        # FIX: stored amount ለዚህ photo_id ወደ አዲሱ corrected amount ይዘምን
+        # ስለዚህ ቀጣይ #/ correction ከዚህ value ይሰላል (ድርብ-ስሌት እንዳይፈጠር)
+        if edit_photo_id is not None:
+            save_photo_amount(edit_photo_id, receiver_id, group_id, amount)
+
         logger.info(
             f"[Userbot2] edit correction | {winner['user_name']} | "
-            f"ai_read={photo_ai_amount} actual={amount} diff={diff} | balance={new_balance}"
+            f"prev={photo_ai_amount} actual={amount} diff={diff} | balance={new_balance}"
         )
         await _send_group_announcement(bot, group_id, winner, amount, new_balance, is_edit=True)
 
@@ -472,6 +520,7 @@ async def _start_single_listener(bot, session: dict) -> bool:
                         amount=edit_amount,
                         is_edit=True,
                         photo_ai_amount=photo_data["ai_amount"],
+                        edit_photo_id=replied_photo_id,
                     )
                     return
 
@@ -489,6 +538,14 @@ async def _start_single_listener(bot, session: dict) -> bool:
                     all_winners = get_all_winners_by_telegram_id(receiver_id, _group_id)
                     if not all_winners:
                         logger.info(f"[Userbot2] photo — no winner for {receiver_id}, skip AI")
+                        return
+
+                    # FIX B: Stale winner check — balance cleared (round3+) ከሆነ skip
+                    if not has_active_winner_balance(receiver_id, _group_id):
+                        logger.info(
+                            f"[Userbot2] photo — winner exists but balance cleared "
+                            f"(stale, round expired) for {receiver_id} — skip AI"
+                        )
                         return
 
                     logger.info(
@@ -513,11 +570,15 @@ async def _start_single_listener(bot, session: dict) -> bool:
                         return
 
                     amount = float(amount)
+                    # FIX A: VAT/service charge tolerance — round down to nearest 10
+                    rounded_amount = round_down_to_10(amount)
                     logger.info(
-                        f"[Userbot2] AI found amount={amount} for {all_winners[0]['user_name']}"
+                        f"[Userbot2] AI found amount={amount} → rounded={rounded_amount} "
+                        f"for {all_winners[0]['user_name']}"
                     )
+                    amount = rounded_amount
 
-                    # FIX #2: AI amount ለ #/ correction ያስቀምጥ
+                    # FIX #2: AI amount (rounded) ለ #/ correction ያስቀምጥ
                     save_photo_amount(photo_uid, receiver_id, _group_id, amount)
 
                     await process_winner_payment(
@@ -539,6 +600,14 @@ async def _start_single_listener(bot, session: dict) -> bool:
                         all_winners = get_all_winners_by_telegram_id(receiver_id, _group_id)
                         if not all_winners:
                             logger.info(f"[Userbot2] URL — no winner for {receiver_id}, skip")
+                            return
+
+                        # FIX B: Stale winner check — balance cleared ከሆነ skip
+                        if not has_active_winner_balance(receiver_id, _group_id):
+                            logger.info(
+                                f"[Userbot2] URL — winner exists but balance cleared "
+                                f"(stale, round expired) for {receiver_id} — skip"
+                            )
                             return
 
                         url = url_match.group(0)
