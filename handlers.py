@@ -1084,6 +1084,11 @@ CRITICAL ORDER RULES:
 - If numbers arranged VERTICALLY: TOP = 1st, MIDDLE = 2nd, BOTTOM = 3rd
 - If numbers arranged HORIZONTALLY: LEFT = 1st, MIDDLE = 2nd, RIGHT = 3rd
 
+CONFIDENCE:
+- If any digit is blurry, ambiguous, partially hidden, or you are not fully
+  sure of a number, set "confidence" to "low".
+- Only set "confidence" to "high" if every digit is clearly and unambiguously readable.
+
 Do NOT explain your reasoning or describe the image in prose. Do NOT include
 any text before or after the JSON. Your entire response must be ONLY the
 JSON object below, starting with {{ and ending with }}.
@@ -1092,7 +1097,8 @@ JSON object below, starting with {{ and ending with }}.
   "type": "lottery" or "other",
   "first": <top number as integer or null>,
   "second": <middle number as integer or null>,
-  "third": <bottom number as integer or null>
+  "third": <bottom number as integer or null>,
+  "confidence": "high" or "low"
 }}"""
 
     providers = [
@@ -1101,25 +1107,27 @@ JSON object below, starting with {{ and ending with }}.
         ("Groq", _call_groq_vision_with_rotation),
     ]
 
-    for provider_name, call_fn in providers:
+    async def _try_provider(provider_name: str, call_fn) -> Optional[dict]:
+        """Call one provider and parse its response. Returns a dict with
+        keys {result, confidence, raw_parsed} on success, or None on any failure."""
         try:
             text = await call_fn(image_base64, prompt)
         except Exception as e:
-            logger.warning(f"[Winner] {provider_name} call failed: {e} — trying next provider")
-            continue
+            logger.warning(f"[Winner] {provider_name} call failed: {e}")
+            return None
 
         try:
             cleaned = _strip_think_block(text)
             cleaned = _extract_json_object(cleaned)
             parsed = json.loads(cleaned.strip())
         except Exception as e:
-            logger.warning(f"[Winner] {provider_name} returned unparseable JSON ({e}) — trying next provider")
-            continue
+            logger.warning(f"[Winner] {provider_name} returned unparseable JSON ({e})")
+            return None
 
-        logger.info(f"[Winner] ✅ Analyzed via {provider_name} | result={parsed}")
+        logger.info(f"[Winner] {provider_name} parsed: {parsed}")
 
         if parsed.get("type") != "lottery":
-            return None  # valid classification (not a lottery photo) — no need to try other providers
+            return {"result": None, "confidence": "high", "not_lottery": True}
 
         result = {}
         if parsed.get("first") is not None:
@@ -1128,8 +1136,43 @@ JSON object below, starting with {{ and ending with }}.
             result[2] = int(parsed["second"])
         if parsed.get("third") is not None:
             result[3] = int(parsed["third"])
+        if not result:
+            return None
 
-        return result if result else None
+        confidence = parsed.get("confidence", "high")
+        return {"result": result, "confidence": confidence, "not_lottery": False}
+
+    for i, (provider_name, call_fn) in enumerate(providers):
+        outcome = await _try_provider(provider_name, call_fn)
+        if outcome is None:
+            continue  # this provider failed entirely — try the next one
+
+        if outcome["not_lottery"]:
+            return None  # valid classification (not a lottery photo)
+
+        if outcome["confidence"] != "low":
+            logger.info(f"[Winner] ✅ Analyzed via {provider_name} (high confidence) | result={outcome['result']}")
+            return outcome["result"]
+
+        # Low confidence — get a second opinion from the remaining providers
+        logger.info(f"[Winner] {provider_name} unsure (low confidence) — seeking a second opinion")
+        for confirm_name, confirm_fn in providers[i + 1:]:
+            confirm_outcome = await _try_provider(confirm_name, confirm_fn)
+            if confirm_outcome is None or confirm_outcome["not_lottery"]:
+                continue  # couldn't get a usable second opinion from this one — try the next
+            if confirm_outcome["result"] == outcome["result"]:
+                logger.info(f"[Winner] ✅ Confirmed by {confirm_name} | result={outcome['result']}")
+                return outcome["result"]
+            else:
+                logger.warning(
+                    f"[Winner] ⚠️ Disagreement: {provider_name}={outcome['result']} vs "
+                    f"{confirm_name}={confirm_outcome['result']} — refusing to guess"
+                )
+                return None
+
+        # No other provider could confirm or deny — fall back to the low-confidence result
+        logger.warning(f"[Winner] Could not get a second opinion — using {provider_name}'s low-confidence result: {outcome['result']}")
+        return outcome["result"]
 
     logger.error("[Winner] All providers (NVIDIA, Gemini, Groq) failed to produce a parseable result")
     return None
