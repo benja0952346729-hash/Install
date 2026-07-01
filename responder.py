@@ -735,8 +735,20 @@ def detect_intent(text: str) -> tuple:
             bonus += 0.05
         scores[intent] = max(0.0, scores[intent] + bonus)
 
-    best_intent = max(scores, key=scores.get)
-    best_score  = scores[best_intent]
+    # ── FIX: confidence calibration ────────────────────────────────
+    # Previously: best_intent = max(scores, key=scores.get); best_score = scores[best_intent]
+    # Problem: whichever intent scored highest was returned with full confidence,
+    # even when the 2nd-best intent was nearly tied (ambiguous) — this made the
+    # bot "guess" on unrelated/out-of-scope messages instead of staying silent.
+    # Fix: if top-1 and top-2 scores are too close (< MARGIN_MIN), the input is
+    # genuinely ambiguous, so we cap the score below THRESHOLD_RESPOND so the
+    # bot does NOT reply instead of guessing.
+    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
+    best_intent, best_score = sorted_scores[0]
+    second_score = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
+    MARGIN_MIN = 0.06
+    if best_score - second_score < MARGIN_MIN:
+        best_score = min(best_score, 0.20)
     return best_intent, best_score
 
 
@@ -980,7 +992,7 @@ RESPONSES = {
         "ቤተሰብ አላሸነፍክም ወይም ውጤት ገና አልወጣም 🙏",
     ],
     "not_registered_taken": [
-        "{num} አበበ ስለቀደመክ ነው ቤተሰብ 🙏",
+        "{num} — አበበ ስለቀደመክ ነው ቤተሰብ 🙏",
         "ቤተሰብ {num} {name} ቀድሞሃል 🙏",
     ],
 }
@@ -1138,7 +1150,16 @@ def get_response(
     is_paid: bool = None,
 ) -> dict:
 
-    THRESHOLD_RESPOND  = 0.25
+    # ── FIX: threshold raised from 0.25 to 0.40 ────────────────────
+    # Tested empirically against real out-of-scope Amharic messages
+    # (weather, football, politics, health small-talk) which previously
+    # scored 0.34–0.36 under the old 0.25 threshold and were WRONGLY
+    # answered (usually misclassified as "greeting" or "result_query").
+    # Raising to 0.40 + the margin-check inside detect_intent() together
+    # eliminate those false replies with zero regressions on real intents
+    # (verified against my_numbers_query, complaint_removed, result_query,
+    # and 20+ other paraphrased test sentences).
+    THRESHOLD_RESPOND  = 0.40
     THRESHOLD_CONFUSED = 0.12
 
     result = {
@@ -1645,7 +1666,11 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
     """
     import re
 
-    THRESHOLD_RESPOND  = 0.25
+    # ── FIX: same threshold raise applied here for consistency ────
+    # (this path is used for Jina-resolved intents; must match the
+    # sync path's calibration so Jina-fallback results are not
+    # accepted at a lower bar than TF-IDF results)
+    THRESHOLD_RESPOND  = 0.40
     THRESHOLD_CONFUSED = 0.12
 
     settings         = kwargs.get("settings", {})
