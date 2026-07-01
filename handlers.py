@@ -45,7 +45,7 @@ PAYMENT_SUCCESS_MESSAGES = [
 # confirm before the result is trusted. Tune this based on real logs —
 # lower = fewer cross-checks (faster/cheaper) but more risk of a silent
 # misread; higher = more cross-checks (slower) but safer.
-WINNER_CONFIDENCE_THRESHOLD = 91
+WINNER_CONFIDENCE_THRESHOLD = 99
 
 # ============================================================
 # GROQ KEY ROTATION
@@ -1178,9 +1178,9 @@ JSON object below, starting with {{ and ending with }}.
             else:
                 logger.warning(
                     f"[Winner] ⚠️ Disagreement: {provider_name}={outcome['result']} vs "
-                    f"{confirm_name}={confirm_outcome['result']} — refusing to guess"
+                    f"{confirm_name}={confirm_outcome['result']} — trusting {confirm_name}'s reading"
                 )
-                return None
+                return confirm_outcome["result"]
 
         # No other provider could confirm or deny — fall back to the low-confidence result
         logger.warning(f"[Winner] Could not get a second opinion — using {provider_name}'s low-confidence result: {outcome['result']}")
@@ -1198,11 +1198,17 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
     try:
         photo = msg.photo[-1]
         image_base64 = await download_image_as_base64(photo.file_id)
-        await msg.reply_text("⏳ Winner እየተለየ ነው...")
 
         winners = await analyze_winner_photo(image_base64, settings)
         if not winners:
-            await msg.reply_text("⚠️ Winner ሊለይ አልቻለም። ግልጽ ምስል ይላኩ።")
+            # Not a winner-ticket photo (or couldn't be read) — admin photos
+            # aren't always meant to be winner results, so no text message.
+            # Just leave a quiet 🔥 reaction on the photo so the admin can
+            # notice at a glance if it *was* meant to be a winner photo.
+            try:
+                await bot.set_message_reaction(chat_id=msg.chat.id, message_id=msg.message_id, reaction=["🔥"])
+            except Exception as e:
+                logger.warning(f"[Winner] Could not set reaction: {e}")
             return False
 
         prize_map = {
@@ -1427,6 +1433,160 @@ async def describe_photo_in_amharic(description: str) -> str:
     except Exception as e:
         logger.error(f"[Describe] Error: {e}")
         return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
+
+
+# ============================================================
+# WINNER CORRECTION (admin replies to a winner announcement with
+# "#/ 10 20 31" to fix a misread number). Self-contained addition —
+# does not touch any existing handler. Wiring into bot.py (detecting
+# the reply + fetching `previous_winners` from the DB) comes next.
+# ============================================================
+
+WINNER_CORRECTION_RE = re.compile(r"^\s*#/\s*(\d+)(?:\s+(\d+))?(?:\s+(\d+))?\s*$")
+
+
+def parse_winner_correction(text: str) -> Optional[list]:
+    """Parse an admin correction command like '#/ 10 20 31'.
+    Supports 1, 2, or 3 numbers depending on how many prize places the game has:
+      '#/ 6'          -> only 1st place (single-winner game)
+      '#/ 10 20'      -> 1st + 2nd
+      '#/ 10 20 31'   -> 1st + 2nd + 3rd
+    Returns a list of numbers in place order (index 0 = 1st place), or None
+    if the text doesn't match the command format at all.
+    """
+    if not text:
+        return None
+    m = WINNER_CORRECTION_RE.match(text.strip())
+    if not m:
+        return None
+    numbers = [int(g) for g in m.groups() if g is not None]
+    return numbers if numbers else None
+
+
+async def handle_winner_correction(bot, msg, previous_winners: list, settings: dict, group_id: int = None) -> bool:
+    """Handle an admin reply-correction to a winner announcement.
+
+    previous_winners: list of dicts describing what was previously paid out
+    for this announcement, one entry per place that had a winner, e.g.:
+        [
+          {"place": 1, "number": 9,  "users": [
+              {"telegram_id": 123, "user_name": "Abebe", "split_prize": 400.0}
+          ]},
+          {"place": 2, "number": 35, "users": [...]},
+        ]
+    The caller (bot.py) is responsible for fetching this from the database
+    BEFORE calling this function, and for confirming the sender is an admin
+    and is replying to a bot winner-announcement message.
+
+    ⚠️ REQUIRES two new database.py helpers that don't exist yet — add these
+    when database.py is shared:
+      - reverse_winner_balance(game_id, telegram_id, amount, group_id=None)
+            → subtracts `amount` from the user's balance (undo a wrong payout)
+      - delete_winner(game_id, place, group_id=None)
+            → removes the old winner record(s) for that place
+    """
+    from database import reverse_winner_balance, delete_winner  # new helpers — see note above
+
+    numbers = parse_winner_correction(getattr(msg, "text", None) or getattr(msg, "caption", None) or "")
+    if not numbers:
+        return False  # not a correction command — caller should fall through to normal handling
+
+    chat_id = msg.chat.id
+    _group_id = group_id or chat_id
+    game_id = settings["id"]
+
+    prize_map = {
+        1: settings.get("prize_1st", 0),
+        2: settings.get("prize_2nd"),
+        3: settings.get("prize_3rd"),
+    }
+    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
+    per_person = settings.get("numbers_per_person", 1)
+
+    prev_by_place = {w["place"]: w for w in (previous_winners or [])}
+    lines = ["🏆 Winners (ተስተካክሏል)!\n"]
+
+    for place, new_number in enumerate(numbers, start=1):
+        prize = prize_map.get(place)
+        medal = medals.get(place, "🎖️")
+
+        # 1) Reverse whatever was previously (incorrectly) paid for this place
+        old = prev_by_place.get(place)
+        if old:
+            for u in old.get("users", []):
+                try:
+                    reverse_winner_balance(game_id, u["telegram_id"], u["split_prize"], group_id=_group_id)
+                    logger.info(f"[Correction] ↩️ Reversed ETB {u['split_prize']} from {u.get('user_name')} (place {place})")
+                except Exception as e:
+                    logger.error(f"[Correction] Failed to reverse balance for {u.get('telegram_id')}: {e}")
+            try:
+                delete_winner(game_id, place, group_id=_group_id)
+            except Exception as e:
+                logger.warning(f"[Correction] delete_winner failed for place {place}: {e}")
+
+        # 2) Pay the corrected number — only if a real owner is found
+        if not prize:
+            lines.append(f"{medal} {place}ኛ: #{new_number} — prize አልተቀመጠም")
+            continue
+
+        if per_person > 1:
+            from board import get_group_start
+            lookup_number = get_group_start(new_number, per_person)
+        else:
+            lookup_number = new_number
+
+        users = get_users_by_number(game_id, lookup_number)
+
+        if not users:
+            lines.append(f"{medal} {place}ኛ: #{new_number} — user አልተገኘም (ምንም አልተከፈለም)")
+            continue
+
+        split_prize = round(prize / len(users), 2)
+        winner_parts = []
+
+        for u in users:
+            telegram_id = u["telegram_id"]
+            user_name = u["user_name"]
+            is_half = u["is_half"]
+
+            add_winner_balance(game_id, telegram_id, split_prize, group_id=_group_id)
+            save_winner(game_id, place, telegram_id, user_name, new_number, split_prize, group_id=_group_id)
+
+            half_label = " (በግማሽ)" if is_half else ""
+            winner_parts.append(f"{user_name}{half_label} → ETB {split_prize} ✅")
+
+            try:
+                from ai_fallback import log_transaction
+                if _group_id:
+                    log_transaction(
+                        group_id=_group_id, game_id=game_id,
+                        telegram_id=telegram_id, amount=split_prize,
+                        reason="winner_prize_correction", number=new_number,
+                        done_by="admin", balance_after=split_prize,
+                    )
+            except Exception as _log_err:
+                logger.warning(f"[log_transaction] Error: {_log_err}")
+
+        if len(users) == 1:
+            lines.append(f"{medal} {place}ኛ: #{new_number} — {winner_parts[0]}")
+        else:
+            lines.append(f"{medal} {place}ኛ: #{new_number} (prize ÷ {len(users)})")
+            for part in winner_parts:
+                lines.append(f"   • {part}")
+
+    announcement = "\n".join(lines)
+
+    try:
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=msg.reply_to_message.message_id,
+            text=announcement,
+        )
+    except Exception as e:
+        logger.warning(f"[Correction] Could not edit original announcement, sending new message: {e}")
+        await bot.send_message(chat_id=_group_id, text=announcement)
+
+    return True
 
 
 # ============================================================
