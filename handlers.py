@@ -40,6 +40,13 @@ PAYMENT_SUCCESS_MESSAGES = [
     "እሺ ቤተሰብ 🙏 መልካም ዕድል",
 ]
 
+# Winner-photo digit confidence (0-100). If the primary vision provider's
+# self-reported confidence is below this, a second provider is asked to
+# confirm before the result is trusted. Tune this based on real logs —
+# lower = fewer cross-checks (faster/cheaper) but more risk of a silent
+# misread; higher = more cross-checks (slower) but safer.
+WINNER_CONFIDENCE_THRESHOLD = 70
+
 # ============================================================
 # GROQ KEY ROTATION
 # ============================================================
@@ -1085,9 +1092,11 @@ CRITICAL ORDER RULES:
 - If numbers arranged HORIZONTALLY: LEFT = 1st, MIDDLE = 2nd, RIGHT = 3rd
 
 CONFIDENCE:
-- If any digit is blurry, ambiguous, partially hidden, or you are not fully
-  sure of a number, set "confidence" to "low".
-- Only set "confidence" to "high" if every digit is clearly and unambiguously readable.
+- Rate your confidence in the extracted numbers from 0 to 100.
+- 100 = every digit is perfectly clear and unambiguous.
+- Lower the score for any blur, glare, unusual angle, partial occlusion,
+  or digits that could be confused with another digit (e.g. 6 vs 8, 3 vs 8, 1 vs 7).
+- Be honest and self-critical — do not default to a high number.
 
 Do NOT explain your reasoning or describe the image in prose. Do NOT include
 any text before or after the JSON. Your entire response must be ONLY the
@@ -1098,7 +1107,7 @@ JSON object below, starting with {{ and ending with }}.
   "first": <top number as integer or null>,
   "second": <middle number as integer or null>,
   "third": <bottom number as integer or null>,
-  "confidence": "high" or "low"
+  "confidence": <integer 0-100>
 }}"""
 
     providers = [
@@ -1127,7 +1136,7 @@ JSON object below, starting with {{ and ending with }}.
         logger.info(f"[Winner] {provider_name} parsed: {parsed}")
 
         if parsed.get("type") != "lottery":
-            return {"result": None, "confidence": "high", "not_lottery": True}
+            return {"result": None, "confidence": 100, "not_lottery": True}
 
         result = {}
         if parsed.get("first") is not None:
@@ -1139,7 +1148,10 @@ JSON object below, starting with {{ and ending with }}.
         if not result:
             return None
 
-        confidence = parsed.get("confidence", "high")
+        try:
+            confidence = int(parsed.get("confidence", 0))
+        except (TypeError, ValueError):
+            confidence = 0
         return {"result": result, "confidence": confidence, "not_lottery": False}
 
     for i, (provider_name, call_fn) in enumerate(providers):
@@ -1150,12 +1162,12 @@ JSON object below, starting with {{ and ending with }}.
         if outcome["not_lottery"]:
             return None  # valid classification (not a lottery photo)
 
-        if outcome["confidence"] != "low":
-            logger.info(f"[Winner] ✅ Analyzed via {provider_name} (high confidence) | result={outcome['result']}")
+        if outcome["confidence"] >= WINNER_CONFIDENCE_THRESHOLD:
+            logger.info(f"[Winner] ✅ Analyzed via {provider_name} (confidence={outcome['confidence']}) | result={outcome['result']}")
             return outcome["result"]
 
         # Low confidence — get a second opinion from the remaining providers
-        logger.info(f"[Winner] {provider_name} unsure (low confidence) — seeking a second opinion")
+        logger.info(f"[Winner] {provider_name} confidence={outcome['confidence']} < {WINNER_CONFIDENCE_THRESHOLD} — seeking a second opinion")
         for confirm_name, confirm_fn in providers[i + 1:]:
             confirm_outcome = await _try_provider(confirm_name, confirm_fn)
             if confirm_outcome is None or confirm_outcome["not_lottery"]:
