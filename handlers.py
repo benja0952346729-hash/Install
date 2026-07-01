@@ -45,7 +45,7 @@ PAYMENT_SUCCESS_MESSAGES = [
 # confirm before the result is trusted. Tune this based on real logs —
 # lower = fewer cross-checks (faster/cheaper) but more risk of a silent
 # misread; higher = more cross-checks (slower) but safer.
-WINNER_CONFIDENCE_THRESHOLD = 70
+WINNER_CONFIDENCE_THRESHOLD = 91
 
 # ============================================================
 # GROQ KEY ROTATION
