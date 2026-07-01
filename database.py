@@ -1535,6 +1535,86 @@ def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
     conn.close()
 
 
+def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    _group_id = group_id
+    if not _group_id:
+        cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
+        r = cur.fetchone()
+        _group_id = r[0] if r else None
+
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (_group_id, telegram_id))
+    bal_row = cur.fetchone()
+    if not bal_row:
+        cur.close()
+        conn.close()
+        return {"new_balance": 0, "nekay_numbers": []}
+
+    carry_balance = float(bal_row[0])
+    prize_balance = float(bal_row[1])
+
+    if prize_balance >= amount:
+        new_prize = prize_balance - amount
+        new_carry = carry_balance
+    else:
+        new_prize = 0
+        new_carry = carry_balance - (amount - prize_balance)
+
+    new_total = new_carry + new_prize
+
+    cur.execute("""
+        UPDATE user_balance
+        SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+        WHERE group_id=%s AND telegram_id=%s
+    """, (new_total, new_carry, new_prize, _group_id, telegram_id))
+    conn.commit()
+
+    unpaid_numbers = []
+
+    if new_carry < 0:
+        cur.execute("SELECT price_full, price_half FROM game_settings WHERE id=%s", (game_id,))
+        price_row = cur.fetchone()
+        price_full = float(price_row[0] or 0)
+        price_half = float(price_row[1] or 0)
+
+        cur.execute("""
+            SELECT id, number, is_half, slot
+            FROM registrations
+            WHERE game_id = %s AND user_id = %s AND is_paid = TRUE AND is_nekay = FALSE
+            ORDER BY
+                CASE WHEN is_half THEN %s ELSE %s END ASC,
+                registered_at DESC
+        """, (game_id, telegram_id, price_half, price_full))
+        paid_regs = cur.fetchall()
+
+        remaining_debt = abs(new_carry)
+        for reg_id, number, is_half, slot in paid_regs:
+            if remaining_debt <= 0:
+                break
+            cost = price_half if is_half else price_full
+            cur.execute("UPDATE registrations SET is_paid=FALSE, is_nekay=FALSE WHERE id=%s", (reg_id,))
+            remaining_debt -= cost
+            new_carry += cost
+            unpaid_numbers.append(number)
+
+        new_total = new_carry + new_prize
+        cur.execute("""
+            UPDATE user_balance
+            SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+            WHERE group_id=%s AND telegram_id=%s
+        """, (new_total, new_carry, new_prize, _group_id, telegram_id))
+        conn.commit()
+
+    cur.close()
+    conn.close()
+    return {"new_balance": new_total, "nekay_numbers": unpaid_numbers}
+
+
 def reverse_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None):
     """
     Winner correction ጊዜ ቀደም ብሎ የተሰጠ wrong prize ያቀንስ።
