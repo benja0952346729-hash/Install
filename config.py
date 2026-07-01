@@ -74,6 +74,18 @@ JINA_API_KEYS = [
 ]
 
 # ============================================================
+# GEMINI API KEYS — እስከ 50 ይቻላል (winner photo fallback)
+# ============================================================
+GEMINI_API_KEYS = [
+    key.strip()
+    for key in [
+        os.environ.get(f"GEMINI_API_KEY_{i}") or (os.environ.get("GEMINI_API_KEY") if i == 1 else None)
+        for i in range(1, 51)
+    ]
+    if key and key.strip()
+]
+
+# ============================================================
 # GROUP — Legacy
 # ============================================================
 GROUP_ID = int(os.environ.get("GROUP_ID", "0"))
