@@ -1535,7 +1535,74 @@ def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
     conn.close()
 
 
-def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None) -> dict:
+def reverse_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None):
+    """
+    Winner correction ጊዜ ቀደም ብሎ የተሰጠ wrong prize ያቀንስ።
+    prize_balance ቀደም ተጨምሮ ነበር — ስለዚህ ዳግም ይቀነሳል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+
+    _group_id = group_id
+    if not _group_id:
+        cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
+        r = cur.fetchone()
+        _group_id = r[0] if r else None
+
+    cur.execute("""
+        SELECT carry_balance, prize_balance FROM user_balance
+        WHERE group_id=%s AND telegram_id=%s
+    """, (_group_id, telegram_id))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return
+
+    carry_balance = float(row[0])
+    prize_balance = float(row[1])
+
+    # prize_balance ካለ ከዛ ቀንስ፣ ካለቀ carry_balance ላይ ቀንስ
+    if prize_balance >= amount:
+        new_prize = prize_balance - amount
+        new_carry = carry_balance
+    else:
+        new_prize = 0
+        new_carry = carry_balance - (amount - prize_balance)
+
+    new_total = new_carry + new_prize
+
+    cur.execute("""
+        UPDATE user_balance
+        SET balance=%s, carry_balance=%s, prize_balance=%s, updated_at=NOW()
+        WHERE group_id=%s AND telegram_id=%s
+    """, (new_total, new_carry, new_prize, _group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def delete_winner(game_id: int, place: int, group_id: int = None):
+    """
+    Winner correction ጊዜ ያሮጌውን winner record ያስወግዳል።
+    ቀጣዩ save_winner ትክክለኛውን winner ይጽፋል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    if group_id:
+        cur.execute("""
+            DELETE FROM winners WHERE game_id=%s AND place=%s AND group_id=%s
+        """, (game_id, place, group_id))
+    else:
+        cur.execute("""
+            DELETE FROM winners WHERE game_id=%s AND place=%s
+        """, (game_id, place))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+
     conn = get_conn()
     cur = conn.cursor()
 
