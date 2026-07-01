@@ -75,6 +75,24 @@ def _strip_think_block(text: str) -> str:
     return _THINK_BLOCK_RE.sub("", text).strip()
 
 
+def _extract_json_object(text: str) -> str:
+    """Pull out just the {...} object from a response, even if the model
+    wrapped it in prose/explanation (e.g. NVIDIA narrating its reasoning
+    before the JSON, or markdown fences). Falls back to the original text
+    (after fence-stripping) if no braces are found, so json.loads still
+    gets a fair shot and raises a normal, catchable error."""
+    if not text:
+        return text
+    cleaned = re.sub(r"^```json\s*", "", text)
+    cleaned = re.sub(r"^```\s*", "", cleaned)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start != -1 and end != -1 and end > start:
+        return cleaned[start:end + 1]
+    return cleaned.strip()
+
+
 async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str:
     total_keys = len(_groq_clients)
     max_attempts = total_keys * 2
@@ -141,7 +159,7 @@ async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str
                             {"type": "text", "text": prompt},
                         ],
                     }],
-                    max_tokens=300,
+                    max_tokens=600,
                     temperature=0.1,
                     reasoning_effort="none",
                 )
@@ -330,7 +348,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                             {"type": "text", "text": prompt},
                         ],
                     }],
-                    max_tokens=300,
+                    max_tokens=600,
                     temperature=0.1,
                 )
             )
@@ -507,7 +525,7 @@ async def _call_gemini_with_rotation(image_base64: str, prompt: str) -> str:
                         {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}},
                     ]
                 }],
-                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 600},
             }
             async with httpx.AsyncClient(timeout=30) as client:
                 res = await client.post(url, json=payload)
@@ -987,7 +1005,10 @@ RULES:
 CRITICAL:
 - ONLY return photoType = "other" if image is clearly NOT a bank receipt
 
-Respond ONLY in JSON:
+Do NOT explain your reasoning or describe the image in prose. Do NOT include
+any text before or after the JSON. Your entire response must be ONLY the
+JSON object below, starting with { and ending with }.
+
 {
   "photoType": "<bank name or other>",
   "amount": <number or null>,
@@ -998,10 +1019,8 @@ Respond ONLY in JSON:
 }"""
 
     def _parse(raw: str, label: str) -> dict:
-        cleaned = re.sub(r"^```json\s*", "", raw)
-        cleaned = re.sub(r"^```\s*", "", cleaned)
-        cleaned = re.sub(r"\s*```$", "", cleaned)
-        cleaned = _strip_think_block(cleaned)
+        cleaned = _strip_think_block(raw)
+        cleaned = _extract_json_object(cleaned)
         parsed = json.loads(cleaned.strip())
         for field in ("sender_name", "ref"):
             if parsed.get(field) in ("null", "None", "", "N/A"):
@@ -1065,7 +1084,10 @@ CRITICAL ORDER RULES:
 - If numbers arranged VERTICALLY: TOP = 1st, MIDDLE = 2nd, BOTTOM = 3rd
 - If numbers arranged HORIZONTALLY: LEFT = 1st, MIDDLE = 2nd, RIGHT = 3rd
 
-Respond ONLY in this exact JSON format:
+Do NOT explain your reasoning or describe the image in prose. Do NOT include
+any text before or after the JSON. Your entire response must be ONLY the
+JSON object below, starting with {{ and ending with }}.
+
 {{
   "type": "lottery" or "other",
   "first": <top number as integer or null>,
@@ -1087,10 +1109,8 @@ Respond ONLY in this exact JSON format:
             continue
 
         try:
-            cleaned = re.sub(r"^```json\s*", "", text)
-            cleaned = re.sub(r"^```\s*", "", cleaned)
-            cleaned = re.sub(r"\s*```$", "", cleaned)
-            cleaned = _strip_think_block(cleaned)
+            cleaned = _strip_think_block(text)
+            cleaned = _extract_json_object(cleaned)
             parsed = json.loads(cleaned.strip())
         except Exception as e:
             logger.warning(f"[Winner] {provider_name} returned unparseable JSON ({e}) — trying next provider")
