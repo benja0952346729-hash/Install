@@ -47,6 +47,13 @@ PAYMENT_SUCCESS_MESSAGES = [
 _groq_index = 0
 _groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS else []
 
+# Model used for Groq text calls (llama-3.3-70b-versatile was deprecated
+# by Groq on 2026-06-17). qwen/qwen3.6-27b is Groq's recommended replacement.
+# Groq is now used for text-only calls (parse_sms, HTML parsing, Amharic
+# descriptions) — all vision/image calls go through NVIDIA/Gemini instead.
+GROQ_TEXT_MODEL = "qwen/qwen3.6-27b"
+
+
 def _get_groq_client() -> Groq:
     global _groq_index
     if not _groq_clients:
@@ -55,26 +62,32 @@ def _get_groq_client() -> Groq:
     _groq_index = (_groq_index + 1) % len(_groq_clients)
     return client
 
+
 async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str:
     total_keys = len(_groq_clients)
     max_attempts = total_keys * 2
+    last_limited_key = None
     for attempt in range(max_attempts):
         client = _get_groq_client()
         key_num = (_groq_index - 1) % total_keys + 1
         try:
             response = await asyncio.to_thread(
                 lambda c=client: c.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
+                    model=GROQ_TEXT_MODEL,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=0.1,
                 )
             )
+            if last_limited_key is not None and last_limited_key != key_num:
+                logger.info(f"[Groq] 🔄 Rotated: Key #{last_limited_key} → Key #{key_num}")
+            logger.info(f"[Groq] ✅ Key #{key_num}/{total_keys} used ({GROQ_TEXT_MODEL})")
             return response.choices[0].message.content.strip()
         except Exception as e:
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
                 logger.warning(f"[Groq] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                last_limited_key = key_num
                 if (attempt + 1) % total_keys == 0:
                     logger.info("[Groq] All keys exhausted — waiting 10s...")
                     await asyncio.sleep(10)
@@ -82,40 +95,6 @@ async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str
             logger.error(f"[Groq] Non-rate error: {e}")
             raise
     raise RuntimeError("All Groq keys exhausted")
-
-async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str:
-    total_keys = len(_groq_clients)
-    max_attempts = total_keys * 2
-    for attempt in range(max_attempts):
-        client = _get_groq_client()
-        key_num = (_groq_index - 1) % total_keys + 1
-        try:
-            response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model="meta-llama/llama-4-scout-17b-16e-instruct",
-                    messages=[{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
-                            {"type": "text", "text": prompt},
-                        ],
-                    }],
-                    max_tokens=300,
-                    temperature=0.1,
-                )
-            )
-            return response.choices[0].message.content.strip()
-        except Exception as e:
-            err_str = str(e).lower()
-            if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[Groq Vision] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
-                if (attempt + 1) % total_keys == 0:
-                    logger.info("[Groq Vision] All keys exhausted — waiting 10s...")
-                    await asyncio.sleep(10)
-                continue
-            logger.error(f"[Groq Vision] Non-rate error: {e}")
-            raise
-    raise RuntimeError("All Groq vision keys exhausted")
 
 
 # ============================================================
@@ -259,6 +238,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
 
     max_attempts = total_keys * 3
     last_error = None
+    last_limited_idx = None
 
     for attempt in range(max_attempts):
         try:
@@ -284,18 +264,201 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                 )
             )
             _nvidia_clear_blocked(idx)
+            if last_limited_idx is not None and last_limited_idx != idx:
+                logger.info(f"[NVIDIA] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
+            logger.info(f"[NVIDIA] ✅ Key #{idx+1}/{total_keys} used (llama-4-maverick)")
             return response.choices[0].message.content.strip()
         except Exception as e:
             last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[NVIDIA] Key #{idx} rate limited — attempt {attempt+1}/{max_attempts}")
+                logger.warning(f"[NVIDIA] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
                 _nvidia_mark_blocked(idx)
+                last_limited_idx = idx
                 continue
             logger.error(f"[NVIDIA] Non-rate error: {e}")
             raise
 
     raise RuntimeError(f"All NVIDIA keys exhausted after {max_attempts} attempts: {last_error}")
+
+
+# ============================================================
+# GEMINI KEY ROTATION (NVIDIA-style sliding window RPM tracking)
+# ============================================================
+
+try:
+    from config import GEMINI_API_KEYS
+except ImportError:
+    GEMINI_API_KEYS = []
+
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_RPM_LIMIT = 8  # conservative vs free-tier ceiling (10-15 RPM/key)
+GEMINI_WINDOW_SECONDS = 60
+GEMINI_MAX_WAIT_SECONDS = 120
+GEMINI_HEALTH_RECHECK_INTERVAL = 7 * 60
+GEMINI_API_BASE = "https://generativelanguage.googleapis.com/v1beta/models"
+
+_gemini_index = 0
+_gemini_lock = asyncio.Lock()
+_gemini_call_times = defaultdict(deque)
+_gemini_blocked_until = {}
+_gemini_health_task_started = False
+
+
+def _gemini_prune_window(idx: int, now: float):
+    q = _gemini_call_times[idx]
+    while q and now - q[0] > GEMINI_WINDOW_SECONDS:
+        q.popleft()
+
+
+async def _get_available_gemini_key(max_wait: int = GEMINI_MAX_WAIT_SECONDS):
+    global _gemini_index
+    if not GEMINI_API_KEYS:
+        raise RuntimeError("GEMINI_API_KEY ያልተቀመጠ!")
+
+    deadline = time.time() + max_wait
+    total_keys = len(GEMINI_API_KEYS)
+
+    while True:
+        async with _gemini_lock:
+            now = time.time()
+            soonest_free_at = None
+
+            for _ in range(total_keys):
+                idx = _gemini_index
+                _gemini_index = (_gemini_index + 1) % total_keys
+
+                _gemini_prune_window(idx, now)
+                q = _gemini_call_times[idx]
+
+                if len(q) < GEMINI_RPM_LIMIT:
+                    q.append(now)
+                    return GEMINI_API_KEYS[idx], idx
+
+                key_free_at = q[0] + GEMINI_WINDOW_SECONDS
+                if soonest_free_at is None or key_free_at < soonest_free_at:
+                    soonest_free_at = key_free_at
+
+        now = time.time()
+        if now >= deadline:
+            raise RuntimeError("All Gemini keys are at their rate limit — timed out waiting")
+
+        wait_time = max(0.5, (soonest_free_at or now + 1) - now)
+        wait_time = min(wait_time, deadline - now, 5)
+        logger.info(f"[Gemini] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
+        await asyncio.sleep(wait_time)
+
+
+def _gemini_mark_blocked(idx: int):
+    _gemini_blocked_until[idx] = time.time()
+
+
+def _gemini_clear_blocked(idx: int):
+    _gemini_blocked_until.pop(idx, None)
+
+
+async def _background_recheck_blocked_gemini_keys():
+    while True:
+        try:
+            await asyncio.sleep(GEMINI_HEALTH_RECHECK_INTERVAL)
+
+            for idx in list(_gemini_blocked_until.keys()):
+                if idx >= len(GEMINI_API_KEYS):
+                    _gemini_blocked_until.pop(idx, None)
+                    continue
+
+                key = GEMINI_API_KEYS[idx]
+                try:
+                    url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={key}"
+                    async with httpx.AsyncClient(timeout=15) as client:
+                        res = await client.post(
+                            url,
+                            json={"contents": [{"parts": [{"text": "ping"}]}]},
+                        )
+                    if res.status_code == 200:
+                        _gemini_clear_blocked(idx)
+                        async with _gemini_lock:
+                            _gemini_call_times[idx].clear()
+                        logger.info(f"[Gemini Health] Key {idx} ነፃ ሆኗል — ወደ rotation ተመለሰ")
+                    elif res.status_code == 429:
+                        logger.info(f"[Gemini Health] Key {idx} ገና busy — {GEMINI_HEALTH_RECHECK_INTERVAL//60} ደቂቃ ይጠብቅ")
+                        _gemini_mark_blocked(idx)
+                    else:
+                        logger.warning(f"[Gemini Health] Key {idx} non-rate status {res.status_code} during recheck")
+                except Exception as e:
+                    logger.warning(f"[Gemini Health] Key {idx} recheck error: {e}")
+        except Exception as loop_err:
+            logger.error(f"[Gemini Health] background loop error: {loop_err}", exc_info=True)
+
+
+def ensure_gemini_health_task_started():
+    global _gemini_health_task_started
+    if _gemini_health_task_started or not GEMINI_API_KEYS:
+        return
+    _gemini_health_task_started = True
+    try:
+        asyncio.create_task(_background_recheck_blocked_gemini_keys())
+        logger.info("[Gemini Health] background recheck task started")
+    except RuntimeError:
+        _gemini_health_task_started = False
+
+
+async def _call_gemini_with_rotation(image_base64: str, prompt: str) -> str:
+    total_keys = len(GEMINI_API_KEYS)
+    if total_keys == 0:
+        raise RuntimeError("GEMINI_API_KEY ያልተቀመጠ!")
+
+    max_attempts = total_keys * 3
+    last_error = None
+    last_limited_idx = None
+
+    for attempt in range(max_attempts):
+        try:
+            key, idx = await _get_available_gemini_key()
+        except RuntimeError as e:
+            logger.warning(f"[Gemini] {e} — retrying once more after short wait")
+            await asyncio.sleep(2)
+            continue
+
+        try:
+            url = f"{GEMINI_API_BASE}/{GEMINI_MODEL}:generateContent?key={key}"
+            payload = {
+                "contents": [{
+                    "parts": [
+                        {"text": prompt},
+                        {"inline_data": {"mime_type": "image/jpeg", "data": image_base64}},
+                    ]
+                }],
+                "generationConfig": {"temperature": 0.1, "maxOutputTokens": 300},
+            }
+            async with httpx.AsyncClient(timeout=30) as client:
+                res = await client.post(url, json=payload)
+
+            if res.status_code == 429:
+                logger.warning(f"[Gemini] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
+                _gemini_mark_blocked(idx)
+                last_limited_idx = idx
+                continue
+
+            res.raise_for_status()
+            data = res.json()
+            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            _gemini_clear_blocked(idx)
+            if last_limited_idx is not None and last_limited_idx != idx:
+                logger.info(f"[Gemini] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
+            logger.info(f"[Gemini] ✅ Key #{idx+1}/{total_keys} used ({GEMINI_MODEL})")
+            return text
+
+        except httpx.HTTPStatusError as e:
+            last_error = e
+            logger.error(f"[Gemini] HTTP error on key #{idx+1}: {e}")
+            raise
+        except Exception as e:
+            last_error = e
+            logger.error(f"[Gemini] Non-rate error on key #{idx+1}: {e}")
+            raise
+
+    raise RuntimeError(f"All Gemini keys exhausted after {max_attempts} attempts: {last_error}")
 
 
 # ============================================================
@@ -714,7 +877,7 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
 
 
 # ============================================================
-# SCREENSHOT ANALYZER — NVIDIA + Groq fallback
+# SCREENSHOT ANALYZER — NVIDIA primary, Gemini fallback (Amharic)
 # ============================================================
 
 async def analyze_screenshot(image_base64: str) -> dict:
@@ -758,8 +921,8 @@ Respond ONLY in JSON:
                 parsed[field] = None
 
         if parsed.get("lang") == "amharic":
-            logger.info("[Screenshot] አማርኛ detected → Groq fallback")
-            text2 = await _call_groq_vision_with_rotation(image_base64, prompt)
+            logger.info("[Screenshot] አማርኛ detected → Gemini fallback")
+            text2 = await _call_gemini_with_rotation(image_base64, prompt)
             text2 = re.sub(r"^```json\s*", "", text2)
             text2 = re.sub(r"^```\s*", "", text2)
             text2 = re.sub(r"\s*```$", "", text2)
@@ -779,7 +942,7 @@ Respond ONLY in JSON:
 
 
 # ============================================================
-# WINNER PHOTO ANALYZER
+# WINNER PHOTO ANALYZER — NVIDIA primary, Gemini fallback
 # ============================================================
 
 async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
@@ -811,12 +974,32 @@ Respond ONLY in this exact JSON format:
   "third": <bottom number as integer or null>
 }}"""
 
+    text = None
+    used_provider = None
+
+    # 1) NVIDIA primary
     try:
-        text = await _call_groq_vision_with_rotation(image_base64, prompt)
+        text = await _call_nvidia_with_rotation(image_base64, prompt)
+        used_provider = "NVIDIA"
+    except Exception as e:
+        logger.warning(f"[Winner] NVIDIA failed: {e} — falling back to Gemini")
+
+    # 2) Gemini fallback
+    if text is None:
+        try:
+            text = await _call_gemini_with_rotation(image_base64, prompt)
+            used_provider = "Gemini"
+        except Exception as e:
+            logger.error(f"[Winner] Gemini fallback also failed: {e}", exc_info=True)
+            return None
+
+    try:
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
         parsed = json.loads(text.strip())
+
+        logger.info(f"[Winner] ✅ Analyzed via {used_provider} | result={parsed}")
 
         if parsed.get("type") != "lottery":
             return None
@@ -832,7 +1015,7 @@ Respond ONLY in this exact JSON format:
         return result if result else None
 
     except Exception as e:
-        logger.error(f"[Winner] Analyze error: {e}", exc_info=True)
+        logger.error(f"[Winner] Analyze error ({used_provider}): {e}", exc_info=True)
         return None
 
 
