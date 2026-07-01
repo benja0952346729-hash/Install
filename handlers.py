@@ -63,6 +63,18 @@ def _get_groq_client() -> Groq:
     return client
 
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+
+def _strip_think_block(text: str) -> str:
+    """Remove any leaked <think>...</think> reasoning block (safety net —
+    reasoning_effort='none' should already prevent this on Groq's qwen3.6-27b,
+    but we strip defensively in case a provider/model still emits one)."""
+    if not text:
+        return text
+    return _THINK_BLOCK_RE.sub("", text).strip()
+
+
 async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str:
     total_keys = len(_groq_clients)
     max_attempts = total_keys * 2
@@ -77,12 +89,21 @@ async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=0.1,
+                    reasoning_effort="none",  # qwen3.6-27b defaults to thinking mode;
+                                               # disable it or max_tokens gets eaten by
+                                               # <think> reasoning and content comes back empty
                 )
             )
+            raw = response.choices[0].message.content or ""
+            text = _strip_think_block(raw.strip())
+            logger.info(f"[Groq] raw response ({key_num}): {raw[:300]!r}")
+            if not text:
+                logger.warning(f"[Groq] Key #{key_num} returned empty content — attempt {attempt+1}/{max_attempts}")
+                continue
             if last_limited_key is not None and last_limited_key != key_num:
                 logger.info(f"[Groq] 🔄 Rotated: Key #{last_limited_key} → Key #{key_num}")
             logger.info(f"[Groq] ✅ Key #{key_num}/{total_keys} used ({GROQ_TEXT_MODEL})")
-            return response.choices[0].message.content.strip()
+            return text
         except Exception as e:
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
@@ -94,6 +115,56 @@ async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str
                 continue
             logger.error(f"[Groq] Non-rate error: {e}")
             raise
+    raise RuntimeError("All Groq keys exhausted or returned empty content")
+
+
+# Groq vision — used ONLY as a last-resort fallback for analyze_winner_photo
+# (NVIDIA and Gemini are tried first). Kept because this used to work
+# reliably before the NVIDIA/Gemini switch.
+GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
+
+
+async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str:
+    total_keys = len(_groq_clients)
+    max_attempts = total_keys * 2
+    for attempt in range(max_attempts):
+        client = _get_groq_client()
+        key_num = (_groq_index - 1) % total_keys + 1
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model=GROQ_VISION_MODEL,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}},
+                            {"type": "text", "text": prompt},
+                        ],
+                    }],
+                    max_tokens=300,
+                    temperature=0.1,
+                    reasoning_effort="none",
+                )
+            )
+            raw = response.choices[0].message.content or ""
+            text = _strip_think_block(raw.strip())
+            logger.info(f"[Groq Vision] raw response ({key_num}): {raw[:300]!r}")
+            if not text:
+                logger.warning(f"[Groq Vision] Key #{key_num} returned empty content — attempt {attempt+1}/{max_attempts}")
+                continue
+            logger.info(f"[Groq Vision] ✅ Key #{key_num}/{total_keys} used ({GROQ_VISION_MODEL})")
+            return text
+        except Exception as e:
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[Groq Vision] Key #{key_num} rate limited — attempt {attempt+1}/{max_attempts}")
+                if (attempt + 1) % total_keys == 0:
+                    logger.info("[Groq Vision] All keys exhausted — waiting 10s...")
+                    await asyncio.sleep(10)
+                continue
+            logger.error(f"[Groq Vision] Non-rate error: {e}")
+            raise
+    raise RuntimeError("All Groq vision keys exhausted or returned empty content")
     raise RuntimeError("All Groq keys exhausted")
 
 
@@ -264,10 +335,17 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                 )
             )
             _nvidia_clear_blocked(idx)
+            raw = response.choices[0].message.content or ""
+            text = raw.strip()
+            logger.info(f"[NVIDIA] raw response (key {idx+1}): {raw[:300]!r}")
+            if not text:
+                logger.warning(f"[NVIDIA] Key #{idx+1} returned empty content — attempt {attempt+1}/{max_attempts}")
+                last_limited_idx = idx
+                continue
             if last_limited_idx is not None and last_limited_idx != idx:
                 logger.info(f"[NVIDIA] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
             logger.info(f"[NVIDIA] ✅ Key #{idx+1}/{total_keys} used (llama-4-maverick)")
-            return response.choices[0].message.content.strip()
+            return text
         except Exception as e:
             last_error = e
             err_str = str(e).lower()
@@ -442,7 +520,17 @@ async def _call_gemini_with_rotation(image_base64: str, prompt: str) -> str:
 
             res.raise_for_status()
             data = res.json()
-            text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+            candidates = data.get("candidates") or []
+            raw = ""
+            if candidates:
+                parts = candidates[0].get("content", {}).get("parts") or []
+                raw = "".join(p.get("text", "") for p in parts)
+            text = raw.strip()
+            logger.info(f"[Gemini] raw response (key {idx+1}): {raw[:300]!r}")
+            if not text:
+                logger.warning(f"[Gemini] Key #{idx+1} returned empty/blocked content ({data.get('promptFeedback')}) — attempt {attempt+1}/{max_attempts}")
+                last_limited_idx = idx
+                continue
             _gemini_clear_blocked(idx)
             if last_limited_idx is not None and last_limited_idx != idx:
                 logger.info(f"[Gemini] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
@@ -909,36 +997,47 @@ Respond ONLY in JSON:
   "lang": "amharic" or "english"
 }"""
 
-    try:
-        text = await _call_nvidia_with_rotation(image_base64, prompt)
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text.strip())
-
+    def _parse(raw: str, label: str) -> dict:
+        cleaned = re.sub(r"^```json\s*", "", raw)
+        cleaned = re.sub(r"^```\s*", "", cleaned)
+        cleaned = re.sub(r"\s*```$", "", cleaned)
+        cleaned = _strip_think_block(cleaned)
+        parsed = json.loads(cleaned.strip())
         for field in ("sender_name", "ref"):
             if parsed.get(field) in ("null", "None", "", "N/A"):
                 parsed[field] = None
-
-        if parsed.get("lang") == "amharic":
-            logger.info("[Screenshot] አማርኛ detected → Gemini fallback")
-            text2 = await _call_gemini_with_rotation(image_base64, prompt)
-            text2 = re.sub(r"^```json\s*", "", text2)
-            text2 = re.sub(r"^```\s*", "", text2)
-            text2 = re.sub(r"\s*```$", "", text2)
-            parsed = json.loads(text2.strip())
-            for field in ("sender_name", "ref"):
-                if parsed.get(field) in ("null", "None", "", "N/A"):
-                    parsed[field] = None
-
+        logger.info(f"[Screenshot] ✅ parsed via {label} | photoType={parsed.get('photoType')} amount={parsed.get('amount')}")
         return parsed
 
-    except json.JSONDecodeError as e:
-        logger.error(f"[Screenshot] JSON parse error: {e}")
-        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not parse"}
+    nvidia_parsed = None
+    try:
+        text = await _call_nvidia_with_rotation(image_base64, prompt)
+        logger.info(f"[Screenshot] NVIDIA raw response: {text[:300]!r}")
+        nvidia_parsed = _parse(text, "NVIDIA")
     except Exception as e:
-        logger.error(f"[Screenshot] Analysis error: {e}", exc_info=True)
-        return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
+        logger.warning(f"[Screenshot] NVIDIA failed/unparseable: {e}")
+
+    # Use Gemini if NVIDIA failed outright, OR if NVIDIA succeeded but flagged Amharic text
+    needs_gemini = nvidia_parsed is None or nvidia_parsed.get("lang") == "amharic"
+
+    if needs_gemini:
+        try:
+            reason = "detected Amharic" if nvidia_parsed else "NVIDIA failed"
+            logger.info(f"[Screenshot] → Gemini fallback ({reason})")
+            text2 = await _call_gemini_with_rotation(image_base64, prompt)
+            logger.info(f"[Screenshot] Gemini raw response: {text2[:300]!r}")
+            return _parse(text2, "Gemini")
+        except Exception as e:
+            logger.warning(f"[Screenshot] Gemini fallback failed: {e}")
+            if nvidia_parsed is not None:
+                # NVIDIA succeeded (even if Amharic) — better than nothing
+                return nvidia_parsed
+
+    if nvidia_parsed is not None:
+        return nvidia_parsed
+
+    logger.error("[Screenshot] Both NVIDIA and Gemini failed to produce a parseable result")
+    return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
 
 
 # ============================================================
@@ -974,35 +1073,33 @@ Respond ONLY in this exact JSON format:
   "third": <bottom number as integer or null>
 }}"""
 
-    text = None
-    used_provider = None
+    providers = [
+        ("NVIDIA", _call_nvidia_with_rotation),
+        ("Gemini", _call_gemini_with_rotation),
+        ("Groq", _call_groq_vision_with_rotation),
+    ]
 
-    # 1) NVIDIA primary
-    try:
-        text = await _call_nvidia_with_rotation(image_base64, prompt)
-        used_provider = "NVIDIA"
-    except Exception as e:
-        logger.warning(f"[Winner] NVIDIA failed: {e} — falling back to Gemini")
-
-    # 2) Gemini fallback
-    if text is None:
+    for provider_name, call_fn in providers:
         try:
-            text = await _call_gemini_with_rotation(image_base64, prompt)
-            used_provider = "Gemini"
+            text = await call_fn(image_base64, prompt)
         except Exception as e:
-            logger.error(f"[Winner] Gemini fallback also failed: {e}", exc_info=True)
-            return None
+            logger.warning(f"[Winner] {provider_name} call failed: {e} — trying next provider")
+            continue
 
-    try:
-        text = re.sub(r"^```json\s*", "", text)
-        text = re.sub(r"^```\s*", "", text)
-        text = re.sub(r"\s*```$", "", text)
-        parsed = json.loads(text.strip())
+        try:
+            cleaned = re.sub(r"^```json\s*", "", text)
+            cleaned = re.sub(r"^```\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
+            cleaned = _strip_think_block(cleaned)
+            parsed = json.loads(cleaned.strip())
+        except Exception as e:
+            logger.warning(f"[Winner] {provider_name} returned unparseable JSON ({e}) — trying next provider")
+            continue
 
-        logger.info(f"[Winner] ✅ Analyzed via {used_provider} | result={parsed}")
+        logger.info(f"[Winner] ✅ Analyzed via {provider_name} | result={parsed}")
 
         if parsed.get("type") != "lottery":
-            return None
+            return None  # valid classification (not a lottery photo) — no need to try other providers
 
         result = {}
         if parsed.get("first") is not None:
@@ -1014,9 +1111,8 @@ Respond ONLY in this exact JSON format:
 
         return result if result else None
 
-    except Exception as e:
-        logger.error(f"[Winner] Analyze error ({used_provider}): {e}", exc_info=True)
-        return None
+    logger.error("[Winner] All providers (NVIDIA, Gemini, Groq) failed to produce a parseable result")
+    return None
 
 
 # ============================================================
