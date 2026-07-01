@@ -1435,6 +1435,37 @@ def get_winner_by_place(game_id: int, place: int) -> dict:
     }
 
 
+def get_winners_by_place(game_id: int, place: int) -> list:
+    """
+    FIX: get_winner_by_place ራሱ አንድ row ብቻ ይመልሳል፣ 2+ ሰዎች
+    በተመሳሳይ ቦታ (tie) ቢያሸንፉ አንዱን ብቻ ይዞ ሌላውን ይተወዋል።
+    ይህ function ሁሉንም tied winners list አርጎ ይመልሳል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT w.telegram_id, w.user_name, w.prize,
+               COALESCE(ub.balance, 0) as balance, w.group_id
+        FROM winners w
+        LEFT JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
+        WHERE w.game_id = %s AND w.place = %s
+        ORDER BY w.created_at ASC
+    """, (game_id, place))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "telegram_id": r[0],
+            "user_name": r[1],
+            "prize": float(r[2]) if r[2] else 0,
+            "balance": float(r[3]) if r[3] else 0,
+            "group_id": r[4],
+        }
+        for r in rows
+    ]
+
+
 def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
                 number: int, prize: float, group_id: int = None):
     conn = get_conn()
