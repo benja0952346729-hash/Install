@@ -1300,14 +1300,14 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             try:
                 ai_reply = await get_ai_fallback(
                     text=text,
-                    settings=settings,
-                    taken=taken,
-                    paid=paid,
-                    nekay_list=nekay_list,
-                    remaining_count=remaining,
-                    countdown_seconds=countdown_seconds,
                     user_id=user_id,
-                    game_id=game_id,
+                    group_id=group_id,
+                    game_data={
+                        "remaining_count": remaining,
+                        "total_numbers": settings.get("total_numbers"),
+                        "price_full": settings.get("price_full"),
+                        "price_half": settings.get("price_half"),
+                    },
                 )
                 if ai_reply:
                     await msg.reply_text(ai_reply)
