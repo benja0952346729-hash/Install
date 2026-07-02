@@ -807,7 +807,11 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
     if result.get("matched") and bot:
         matched = result["matched"]
         target_chat = matched.get("group_id") or group_id or GROUP_CHAT_ID
-        await notify_match(bot, matched, chat_id=target_chat, nekay_cb=nekay_cb)
+        await notify_match(
+            bot, matched, chat_id=target_chat, nekay_cb=nekay_cb,
+            receipt_msg_id=matched.get("receipt_message_id"),
+            receipt_chat_id=matched.get("receipt_chat_id"),
+        )
 
     return {
         "success": True,
@@ -893,6 +897,8 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
                 ref=ref, pay_type=photo_type,
                 description=analysis.get("description", ""), group_id=_group_id,
                 game_id=game_id,
+                receipt_chat_id=chat_id,
+                receipt_message_id=receipt_msg.message_id,
             )
             return
 
