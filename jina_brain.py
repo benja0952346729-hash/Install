@@ -10,6 +10,7 @@ Setup:
     pip install httpx
 """
 
+import os
 import math
 import hashlib
 import json
@@ -38,7 +39,29 @@ JINA_FALLBACK_THRESHOLD = 0.75
 # FIX: 0.35 → 0.43 — Jina ትንሽ እርግጠኛ ባልሆነ ጊዜ (borderline embeddings)
 # በስህተት intent ላይ እንዳይመልስ፣ ይልቁንም "unknown" ተመልሶ ወደ context-aware
 # AI fallback (ai_fallback.get_ai_fallback) እንዲወርድ ለማድረግ ከፍ ብሏል።
-JINA_MIN_SCORE = 0.43
+#
+# ENV OVERRIDE: JINA_MIN_SCORE env var ካለ ከዛ ይነበባል (redeploy ሳያስፈልግ
+# ለ testing ቁጥር መቀያየር እንዲቻል)። ካልተቀመጠ ወይም ልክ ያልሆነ ካልሆነ ነባሪ 0.43
+# ይያዛል።
+def _read_min_score() -> float:
+    val = os.environ.get("JINA_MIN_SCORE")
+    if val is None:
+        return 0.43
+    try:
+        score = float(val)
+        if not (0.0 <= score <= 1.0):
+            logger.warning(
+                f"[JinaBrain] JINA_MIN_SCORE={val} range (0.0-1.0) ውጪ ነው — ነባሪ 0.43 ይያዛል"
+            )
+            return 0.43
+        return score
+    except ValueError:
+        logger.warning(f"[JinaBrain] JINA_MIN_SCORE='{val}' ቁጥር አይደለም — ነባሪ 0.43 ይያዛል")
+        return 0.43
+
+
+JINA_MIN_SCORE = _read_min_score()
+logger.info(f"[JinaBrain] JINA_MIN_SCORE = {JINA_MIN_SCORE} (env override: {'yes' if os.environ.get('JINA_MIN_SCORE') else 'no, default'})")
 
 # ================================================================
 # SHARED KEY ROTATION (used by jina_brain + ai_fallback)
@@ -351,18 +374,30 @@ async def jina_detect_intent(text: str) -> tuple[str, float]:
     try:
         query_emb = (await _get_embeddings_async([text]))[0]
 
-        best_intent = "unknown"
-        best_score  = 0.0
-
+        # ሁሉንም intent scores እናሰላለን (log ላይ ሙሉ ranking ለማሳየት)
+        all_scores: list[tuple[str, float]] = []
         for intent, embeddings in _intent_embeddings.items():
             intent_score = max(_cosine(query_emb, emb) for emb in embeddings)
-            if intent_score > best_score:
-                best_score  = intent_score
-                best_intent = intent
+            all_scores.append((intent, intent_score))
+
+        # ከከፍተኛ ወደ ዝቅተኛ እናስቀምጣቸው
+        all_scores.sort(key=lambda x: x[1], reverse=True)
+        best_intent, best_score = all_scores[0]
+
+        # Top 3 scores ብቻ log ላይ እናሳይ (ብዙ intents ካሉ log እንዳይጨናነቅ)
+        top3_str = ", ".join(f"{i}={s:.3f}" for i, s in all_scores[:3])
 
         if best_score < JINA_MIN_SCORE:
+            logger.info(
+                f"[JinaBrain] 🔻 BELOW threshold ({JINA_MIN_SCORE}) | text='{text[:40]}' | "
+                f"best={best_intent}({best_score:.3f}) | top3=[{top3_str}] → returning 'unknown'"
+            )
             return "unknown", best_score
 
+        logger.info(
+            f"[JinaBrain] ✅ ABOVE threshold ({JINA_MIN_SCORE}) | text='{text[:40]}' | "
+            f"best={best_intent}({best_score:.3f}) | top3=[{top3_str}]"
+        )
         return best_intent, best_score
 
     except Exception as e:
