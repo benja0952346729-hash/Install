@@ -108,15 +108,20 @@ NVIDIA_TEXT_MODEL = "deepseek-ai/deepseek-v4-flash"
 # reasoning ራሱ በራሱ ሊበራ/ሊዘገይ ይችላል።
 NVIDIA_TEXT_EXTRA_BODY = {
     "chat_template_kwargs": {
-        "thinking": False
+        "thinking": False,
+        "reasoning_effort": "none"
     }
 }
+
+NVIDIA_TEXT_REQUEST_TIMEOUT = 25  # ሰከንድ — ከዚህ በላይ ከቆየ call ራሱ fail ይላል (2 ደቂቃ hang እንዳይፈጠር)
 
 _nvidia_text_index = 0
 _nvidia_text_clients = [
     OpenAI(
         base_url="https://integrate.api.nvidia.com/v1",
-        api_key=key
+        api_key=key,
+        timeout=NVIDIA_TEXT_REQUEST_TIMEOUT,
+        max_retries=0,  # rotation ራሱ retry ስለሚያደርግ SDK-level retry አያስፈልግም (ድግግሞሽ ጊዜ እንዳይጨምር)
     ) for key in NVIDIA_TEXT_API_KEYS
 ] if NVIDIA_TEXT_API_KEYS else []
 
@@ -245,48 +250,81 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
     max_attempts = total_keys * 3
     last_error = None
     last_limited_idx = None
+    call_started_at = time.time()
+
+    logger.info(f"[NVIDIA Text] ▶️ ጥሪ ጀመረ | max_attempts={max_attempts} | msg_preview={str(messages[-1].get('content',''))[:80]!r}")
 
     for attempt in range(max_attempts):
+        t_wait_start = time.time()
         try:
             client, idx = await _get_available_nvidia_text_client()
         except RuntimeError as e:
             logger.warning(f"[NVIDIA Text] {e} — retrying once more after short wait")
             await asyncio.sleep(2)
             continue
+        wait_elapsed = time.time() - t_wait_start
+        logger.info(f"[NVIDIA Text] 🔑 Key #{idx+1} ተመረጠ (slot wait: {wait_elapsed:.1f}s) | attempt {attempt+1}/{max_attempts}")
 
+        t_call_start = time.time()
         try:
-            response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model=NVIDIA_TEXT_MODEL,
-                    messages=messages,
-                    max_tokens=max_tokens,
-                    temperature=0.2,
-                    extra_body=NVIDIA_TEXT_EXTRA_BODY,  # thinking=False → Non-think (ፈጣን) mode
-                )
+            response = await asyncio.wait_for(
+                asyncio.to_thread(
+                    lambda c=client: c.chat.completions.create(
+                        model=NVIDIA_TEXT_MODEL,
+                        messages=messages,
+                        max_tokens=max_tokens,
+                        temperature=0.2,
+                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # thinking=False → Non-think (ፈጣን) mode
+                    )
+                ),
+                timeout=NVIDIA_TEXT_REQUEST_TIMEOUT + 5,  # SDK timeout + buffer — hard ceiling
             )
+            call_elapsed = time.time() - t_call_start
             _nvidia_text_clear_blocked(idx)
             raw = response.choices[0].message.content or ""
             text = _strip_think_block(raw.strip())
+
+            had_think_block = raw.strip() != text
+            logger.info(
+                f"[NVIDIA Text] ✅ Key #{idx+1}/{total_keys} መለሰ | call_time={call_elapsed:.1f}s | "
+                f"total_time={time.time()-call_started_at:.1f}s | had_think_block={had_think_block} | "
+                f"raw_len={len(raw)} chars"
+            )
             logger.info(f"[NVIDIA Text] raw response (key {idx+1}): {raw[:300]!r}")
+
             if not text:
-                logger.warning(f"[NVIDIA Text] Key #{idx+1} returned empty content — attempt {attempt+1}/{max_attempts}")
+                logger.warning(f"[NVIDIA Text] Key #{idx+1} ባዶ content መለሰ — attempt {attempt+1}/{max_attempts}")
                 last_limited_idx = idx
                 continue
             if last_limited_idx is not None and last_limited_idx != idx:
                 logger.info(f"[NVIDIA Text] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
-            logger.info(f"[NVIDIA Text] ✅ Key #{idx+1}/{total_keys} used ({NVIDIA_TEXT_MODEL})")
             return text
+
+        except asyncio.TimeoutError:
+            call_elapsed = time.time() - t_call_start
+            logger.warning(
+                f"[NVIDIA Text] ⏱️ Key #{idx+1} TIMEOUT ({call_elapsed:.1f}s አለፈ, ገደብ {NVIDIA_TEXT_REQUEST_TIMEOUT+5}s) "
+                f"— next key ይሞከራል | attempt {attempt+1}/{max_attempts}"
+            )
+            _nvidia_text_mark_blocked(idx)
+            last_limited_idx = idx
+            last_error = "timeout"
+            continue
+
         except Exception as e:
+            call_elapsed = time.time() - t_call_start
             last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[NVIDIA Text] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
+                logger.warning(f"[NVIDIA Text] ⛔ Key #{idx+1} rate limited ({call_elapsed:.1f}s) — attempt {attempt+1}/{max_attempts}")
                 _nvidia_text_mark_blocked(idx)
                 last_limited_idx = idx
                 continue
-            logger.error(f"[NVIDIA Text] Non-rate error: {e}")
+            logger.error(f"[NVIDIA Text] ❌ Non-rate error ({call_elapsed:.1f}s): {e}")
             raise
 
+    total_elapsed = time.time() - call_started_at
+    logger.error(f"[NVIDIA Text] 🛑 ሁሉም keys አልቀዋል | {max_attempts} attempts | total_time={total_elapsed:.1f}s | last_error={last_error}")
     raise RuntimeError(f"All NVIDIA text keys exhausted after {max_attempts} attempts: {last_error}")
 
 
