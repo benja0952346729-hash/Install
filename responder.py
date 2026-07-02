@@ -736,13 +736,6 @@ def detect_intent(text: str) -> tuple:
         scores[intent] = max(0.0, scores[intent] + bonus)
 
     # ── FIX: confidence calibration ────────────────────────────────
-    # Previously: best_intent = max(scores, key=scores.get); best_score = scores[best_intent]
-    # Problem: whichever intent scored highest was returned with full confidence,
-    # even when the 2nd-best intent was nearly tied (ambiguous) — this made the
-    # bot "guess" on unrelated/out-of-scope messages instead of staying silent.
-    # Fix: if top-1 and top-2 scores are too close (< MARGIN_MIN), the input is
-    # genuinely ambiguous, so we cap the score below THRESHOLD_RESPOND so the
-    # bot does NOT reply instead of guessing.
     sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
     best_intent, best_score = sorted_scores[0]
     second_score = sorted_scores[1][1] if len(sorted_scores) > 1 else 0.0
@@ -1150,15 +1143,6 @@ def get_response(
     is_paid: bool = None,
 ) -> dict:
 
-    # ── FIX: threshold raised from 0.25 to 0.40 ────────────────────
-    # Tested empirically against real out-of-scope Amharic messages
-    # (weather, football, politics, health small-talk) which previously
-    # scored 0.34–0.36 under the old 0.25 threshold and were WRONGLY
-    # answered (usually misclassified as "greeting" or "result_query").
-    # Raising to 0.40 + the margin-check inside detect_intent() together
-    # eliminate those false replies with zero regressions on real intents
-    # (verified against my_numbers_query, complaint_removed, result_query,
-    # and 20+ other paraphrased test sentences).
     THRESHOLD_RESPOND  = 0.40
     THRESHOLD_CONFUSED = 0.12
 
@@ -1257,7 +1241,6 @@ def get_response(
         if not recent_winners:
             result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
             return result
-        # user recent_winners ውስጥ ካለ
         user_place = None
         for w in recent_winners:
             if w.get("telegram_id") == user_id:
@@ -1282,7 +1265,6 @@ def get_response(
         numbers_found = re.findall(r"\d+", text)
         if numbers_found and failed_attempts:
             num = int(numbers_found[0])
-            # ያ ቁጥር failed_attempts ውስጥ ካለ
             attempt = next((a for a in failed_attempts if a["number"] == num), None)
             if attempt and attempt["reason"] == "taken" and attempt.get("slot1_name"):
                 name = attempt["slot1_name"]
@@ -1290,7 +1272,6 @@ def get_response(
                     num=f"{num:02d}",
                     name=name,
                 )
-            # failed_attempts ከሌለ → ignore
         return result
 
     # ── account_query ─────────────────────────────────────────────
@@ -1403,7 +1384,6 @@ def get_response(
             num = int(numbers_found[0])
             entry = taken.get(num, [])
             if not entry:
-                # ባዶ ቦታ — ሌላ intent ሊሆን ይችላል፣ ምንም አትመልስ
                 return result
             slot1 = next((e for e in entry if e[2] == 1), entry[0])
             is_half_owner = slot1[1]
@@ -1622,20 +1602,68 @@ def get_response(
 
 
 # ================================================================
+# CONTEXT-DATA SLICE BUILDER (for ai_fallback.get_ai_fallback)
+# ================================================================
+# TF-IDF/Jina ሁለቱም ካልተሳኩ በኋላ ወደ NVIDIA DeepSeek Flash የሚላከው
+# "game_data" ትንሽ ተዛማጅ slice ብቻ እንዲሆን (ሙሉ game state ሳይሆን) ይህ
+# helper kwargs ውስጥ ካሉት ላይ ብቻ ትንሽ dict ይገነባል።
+
+def _build_game_data_slice(kwargs: dict) -> dict:
+    slice_data = {}
+    recent_winners = kwargs.get("recent_winners")
+    if recent_winners:
+        slice_data["recent_winners"] = [
+            {
+                "place": w.get("place"),
+                "user_name": w.get("user_name"),
+                "number": w.get("number"),
+                "prize": w.get("prize"),
+            }
+            for w in recent_winners
+        ]
+    user_numbers = kwargs.get("user_numbers")
+    if user_numbers:
+        slice_data["user_numbers"] = [
+            {"number": n, "is_half": h, "is_paid": p}
+            for (n, h, _slot, p) in user_numbers
+        ]
+    remaining_count = kwargs.get("remaining_count")
+    if remaining_count is not None:
+        slice_data["remaining_count"] = remaining_count
+    settings = kwargs.get("settings") or {}
+    if settings.get("total_numbers"):
+        slice_data["total_numbers"] = settings.get("total_numbers")
+        slice_data["price_full"] = settings.get("price_full")
+        slice_data["price_half"] = settings.get("price_half")
+    return slice_data
+
+
+# ================================================================
 # ASYNC WRAPPER — Jina fallback when TF-IDF score is low
+# + Context-aware NVIDIA fallback when Jina ALSO fails/low-confidence
 # ================================================================
 
 async def get_response_async(text: str, **kwargs) -> dict:
     """
-    get_response() async version — TF-IDF score < 0.75 ሲሆን
-    Jina embedding fallback ይጠቀማል።
-    Jina intent ካዘ → detect_intent() bypass አርጎ directly ይሄዳል።
+    get_response() async version:
+      1. detect_intent() (TF-IDF) ይሞክራል
+      2. score ዝቅ ካለ (< JINA_FALLBACK_THRESHOLD) → Jina embedding ይሞክራል
+      3. Jina "unknown" ወይም ዝቅተኛ score ከመለሰ → context-aware NVIDIA
+         fallback (ai_fallback.get_ai_fallback) ይሞክራል — ያለፈውን
+         conversation context + ትንሽ game data slice ተጠቅሞ።
+      4. ከላይ ሁሉም ካልተሳካ → normal get_response() (keyword/TF-IDF ብቻ)
+
+    ስኬታማ ውጤት ባገኘ ቁጥር (Jina resolved ወይም AI fallback resolved)
+    save_context() ይጠራል፣ ስለዚህ ቀጣይ follow-up ጥያቄ ይህን context ያገኛል።
     """
     from jina_brain import jina_detect_intent, jina_is_ready, JINA_FALLBACK_THRESHOLD
 
+    user_id = kwargs.get("user_id", 0)
+    settings = kwargs.get("settings") or {}
+    group_id = settings.get("group_id")
+
     intent, score = detect_intent(text)
 
-    # TF-IDF score ዝቅ ሲሆን እና Jina ዝግጁ ከሆነ → Jina ይሞክር
     if score < JINA_FALLBACK_THRESHOLD and jina_is_ready():
         try:
             jina_intent, jina_score = await jina_detect_intent(text)
@@ -1645,18 +1673,69 @@ async def get_response_async(text: str, **kwargs) -> dict:
                     f"[Jina] '{text[:40]}' → {jina_intent} ({jina_score:.2f}) "
                     f"[TF-IDF was: {intent} ({score:.2f})]"
                 )
-                # detect_intent() bypass — directly intent inject
-                return _get_response_with_intent(
+                jina_result = _get_response_with_intent(
                     text=text,
                     intent=jina_intent,
                     score=jina_score,
                     **kwargs
                 )
+                if jina_result.get("reply") and user_id and group_id:
+                    try:
+                        from ai_fallback import save_context
+                        save_context(
+                            user_id, group_id, jina_intent,
+                            _build_game_data_slice(kwargs),
+                            jina_result["reply"],
+                        )
+                    except Exception:
+                        pass
+                return jina_result
+
+            # ── Jina ደግሞ "unknown"/ ዝቅተኛ score ከመለሰ → context-aware
+            #    NVIDIA fallback ሞክር (ካለፈ context ወይም game data ካለ ብቻ)
+            if user_id and group_id:
+                try:
+                    from ai_fallback import get_ai_fallback, save_context
+                    game_data = _build_game_data_slice(kwargs)
+                    ai_reply = await get_ai_fallback(
+                        text=text, user_id=user_id, group_id=group_id,
+                        game_data=game_data or None,
+                    )
+                    if ai_reply:
+                        save_context(user_id, group_id, "ai_fallback", game_data, ai_reply)
+                        return {
+                            "reply": ai_reply,
+                            "resend_board": False,
+                            "resend_nekay": False,
+                            "resend_remaining": False,
+                            "cancel_number": None,
+                            "change_number": None,
+                            "type_change": None,
+                            "why_not_registered": None,
+                            "my_numbers_query": False,
+                            "number_owner_query": None,
+                        }
+                except Exception as e:
+                    import logging as _log
+                    _log.getLogger(__name__).warning(f"[AI Fallback] Error: {e}")
         except Exception as e:
             import logging as _log
             _log.getLogger(__name__).warning(f"[Jina fallback] Error: {e}")
 
-    return get_response(text=text, **kwargs)
+    sync_result = get_response(text=text, **kwargs)
+
+    if sync_result.get("reply") and user_id and group_id:
+        try:
+            from ai_fallback import save_context
+            save_context(
+                user_id, group_id, intent,
+                _build_game_data_slice(kwargs),
+                sync_result["reply"],
+            )
+        except Exception:
+            pass
+
+    return sync_result
 
 
 def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) -> dict:
@@ -1666,10 +1745,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
     """
     import re
 
-    # ── FIX: same threshold raise applied here for consistency ────
-    # (this path is used for Jina-resolved intents; must match the
-    # sync path's calibration so Jina-fallback results are not
-    # accepted at a lower bar than TF-IDF results)
     THRESHOLD_RESPOND  = 0.40
     THRESHOLD_CONFUSED = 0.12
 
@@ -1709,11 +1784,9 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
     if score < THRESHOLD_RESPOND:
         return result
 
-    # ── registration_result ──────────────────────────────────────
     if registration_result is not None:
         return get_response(text=text, **kwargs)
 
-    # ── balance_query ─────────────────────────────────────────────
     if intent == "balance_query":
         bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
         if bal > 0:
@@ -1722,7 +1795,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             result["reply"] = random.choice(RESPONSES["balance_zero"])
         return result
 
-    # ── shortfall_query ───────────────────────────────────────────
     if intent == "shortfall_query":
         if not user_numbers:
             result["reply"] = random.choice(RESPONSES["shortfall_no_numbers"])
@@ -1737,7 +1809,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             )
         return result
 
-    # ── winner_query ──────────────────────────────────────────────
     if intent == "winner_query":
         if not recent_winners:
             result["reply"] = random.choice(RESPONSES["winner_none"])
@@ -1757,7 +1828,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             )
         return result
 
-    # ── i_won_query ───────────────────────────────────────────────
     if intent == "i_won_query":
         if not recent_winners:
             result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
@@ -1781,7 +1851,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             )
         return result
 
-    # ── my_numbers_query ──────────────────────────────────────────
     if intent == "my_numbers_query":
         if user_numbers is not None:
             if not user_numbers:
@@ -1796,7 +1865,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             result["my_numbers_query"] = True
         return result
 
-    # ── greeting ──────────────────────────────────────────────────
     if intent == "greeting":
         msg = random.choice(RESPONSES["greeting"])
         if random.random() < 0.20:
@@ -1804,7 +1872,6 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
         result["reply"] = msg
         return result
 
-    # ── price_query ───────────────────────────────────────────────
     if intent == "price_query":
         price_full = settings.get("price_full", 0)
         price_half = settings.get("price_half")
@@ -1815,24 +1882,20 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             result["reply"] = random.choice(RESPONSES["price_query_full_only"]).format(price_full=price_full)
         return result
 
-    # ── prize_query ───────────────────────────────────────────────
     if intent == "prize_query":
         prize_1st = settings.get("prize_1st", 0)
         result["reply"] = random.choice(RESPONSES["prize_query"]).format(prize_1st=prize_1st)
         return result
 
-    # ── remaining_query ───────────────────────────────────────────
     if intent == "remaining_query":
         result["resend_remaining"] = True
         return result
 
-    # ── remaining_send ────────────────────────────────────────────
     if intent == "remaining_send":
         result["reply"] = random.choice(RESPONSES["remaining_send_ack"])
         result["resend_remaining"] = True
         return result
 
-    # ── nekay_query ───────────────────────────────────────────────
     if intent == "nekay_query":
         if nekay_list:
             result["reply"] = random.choice(RESPONSES["nekay_exists"])
@@ -1844,12 +1907,10 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             result["reply"] = random.choice(RESPONSES["nekay_all_done"])
         return result
 
-    # ── payment_not_received ──────────────────────────────────────
     if intent == "payment_not_received":
         result["reply"] = random.choice(RESPONSES["payment_not_received"])
         return result
 
-    # ── result_query ──────────────────────────────────────────────
     if intent == "result_query":
         if recent_winners:
             w = recent_winners
@@ -1862,17 +1923,14 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
             result["reply"] = random.choice(RESPONSES["result_query_none"])
         return result
 
-    # ── speed_request ─────────────────────────────────────────────
     if intent == "speed_request":
         result["reply"] = random.choice(RESPONSES["speed_request"])
         return result
 
-    # ── link_request ──────────────────────────────────────────────
     if intent == "link_request":
         result["reply"] = random.choice(RESPONSES["link_request"])
         return result
 
-    # ── players_query ─────────────────────────────────────────────
     if intent == "players_query":
         total_numbers = settings.get("total_numbers", 0)
         numbers_per_person = settings.get("numbers_per_person", 1)
@@ -1880,14 +1938,12 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
         result["reply"] = random.choice(RESPONSES["players_query"]).format(players_count=players_count)
         return result
 
-    # ── players_remaining_query ───────────────────────────────────
     if intent == "players_remaining_query":
         numbers_per_person = settings.get("numbers_per_person", 1)
         players_remaining = remaining_count // numbers_per_person if numbers_per_person else remaining_count
         result["reply"] = random.choice(RESPONSES["players_remaining_query"]).format(players_remaining=players_remaining)
         return result
 
-    # ── complaint intents ─────────────────────────────────────────
     if intent == "complaint_removed":
         result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
         return result
@@ -1901,7 +1957,4 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
         return result
 
     # ── intents that need number context → sync get_response ──────
-    # (cancel_number, change_number, type_change, specific_number_query,
-    #  number_owner_query, claim_ownership, why_not_registered,
-    #  not_registered_complaint, account_query, booking)
     return get_response(text=text, **kwargs)
