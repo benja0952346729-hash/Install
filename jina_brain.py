@@ -35,7 +35,10 @@ JINA_BATCH_SIZE = 500
 JINA_FALLBACK_THRESHOLD = 0.75
 
 # Jina minimum similarity score
-JINA_MIN_SCORE = 0.35
+# FIX: 0.35 → 0.43 — Jina ትንሽ እርግጠኛ ባልሆነ ጊዜ (borderline embeddings)
+# በስህተት intent ላይ እንዳይመልስ፣ ይልቁንም "unknown" ተመልሶ ወደ context-aware
+# AI fallback (ai_fallback.get_ai_fallback) እንዲወርድ ለማድረግ ከፍ ብሏል።
+JINA_MIN_SCORE = 0.43
 
 # ================================================================
 # SHARED KEY ROTATION (used by jina_brain + ai_fallback)
