@@ -9,26 +9,32 @@ Groq rotation ከ handlers.py ይጠቀማል። (ነባር — ምንም አል
   intent/answer) + game data slice ተጠቅሞ follow-up ጥያቄዎችን
   (ለምሳሌ "ማን አሸነፈ?" → "በዚ ዙር ነው?") በትክክል በአማርኛ ይመልሳል።
 
-  MODEL: qwen/qwen3-8b (dense, ~8B) — ከቀድሞው qwen3-next-80b-a3b-instruct
-  (MoE, ትልቅ) ወደዚህ ተቀይሯል ምክንያቱም ፍጥነት ስላስፈለገ። ተመሳሳይ Qwen3 ቤተሰብ ስለሆነ
-  የ አማርኛ (ዝቅተኛ-resource ቋንቋ) training data coverage ተመሳሳይ ይቀራል፣
-  ግን ብዙ ጊዜ ፈጣን ነው።
+  MODEL: qwen/qwen3-next-80b-a3b-instruct (ነባሪ) — NVIDIA free catalog
+  ላይ hosted endpoint ያለው Qwen ብቻ 5 ናቸው፦ qwen3-next-80b-a3b-instruct,
+  qwen3-next-80b-a3b-thinking, qwen3-235b-a22b, qwen3.5-397b-a17b,
+  qwen3-coder-480b-a35b-instruct። ትንንሾቹ dense ሞዴሎች (0.6B-32B, ለምሳሌ
+  qwen3-8b) hosted API ላይ የሉም (self-host ብቻ) — ስለዚህ ከተላኩ 404
+  ይመልሳሉ። ከላይ ከተዘረዘሩት 5 hosted models ውጪ ማንኛውም ID ቢሞከር 404
+  ይሆናል — ይህን ለመለየት ግልጽ log ታክሏል (ከታች ይመልከቱ)።
 
-  ⚠️ IMPORTANT — Qwen3-8B (ከ qwen3-next-80b በተለየ) **hybrid thinking
-  mode አለው** እና ነባሪው thinking-ON ነው። thinking bugdet max_tokens
-  ውስጥ ቢያልቅ ("ችግሩ think እያረገ ይቆያል") ምላሽ ባዶ ወይም unfinished ሊሆን
-  ይችላል። ስለዚህ:
-    1) chat_template_kwargs → enable_thinking ሁልጊዜ በግልጽ እንልካለን
-       (NVIDIA_TEXT_ENABLE_THINKING env var control, ነባሪ False = ፈጣን)
-    2) raw response ውስጥ <think>...</think> ርዝመት/ጊዜ ራሱን ችሎ
-       ይመዘገባል (log_thinking_diagnostics) — ስለዚህ "ለምን ረዘመ" የሚለውን
-       ከ log ላይ በትክክል ማየት ይቻላል፦ thinking bugdet አልቆ ነው? key ገና
-       busy/rate-limited ስለሆነ ነው? ወይስ network/timeout ነው?
+  qwen3-next-80b-a3b-instruct MoE ነው (80B total, 3.9B active parameters
+  ብቻ) እና ኦፊሴላዊ model card መሰረት instruct-only mode ነው፣ <think>
+  blocks ጨርሶ አያመነጭም። ስለዚህ ቀደም ሲል የነበረው መዘግየት thinking overflow
+  ላይሆን ይችላል — ይልቁን rate-limit queue wait ወይም ራሱ network/generation
+  time ሊሆን ይችላል። ኮዱ አሁን wait_elapsed (queue wait) እና call_elapsed
+  (እውነተኛ generation time) ለብቻቸው ይመዘግባል፣ ስለዚህ ትክክለኛው ምንጭ ከ log
+  በትክክል ይታወቃል።
+
+  ሞዴል ሳይቀየር መሞከር ከፈለጉ NVIDIA_TEXT_MODEL env var ይጠቀሙ (ኮድ redeploy
+  ሳያስፈልግ)። ወደ thinking-capable ሞዴል (ለምሳሌ qwen3-next-80b-a3b-thinking
+  ወይም qwen3-235b-a22b) ከቀየሩ NVIDIA_TEXT_ENABLE_THINKING=false ያድርጉ
+  እንዳይዘገይ።
 
 Setup (Railway / .env):
     NVIDIA_TEXT_API_KEYS=key1,key2,key3
     (handlers.py ውስጥ ላለው NVIDIA_API_KEYS የተለዩ keys — ገለልተኛ pool)
-    NVIDIA_TEXT_ENABLE_THINKING=false   # ነባሪ — ፍጥነት ይቀድማል
+    NVIDIA_TEXT_MODEL=qwen/qwen3-next-80b-a3b-instruct   # optional override
+    NVIDIA_TEXT_ENABLE_THINKING=false   # thinking-capable ሞዴል ከተጠቀሙ ብቻ ይመልከቱ
 """
 
 import os
@@ -111,18 +117,48 @@ NVIDIA_TEXT_API_KEYS = [
     k.strip() for k in os.environ.get("NVIDIA_TEXT_API_KEYS", "").split(",") if k.strip()
 ]
 
-NVIDIA_TEXT_MODEL = "qwen/qwen3-8b"
+_HOSTED_QWEN_MODELS = {
+    "qwen/qwen3-next-80b-a3b-instruct",
+    "qwen/qwen3-next-80b-a3b-thinking",
+    "qwen/qwen3-235b-a22b",
+    "qwen/qwen3.5-397b-a17b",
+    "qwen/qwen3-coder-480b-a35b-instruct",
+}
 
-# Qwen3-8B ሞዴል hybrid thinking mode አለው (ነባሪ ON)። ፍጥነት ስለሚያስፈልገን
-# non-thinking mode ነባሪ ነው (env var ካልቀየረው)። ይህ env var runtime ላይ
-# ይነበባል (module import ጊዜ ላይ ብቻ ሳይሆን) ስለዚህ Railway ላይ ሳይደግሙ deploy
-# መቀየር ይቻላል።
-def _read_enable_thinking() -> bool:
-    return os.environ.get("NVIDIA_TEXT_ENABLE_THINKING", "false").strip().lower() == "true"
+
+def _read_model() -> str:
+    model = os.environ.get("NVIDIA_TEXT_MODEL", "qwen/qwen3-next-80b-a3b-instruct").strip()
+    if model not in _HOSTED_QWEN_MODELS and model.startswith("qwen/"):
+        logger.warning(
+            f"[NVIDIA Text] ⚠️ '{model}' hosted Qwen models ዝርዝር ውስጥ አልተገኘም "
+            f"(hosted የሆኑት፦ {sorted(_HOSTED_QWEN_MODELS)}) — 404 ሊመልስ ይችላል። "
+            f"dense ትንንሽ Qwen3 (8B/14B/32B) NVIDIA free API ላይ hosted አይደሉም (self-host ብቻ)።"
+        )
+    return model
+
+
+NVIDIA_TEXT_MODEL = _read_model()  # module load ላይ log ለማሳየት
+
+
+def _read_enable_thinking_raw() -> str | None:
+    val = os.environ.get("NVIDIA_TEXT_ENABLE_THINKING")
+    return val.strip().lower() if val is not None else None
 
 
 def _build_extra_body() -> dict:
-    return {"chat_template_kwargs": {"enable_thinking": _read_enable_thinking()}}
+    """
+    ሞዴሉ thinking-capable ካልሆነ (ለምሳሌ qwen3-next-80b-a3b-instruct)
+    extra_body ባዶ ሆኖ ቢቀር ችግር የለውም። env var ካልተቀመጠ ምንም
+    chat_template_kwargs አንልክም (ላልታወቀ ሞዴል ደህንነቱ የተጠበቀ ነባሪ)።
+    """
+    raw = _read_enable_thinking_raw()
+    if raw is None:
+        return {}
+    return {"chat_template_kwargs": {"enable_thinking": raw == "true"}}
+
+
+def _is_thinking_enabled() -> bool:
+    return _read_enable_thinking_raw() == "true"
 
 
 NVIDIA_TEXT_REQUEST_TIMEOUT = 20  # ሰከንድ — 8B ትንሽ ሞዴል ስለሆነ ከ80B (45s) ዝቅ ብሏል
@@ -279,7 +315,7 @@ def _log_thinking_diagnostics(idx: int, call_elapsed: float, max_tokens: int, di
     "ችግሩ think እያረገ ይቆያል" ለሚለው ጥያቄ ቀጥተኛ መልስ የሚሰጥ log line።
     እያንዳንዱ ጥሪ ካለቀ በኋላ ይጠራል፣ ምክንያቱን በግልጽ ያሳያል።
     """
-    enable_thinking = _read_enable_thinking()
+    enable_thinking = _is_thinking_enabled()
 
     if diag["had_think"] and not diag["think_closed"]:
         # ትልቁ ችግር — max_tokens ሙሉ በሙሉ በ thinking ብቻ አልቋል፣ ምንም
@@ -321,7 +357,7 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
     extra_body = _build_extra_body()
 
     logger.info(
-        f"[NVIDIA Text] ▶️ ጥሪ ጀመረ | model={NVIDIA_TEXT_MODEL} | enable_thinking={_read_enable_thinking()} | "
+        f"[NVIDIA Text] ▶️ ጥሪ ጀመረ | model={NVIDIA_TEXT_MODEL} | enable_thinking={_is_thinking_enabled()} | "
         f"max_attempts={max_attempts} | max_tokens={max_tokens} | msg_preview={str(messages[-1].get('content',''))[:80]!r}"
     )
 
@@ -397,6 +433,19 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
                 or "timed out" in err_str
                 or "timeout" in type(e).__name__.lower()
             )
+            is_not_found = "404" in err_str or "not_found" in err_str or "not found" in err_str
+
+            if is_not_found:
+                # ሁሉም keys ላይ ተመሳሳይ 404 ይመለሳል (model ID ችግር እንጂ key
+                # ችግር ስላልሆነ) — key rotation ከመድገም ይልቅ ወዲያውኑ ግልጽ
+                # መልእክት ሰጥቶ ማቆም ይሻላል።
+                logger.error(
+                    f"[NVIDIA Text] 🛑 MODEL NOT FOUND (404) | model='{NVIDIA_TEXT_MODEL}' | "
+                    f"NVIDIA_TEXT_MODEL env var ላይ ያለው ሞዴል ID hosted endpoint ላይ የለም ማለት ነው። "
+                    f"hosted Qwen models፦ {sorted(_HOSTED_QWEN_MODELS)} | detail: {e}"
+                )
+                raise RuntimeError(f"Model '{NVIDIA_TEXT_MODEL}' not found on NVIDIA NIM (404) — check NVIDIA_TEXT_MODEL env var")
+
             if is_rate or is_timeout:
                 reason = "rate limited" if is_rate else "TIMEOUT"
                 logger.warning(f"[NVIDIA Text] ⛔ Key #{idx+1} {reason} ({call_elapsed:.1f}s) — next key ይሞከራል | attempt {attempt+1}/{max_attempts}")
