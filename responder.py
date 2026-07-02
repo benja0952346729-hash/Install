@@ -1,7 +1,11 @@
 import re
 import math
 import random
+import logging
 from collections import defaultdict
+from parser import parse_numbers
+
+logger = logging.getLogger(__name__)
 
 # ================================================================
 # AMHARIC → LATIN TRANSLITERATOR
@@ -306,7 +310,7 @@ INTENT_EXAMPLES = {
     ],
     "speed_request": [
         "ጫወታው ይፍጠን", "ፈጠን ፈጠን አርገው", "ፈጣን ይሁን",
-        "ቶሎ ቶሎ አጫውተን", "speed", "ፈጠን",
+        "ቶሎ ቶሎ አጫወተን", "speed", "ፈጠን",
         "ቶሎ ቶሎ", "ይፍጠን", "ፍጠን",
     ],
     # ── NEW INTENTS ──
@@ -439,7 +443,10 @@ print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
 
 
 # ================================================================
-# DETECT INTENT
+# DETECT INTENT (TF-IDF) — legacy/emergency-only path.
+# get_response_async() ከአሁን በኋላ Jina ብቻ ይጠቀማል (booking ካልሆነ)።
+# ይህ function still used by: get_response() when intent isn't
+# passed in externally (e.g. direct/manual calls, tests).
 # ================================================================
 
 def detect_intent(text: str) -> tuple:
@@ -1137,10 +1144,13 @@ def get_response(
     recent_winners: list = None,
     user_unpaid_balance: float = None,
     user_numbers: list = None,
-    # ── NEW params ──
+    # ── params ──
     user_balance: float = None,
     failed_attempts: list = None,
     is_paid: bool = None,
+    # ── intent ከውጪ (ለምሳሌ Jina) ሲላክ ጥቅም ላይ ይውላል ──
+    intent: str = None,
+    score: float = None,
 ) -> dict:
 
     THRESHOLD_RESPOND  = 0.40
@@ -1177,12 +1187,15 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["booking_taken"])
         return result
 
-    intent, score = detect_intent(text)
-
-    if score < THRESHOLD_CONFUSED:
-        return result
-    if score < THRESHOLD_RESPOND:
-        return result
+    # ── intent ከውጪ ካልመጣ ብቻ TF-IDF detect_intent() ተጠቀም ──────────
+    if intent is None:
+        intent, score = detect_intent(text)
+        if score < THRESHOLD_CONFUSED:
+            return result
+        if score < THRESHOLD_RESPOND:
+            return result
+    # intent ከውጪ (Jina) ከመጣ threshold ድጋሚ አይፈተሽም —
+    # Jina's own JINA_MIN_SCORE already gated it in jina_brain.py
 
     # ── balance_query ─────────────────────────────────────────────
     if intent == "balance_query":
@@ -1639,134 +1652,32 @@ def _build_game_data_slice(kwargs: dict) -> dict:
 
 
 # ================================================================
-# ASYNC WRAPPER — Jina fallback when TF-IDF score is low
-# + Context-aware NVIDIA fallback when Jina ALSO fails/low-confidence
+# ASYNC WRAPPER — booking ካልሆነ Jina ብቻ intent ይለያል
 # ================================================================
 
 async def get_response_async(text: str, **kwargs) -> dict:
     """
     get_response() async version:
-      1. detect_intent() (TF-IDF) ይሞክራል
-      2. score ዝቅ ካለ (< JINA_FALLBACK_THRESHOLD) → Jina embedding ይሞክራል
-      3. Jina "unknown" ወይም ዝቅተኛ score ከመለሰ → context-aware NVIDIA
-         fallback (ai_fallback.get_ai_fallback) ይሞክራል — ያለፈውን
-         conversation context + ትንሽ game data slice ተጠቅሞ።
-      4. ከላይ ሁሉም ካልተሳካ → normal get_response() (keyword/TF-IDF ብቻ)
+      1. ጽሁፉ ግልፅ booking pattern ከሆነ (parser.parse_numbers →
+         is_clear_pattern=True) → intent detection ጨርሶ አይሞከርም፤
+         ባዶ result ተመልሶ bot.py ራሱ parse_numbers/process_registration
+         flow ይረከበዋል (ልክ ካለፈው ባህሪ ጋር ተመሳሳይ)።
+      2. booking ካልሆነ (ወይም ambiguous ከሆነ) → Jina embedding ብቻ
+         intent ይለያል (TF-IDF ጨርሶ አይጠራም) — synonym/paraphrase
+         generalization እንዲኖረው።
+      3. Jina "unknown" ከመለሰ ወይም Jina ready ካልሆነ → context-aware
+         NVIDIA fallback (ai_fallback.get_ai_fallback) የመጨረሻ አማራጭ
+         ሆኖ ይሞከራል — ያለፈውን conversation context + ትንሽ game data
+         slice ተጠቅሞ።
 
     ስኬታማ ውጤት ባገኘ ቁጥር (Jina resolved ወይም AI fallback resolved)
     save_context() ይጠራል፣ ስለዚህ ቀጣይ follow-up ጥያቄ ይህን context ያገኛል።
     """
-    from jina_brain import jina_detect_intent, jina_is_ready, JINA_FALLBACK_THRESHOLD
-
     user_id = kwargs.get("user_id", 0)
     settings = kwargs.get("settings") or {}
     group_id = settings.get("group_id")
 
-    intent, score = detect_intent(text)
-
-    if score < JINA_FALLBACK_THRESHOLD and jina_is_ready():
-        try:
-            jina_intent, jina_score = await jina_detect_intent(text)
-            if jina_intent != "unknown" and jina_score > 0.10:
-                import logging as _log
-                _log.getLogger(__name__).info(
-                    f"[Jina] '{text[:40]}' → {jina_intent} ({jina_score:.2f}) "
-                    f"[TF-IDF was: {intent} ({score:.2f})]"
-                )
-                jina_result = _get_response_with_intent(
-                    text=text,
-                    intent=jina_intent,
-                    score=jina_score,
-                    **kwargs
-                )
-                if jina_result.get("reply") and user_id and group_id:
-                    try:
-                        from ai_fallback import save_context
-                        save_context(
-                            user_id, group_id, jina_intent,
-                            _build_game_data_slice(kwargs),
-                            jina_result["reply"],
-                        )
-                    except Exception:
-                        pass
-                return jina_result
-
-            # ── Jina ደግሞ "unknown"/ ዝቅተኛ score ከመለሰ → context-aware
-            #    NVIDIA fallback ሞክር (ካለፈ context ወይም game data ካለ ብቻ)
-            if user_id and group_id:
-                try:
-                    from ai_fallback import get_ai_fallback, save_context
-                    game_data = _build_game_data_slice(kwargs)
-                    ai_reply = await get_ai_fallback(
-                        text=text, user_id=user_id, group_id=group_id,
-                        game_data=game_data or None,
-                    )
-                    if ai_reply:
-                        save_context(user_id, group_id, "ai_fallback", game_data, ai_reply)
-                        return {
-                            "reply": ai_reply,
-                            "resend_board": False,
-                            "resend_nekay": False,
-                            "resend_remaining": False,
-                            "cancel_number": None,
-                            "change_number": None,
-                            "type_change": None,
-                            "why_not_registered": None,
-                            "my_numbers_query": False,
-                            "number_owner_query": None,
-                        }
-                except Exception as e:
-                    import logging as _log
-                    _log.getLogger(__name__).warning(f"[AI Fallback] Error: {e}")
-        except Exception as e:
-            import logging as _log
-            _log.getLogger(__name__).warning(f"[Jina fallback] Error: {e}")
-
-    sync_result = get_response(text=text, **kwargs)
-
-    if sync_result.get("reply") and user_id and group_id:
-        try:
-            from ai_fallback import save_context
-            save_context(
-                user_id, group_id, intent,
-                _build_game_data_slice(kwargs),
-                sync_result["reply"],
-            )
-        except Exception:
-            pass
-
-    return sync_result
-
-
-def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) -> dict:
-    """
-    detect_intent() ሳይጠራ — inject የተደረገ intent ተጠቅሞ response ይሰጣል።
-    get_response() logic ሙሉ ለሙሉ ይደግፋል።
-    """
-    import re
-
-    THRESHOLD_RESPOND  = 0.40
-    THRESHOLD_CONFUSED = 0.12
-
-    settings         = kwargs.get("settings", {})
-    taken            = kwargs.get("taken", {})
-    paid             = kwargs.get("paid", {})
-    nekay_list       = kwargs.get("nekay_list", [])
-    remaining_count  = kwargs.get("remaining_count", 0)
-    countdown_seconds = kwargs.get("countdown_seconds", 0)
-    user_name        = kwargs.get("user_name", "")
-    user_id          = kwargs.get("user_id", 0)
-    registration_result = kwargs.get("registration_result", None)
-    registered_numbers  = kwargs.get("registered_numbers", None)
-    failed_numbers      = kwargs.get("failed_numbers", None)
-    recent_winners      = kwargs.get("recent_winners", None)
-    user_unpaid_balance = kwargs.get("user_unpaid_balance", None)
-    user_numbers        = kwargs.get("user_numbers", None)
-    user_balance        = kwargs.get("user_balance", None)
-    failed_attempts     = kwargs.get("failed_attempts", None)
-    is_paid             = kwargs.get("is_paid", None)
-
-    result = {
+    empty_result = {
         "reply": None,
         "resend_board": False,
         "resend_nekay": False,
@@ -1779,182 +1690,56 @@ def _get_response_with_intent(text: str, intent: str, score: float, **kwargs) ->
         "number_owner_query": None,
     }
 
-    if score < THRESHOLD_CONFUSED:
-        return result
-    if score < THRESHOLD_RESPOND:
-        return result
+    # ── STEP 1: ግልፅ booking pattern ከሆነ → intent detection skip ──
+    price_full = float(settings.get("price_full") or 0)
+    price_half = float(settings.get("price_half") or 0)
+    try:
+        parsed = parse_numbers(text, price_full=price_full, price_half=price_half)
+    except Exception as e:
+        logger.warning(f"[parse_numbers] Error: {e}")
+        parsed = None
 
-    if registration_result is not None:
-        return get_response(text=text, **kwargs)
+    if parsed and parsed.get("is_clear_pattern", True):
+        return dict(empty_result)
 
-    if intent == "balance_query":
-        bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
-        if bal > 0:
-            result["reply"] = random.choice(RESPONSES["balance_show"]).format(balance=int(bal))
-        else:
-            result["reply"] = random.choice(RESPONSES["balance_zero"])
-        return result
+    # ── STEP 2: booking ካልሆነ → Jina ብቻ ──────────────────────────
+    from jina_brain import jina_detect_intent, jina_is_ready
 
-    if intent == "shortfall_query":
-        if not user_numbers:
-            result["reply"] = random.choice(RESPONSES["shortfall_no_numbers"])
+    if jina_is_ready():
+        try:
+            jina_intent, jina_score = await jina_detect_intent(text)
+        except Exception as e:
+            logger.warning(f"[Jina] detect error: {e}")
+            jina_intent, jina_score = "unknown", 0.0
+
+        if jina_intent != "unknown":
+            result = get_response(text=text, intent=jina_intent, score=jina_score, **kwargs)
+            if result.get("reply") and user_id and group_id:
+                try:
+                    from ai_fallback import save_context
+                    save_context(
+                        user_id, group_id, jina_intent,
+                        _build_game_data_slice(kwargs), result["reply"],
+                    )
+                except Exception:
+                    pass
             return result
-        bal = user_balance if user_balance is not None else (user_unpaid_balance or 0.0)
-        sf = _calculate_shortfall(user_numbers, settings, bal)
-        if sf["all_paid"]:
-            result["reply"] = random.choice(RESPONSES["shortfall_all_paid"])
-        else:
-            result["reply"] = random.choice(RESPONSES["shortfall_show"]).format(
-                numbers_text=sf["unpaid_text"], shortfall=int(sf["shortfall"])
+
+    # ── STEP 3: Jina "unknown" ወይም not ready → AI fallback (last resort) ──
+    if user_id and group_id:
+        try:
+            from ai_fallback import get_ai_fallback, save_context
+            game_data = _build_game_data_slice(kwargs)
+            ai_reply = await get_ai_fallback(
+                text=text, user_id=user_id, group_id=group_id,
+                game_data=game_data or None,
             )
-        return result
+            if ai_reply:
+                save_context(user_id, group_id, "ai_fallback", game_data, ai_reply)
+                res = dict(empty_result)
+                res["reply"] = ai_reply
+                return res
+        except Exception as e:
+            logger.warning(f"[AI Fallback] Error: {e}")
 
-    if intent == "winner_query":
-        if not recent_winners:
-            result["reply"] = random.choice(RESPONSES["winner_none"])
-            return result
-        w = recent_winners
-        def fmt_winner(w_item):
-            return f"{w_item['user_name']} ({w_item['number']:02d})" if w_item.get("number") else w_item.get("user_name", "—")
-        if len(w) == 1:
-            result["reply"] = random.choice(RESPONSES["winner_show_one"]).format(first=fmt_winner(w[0]))
-        elif len(w) == 2:
-            result["reply"] = random.choice(RESPONSES["winner_show_two"]).format(first=fmt_winner(w[0]), second=fmt_winner(w[1]))
-        else:
-            result["reply"] = random.choice(RESPONSES["winner_show"]).format(
-                first=fmt_winner(w[0]),
-                second=fmt_winner(w[1]) if len(w) > 1 else "—",
-                third=fmt_winner(w[2]) if len(w) > 2 else "—",
-            )
-        return result
-
-    if intent == "i_won_query":
-        if not recent_winners:
-            result["reply"] = random.choice(RESPONSES["i_won_no_winners"])
-            return result
-        user_place = None
-        for w in recent_winners:
-            if w.get("telegram_id") == user_id:
-                user_place = w["place"]
-                break
-        if user_place:
-            place_label = {1: "1", 2: "2", 3: "3"}.get(user_place, str(user_place))
-            result["reply"] = random.choice(RESPONSES["i_won_yes"]).format(place=place_label)
-        else:
-            def fmt_w(w_item):
-                return f"{w_item['user_name']} ({w_item['number']:02d})" if w_item.get("number") else w_item.get("user_name", "—")
-            w = recent_winners
-            result["reply"] = random.choice(RESPONSES["i_won_no"]).format(
-                first=fmt_w(w[0]) if len(w) > 0 else "—",
-                second=fmt_w(w[1]) if len(w) > 1 else "—",
-                third=fmt_w(w[2]) if len(w) > 2 else "—",
-            )
-        return result
-
-    if intent == "my_numbers_query":
-        if user_numbers is not None:
-            if not user_numbers:
-                result["reply"] = random.choice(RESPONSES["my_numbers_none"])
-            else:
-                numbers_text = _format_my_numbers(user_numbers)
-                if numbers_text:
-                    result["reply"] = random.choice(RESPONSES["my_numbers_show"]).format(numbers_text=numbers_text)
-                else:
-                    result["reply"] = random.choice(RESPONSES["my_numbers_none"])
-        else:
-            result["my_numbers_query"] = True
-        return result
-
-    if intent == "greeting":
-        msg = random.choice(RESPONSES["greeting"])
-        if random.random() < 0.20:
-            msg += " " + random.choice(RESPONSES["greeting_help"])
-        result["reply"] = msg
-        return result
-
-    if intent == "price_query":
-        price_full = settings.get("price_full", 0)
-        price_half = settings.get("price_half")
-        if price_half:
-            result["reply"] = random.choice(RESPONSES["price_query_full_and_half"]).format(
-                price_full=price_full, price_half=price_half)
-        else:
-            result["reply"] = random.choice(RESPONSES["price_query_full_only"]).format(price_full=price_full)
-        return result
-
-    if intent == "prize_query":
-        prize_1st = settings.get("prize_1st", 0)
-        result["reply"] = random.choice(RESPONSES["prize_query"]).format(prize_1st=prize_1st)
-        return result
-
-    if intent == "remaining_query":
-        result["resend_remaining"] = True
-        return result
-
-    if intent == "remaining_send":
-        result["reply"] = random.choice(RESPONSES["remaining_send_ack"])
-        result["resend_remaining"] = True
-        return result
-
-    if intent == "nekay_query":
-        if nekay_list:
-            result["reply"] = random.choice(RESPONSES["nekay_exists"])
-            result["resend_nekay"] = True
-        elif remaining_count > 0:
-            result["reply"] = random.choice(RESPONSES["nekay_none_remaining"])
-            result["resend_remaining"] = True
-        else:
-            result["reply"] = random.choice(RESPONSES["nekay_all_done"])
-        return result
-
-    if intent == "payment_not_received":
-        result["reply"] = random.choice(RESPONSES["payment_not_received"])
-        return result
-
-    if intent == "result_query":
-        if recent_winners:
-            w = recent_winners
-            first  = f"{w[0]['number']:02d}" if len(w) > 0 and w[0].get("number") else "—"
-            second = f"{w[1]['number']:02d}" if len(w) > 1 and w[1].get("number") else "—"
-            third  = f"{w[2]['number']:02d}" if len(w) > 2 and w[2].get("number") else "—"
-            result["reply"] = random.choice(RESPONSES["result_query_show"]).format(
-                first=first, second=second, third=third)
-        else:
-            result["reply"] = random.choice(RESPONSES["result_query_none"])
-        return result
-
-    if intent == "speed_request":
-        result["reply"] = random.choice(RESPONSES["speed_request"])
-        return result
-
-    if intent == "link_request":
-        result["reply"] = random.choice(RESPONSES["link_request"])
-        return result
-
-    if intent == "players_query":
-        total_numbers = settings.get("total_numbers", 0)
-        numbers_per_person = settings.get("numbers_per_person", 1)
-        players_count = total_numbers // numbers_per_person if numbers_per_person else total_numbers
-        result["reply"] = random.choice(RESPONSES["players_query"]).format(players_count=players_count)
-        return result
-
-    if intent == "players_remaining_query":
-        numbers_per_person = settings.get("numbers_per_person", 1)
-        players_remaining = remaining_count // numbers_per_person if numbers_per_person else remaining_count
-        result["reply"] = random.choice(RESPONSES["players_remaining_query"]).format(players_remaining=players_remaining)
-        return result
-
-    if intent == "complaint_removed":
-        result["reply"] = random.choice(RESPONSES["complaint_removed_taken"])
-        return result
-
-    if intent == "complaint_why_sold":
-        result["reply"] = random.choice(RESPONSES["complaint_why_sold"])
-        return result
-
-    if intent == "complaint_paid_removed":
-        result["reply"] = random.choice(RESPONSES["complaint_paid_removed"])
-        return result
-
-    # ── intents that need number context → sync get_response ──────
-    return get_response(text=text, **kwargs)
+    return dict(empty_result)
