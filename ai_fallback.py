@@ -12,6 +12,10 @@ Groq rotation ከ handlers.py ይጠቀማል። (ነባር — ምንም አል
   NVIDIA DeepSeek V4 Flash ይጠቀማል — ሙሉ ለብቻው key rotation/rate-limit
   pool አለው (handlers.py's vision NVIDIA_API_KEYS ጋር አይጋራም/አይነካካም)።
 
+  NOTE: DeepSeek V4 Flash 3 reasoning modes አለው (Non-think/Think High/
+  Think Max)። ፍጥነት ስለሚያስፈልገን chat_template_kwargs → thinking=False
+  በግልጽ ተልኳል፣ ስለዚህ ሁልጊዜ Non-think (ፈጣኑ) mode ይጠቀማል።
+
 Setup (Railway / .env):
     NVIDIA_TEXT_API_KEYS=key1,key2,key3
     (handlers.py ውስጥ ላለው NVIDIA_API_KEYS የተለዩ keys — ገለልተኛ pool)
@@ -98,6 +102,15 @@ NVIDIA_TEXT_API_KEYS = [
 ]
 
 NVIDIA_TEXT_MODEL = "deepseek-ai/deepseek-v4-flash"
+
+# DeepSeek V4 Flash reasoning mode ቁጥጥር — ፍጥነት ስለሚያስፈልገን Non-think
+# (thinking=False) ሁልጊዜ ተልኳል። ይህ ካልገባ NVIDIA NIM endpoint ላይ
+# reasoning ራሱ በራሱ ሊበራ/ሊዘገይ ይችላል።
+NVIDIA_TEXT_EXTRA_BODY = {
+    "chat_template_kwargs": {
+        "thinking": False
+    }
+}
 
 _nvidia_text_index = 0
 _nvidia_text_clients = [
@@ -194,6 +207,7 @@ async def _background_recheck_blocked_nvidia_text_keys():
                             model=NVIDIA_TEXT_MODEL,
                             messages=[{"role": "user", "content": "ping"}],
                             max_tokens=1,
+                            extra_body=NVIDIA_TEXT_EXTRA_BODY,
                         )
                     )
                     _nvidia_text_clear_blocked(idx)
@@ -247,6 +261,7 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=0.2,
+                    extra_body=NVIDIA_TEXT_EXTRA_BODY,  # thinking=False → Non-think (ፈጣን) mode
                 )
             )
             _nvidia_text_clear_blocked(idx)
