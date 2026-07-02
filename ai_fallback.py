@@ -102,17 +102,23 @@ NVIDIA_TEXT_API_KEYS = [
     k.strip() for k in os.environ.get("NVIDIA_TEXT_API_KEYS", "").split(",") if k.strip()
 ]
 
-NVIDIA_TEXT_MODEL = "qwen/qwen3-235b-a22b-instruct-2507"
+NVIDIA_TEXT_MODEL = "qwen/qwen3-32b"
 
-# NOTE: "qwen/qwen3-235b-a22b" (የቆየው/original) NVIDIA NIM ላይ deprecated/404
-# ሆኗል። "-instruct-2507" ስሪት ትክክለኛው/ወቅታዊው endpoint ነው። ይህ ስሪት ተጨማሪ ጥቅም
-# አለው፦ Non-thinking mode ብቻ ይደግፋል፣ <think> blocks በጭራሽ አያመነጭም —
-# ስለዚህ thinking-mode delay/ambiguity ጨርሶ የለም፣ ሁሌም ፈጣን ነው።
+# NOTE: ትልቁ 235B-A22B MoE ሞዴል ተደጋጋሚ 404 ይሰጥ ነበር (ምናልባት free-tier
+# account access/entitlement ጉዳይ)። ወደ ትንሹ dense Qwen3-32B ተቀይሯል —
+# ተመሳሳይ Qwen3 tokenizer/training (አማርኛ ላይ የተሻሻለ) አለው፣ free-tier
+# catalog ላይ በብዛት ጥቅም ላይ ስለሚውል 404 የመሆን እድሉ ያንሳል። Qwen3-32B hybrid
+# thinking mode አለው (ከ -2507 በተለየ) ስለዚህ enable_thinking=False ተልኳል።
+NVIDIA_TEXT_ENABLE_THINKING = os.environ.get("NVIDIA_TEXT_ENABLE_THINKING", "false").lower() == "true"
 
 # DeepSeek V4 Flash reasoning mode ቁጥጥር — ፍጥነት ስለሚያስፈልገን Non-think
 # (thinking=False) ሁልጊዜ ተልኳል። ይህ ካልገባ NVIDIA NIM endpoint ላይ
 # reasoning ራሱ በራሱ ሊበራ/ሊዘገይ ይችላል።
-NVIDIA_TEXT_EXTRA_BODY = {}  # -2507 ስሪት non-thinking-only ስለሆነ chat_template_kwargs አያስፈልግም
+NVIDIA_TEXT_EXTRA_BODY = {
+    "chat_template_kwargs": {
+        "enable_thinking": NVIDIA_TEXT_ENABLE_THINKING  # Qwen3 documented key
+    }
+}
 
 NVIDIA_TEXT_REQUEST_TIMEOUT = 45  # ሰከንድ — Qwen3-235B ትልቅ ሞዴል ስለሆነ ትንሽ ጊዜ ተጨምሯል (medium speed OK)
 
@@ -275,7 +281,7 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
-                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # {} — non-thinking-only ሞዴል
+                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # enable_thinking toggle (env-controlled, default False)
                     )
                 ),
                 timeout=NVIDIA_TEXT_REQUEST_TIMEOUT + 5,  # SDK timeout + buffer — hard ceiling
