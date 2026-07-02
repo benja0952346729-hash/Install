@@ -502,6 +502,61 @@ def remove_complete_sticker_by_index(index: int) -> bool:
 
 
 # ============================================================
+# PRE-BOOKING MEDIA
+# ============================================================
+
+def add_prebooking_media(file_id: str, media_type: str) -> None:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS prebooking_media (
+            id SERIAL PRIMARY KEY,
+            file_id TEXT NOT NULL,
+            media_type TEXT NOT NULL,
+            added_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+    cur.execute("""
+        INSERT INTO prebooking_media (file_id, media_type) VALUES (%s, %s)
+    """, (file_id, media_type))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_prebooking_media() -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id, file_id, media_type, added_at FROM prebooking_media ORDER BY added_at ASC")
+        rows = cur.fetchall()
+    except Exception:
+        rows = []
+    cur.close()
+    conn.close()
+    return [{"id": r[0], "file_id": r[1], "media_type": r[2], "added_at": r[3]} for r in rows]
+
+
+def remove_prebooking_media_by_index(index: int) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT id FROM prebooking_media ORDER BY added_at ASC")
+        rows = cur.fetchall()
+        if index < 1 or index > len(rows):
+            cur.close()
+            conn.close()
+            return False
+        target_id = rows[index - 1][0]
+        cur.execute("DELETE FROM prebooking_media WHERE id=%s", (target_id,))
+        conn.commit()
+    except Exception:
+        pass
+    cur.close()
+    conn.close()
+    return True
+
+
 # GROUP MANAGEMENT
 # ============================================================
 
@@ -2218,7 +2273,7 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     # screenshot_payments ውስጥ candidate ፈልግ
     if game_id is not None:
         cur.execute("""
-            SELECT id, telegram_id, ref_no, amount, sender_name
+            SELECT id, telegram_id, ref_no, amount, sender_name, receipt_chat_id, receipt_message_id
             FROM screenshot_payments
             WHERE matched=FALSE AND group_id=%s
               AND (game_id=%s OR game_id IS NULL)
@@ -2227,7 +2282,7 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
         """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     else:
         cur.execute("""
-            SELECT id, telegram_id, ref_no, amount, sender_name
+            SELECT id, telegram_id, ref_no, amount, sender_name, receipt_chat_id, receipt_message_id
             FROM screenshot_payments
             WHERE matched=FALSE AND group_id=%s
               AND game_id IS NULL
@@ -2240,22 +2295,22 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
 
     # 1️⃣ Ref match
     if ref:
-        for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
+        for scr_id, telegram_id, scr_ref, scr_amount, scr_sender, scr_chat_id, scr_msg_id in candidates:
             if scr_ref and scr_ref == ref:
-                chosen = (scr_id, telegram_id, scr_sender)
+                chosen = (scr_id, telegram_id, scr_sender, scr_chat_id, scr_msg_id)
                 break
 
     # 2️⃣ Name match — ስም ከሌለ match አናደርግም
     if not chosen:
         if sender_name:
-            for scr_id, telegram_id, scr_ref, scr_amount, scr_sender in candidates:
+            for scr_id, telegram_id, scr_ref, scr_amount, scr_sender, scr_chat_id, scr_msg_id in candidates:
                 if _names_match(sender_name, scr_sender):
-                    chosen = (scr_id, telegram_id, scr_sender)
+                    chosen = (scr_id, telegram_id, scr_sender, scr_chat_id, scr_msg_id)
                     break
 
     matched_data = None
     if chosen:
-        scr_id, telegram_id, scr_sender = chosen
+        scr_id, telegram_id, scr_sender, scr_chat_id, scr_msg_id = chosen
         # ✅ Match ሆነ — ሁለቱንም DELETE
         cur.execute("DELETE FROM sms_payments WHERE id=%s", (sms_id,))
         cur.execute("DELETE FROM screenshot_payments WHERE id=%s", (scr_id,))
@@ -2266,6 +2321,8 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
             "type": sms_type,
             "sender_name": sender_name or scr_sender,
             "group_id": group_id,
+            "receipt_chat_id": scr_chat_id,
+            "receipt_message_id": scr_msg_id,
         }
 
     cur.close()
@@ -2348,10 +2405,15 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
 
 
 def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
-                             ref: str, pay_type: str, description: str, group_id: int = None, game_id: int = None) -> dict:
+                             ref: str, pay_type: str, description: str, group_id: int = None, game_id: int = None,
+                             receipt_chat_id: int = None, receipt_message_id: int = None) -> dict:
     import uuid
     conn = get_conn()
     cur = conn.cursor()
+
+    # receipt columns ካሌሉ ይጨምር
+    cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS receipt_chat_id BIGINT;")
+    cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS receipt_message_id BIGINT;")
 
     if group_id:
         cur.execute("""
@@ -2368,9 +2430,9 @@ def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
 
     cur.execute("""
         INSERT INTO screenshot_payments
-        (group_id, game_id, telegram_id, ref_no, amount, sender_name, pay_type, description, matched)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE)
-    """, (group_id, game_id, telegram_id, safe_ref, amount, sender_name, pay_type, description))
+        (group_id, game_id, telegram_id, ref_no, amount, sender_name, pay_type, description, matched, receipt_chat_id, receipt_message_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, FALSE, %s, %s)
+    """, (group_id, game_id, telegram_id, safe_ref, amount, sender_name, pay_type, description, receipt_chat_id, receipt_message_id))
 
     conn.commit()
     cur.close()
