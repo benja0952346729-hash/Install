@@ -9,12 +9,13 @@ Groq rotation ከ handlers.py ይጠቀማል። (ነባር — ምንም አል
   intent/answer) + game data slice ተጠቅሞ follow-up ጥያቄዎችን
   (ለምሳሌ "ማን አሸነፈ?" → "በዚ ዙር ነው?") በትክክል በአማርኛ ይመልሳል።
 
-  NVIDIA DeepSeek V4 Flash ይጠቀማል — ሙሉ ለብቻው key rotation/rate-limit
+  NVIDIA Qwen3-235B-A22B ይጠቀማል — ሙሉ ለብቻው key rotation/rate-limit
   pool አለው (handlers.py's vision NVIDIA_API_KEYS ጋር አይጋራም/አይነካካም)።
 
-  NOTE: DeepSeek V4 Flash 3 reasoning modes አለው (Non-think/Think High/
-  Think Max)። ፍጥነት ስለሚያስፈልገን chat_template_kwargs → thinking=False
-  በግልጽ ተልኳል፣ ስለዚህ ሁልጊዜ Non-think (ፈጣኑ) mode ይጠቀማል።
+  NOTE: Qwen3 ተመረጠ (ከ DeepSeek/GLM/Gemma ይልቅ) ምክንያቱም tokenizer/training
+  ውስጥ በተለይ ለ አማርኛ (ዝቅተኛ-resource ቋንቋ) ተጨማሪ ዳታ ታክሎበታል፣ 119 ቋንቋዎችን
+  ይደግፋል። Hybrid thinking mode ቁጥጥር በ NVIDIA_TEXT_ENABLE_THINKING env var
+  (ነባሪ False = ፈጣኑ mode) ይደረጋል — chat_template_kwargs → enable_thinking።
 
 Setup (Railway / .env):
     NVIDIA_TEXT_API_KEYS=key1,key2,key3
@@ -101,19 +102,24 @@ NVIDIA_TEXT_API_KEYS = [
     k.strip() for k in os.environ.get("NVIDIA_TEXT_API_KEYS", "").split(",") if k.strip()
 ]
 
-NVIDIA_TEXT_MODEL = "deepseek-ai/deepseek-v4-flash"
+NVIDIA_TEXT_MODEL = "qwen/qwen3-235b-a22b"
+
+# Qwen3 hybrid thinking/non-thinking mode ቁጥጥር — Qwen3 ለ አማርኛ (ዝቅተኛ-resource
+# ቋንቋ) በተለይ የተሻሻለ tokenizer/training ስላለው selected። Thinking=False ማድረግ
+# ፍጥነት ይጨምራል፣ ግን አማርኛ ጥራት (ይህ ሞዴል ላይ) ከ thinking ጋር ሊሻል ስለሚችል በ
+# env var ልትቀይረው ትችላለህ (ነባሪ False = ፈጣኑ mode)።
+NVIDIA_TEXT_ENABLE_THINKING = os.environ.get("NVIDIA_TEXT_ENABLE_THINKING", "false").lower() == "true"
 
 # DeepSeek V4 Flash reasoning mode ቁጥጥር — ፍጥነት ስለሚያስፈልገን Non-think
 # (thinking=False) ሁልጊዜ ተልኳል። ይህ ካልገባ NVIDIA NIM endpoint ላይ
 # reasoning ራሱ በራሱ ሊበራ/ሊዘገይ ይችላል።
 NVIDIA_TEXT_EXTRA_BODY = {
     "chat_template_kwargs": {
-        "thinking": False,
-        "reasoning_effort": "none"
+        "enable_thinking": NVIDIA_TEXT_ENABLE_THINKING  # Qwen3 documented key (DeepSeek's "thinking" አይሰራም ለዚህ ሞዴል)
     }
 }
 
-NVIDIA_TEXT_REQUEST_TIMEOUT = 25  # ሰከንድ — ከዚህ በላይ ከቆየ call ራሱ fail ይላል (2 ደቂቃ hang እንዳይፈጠር)
+NVIDIA_TEXT_REQUEST_TIMEOUT = 45  # ሰከንድ — Qwen3-235B ትልቅ ሞዴል ስለሆነ ትንሽ ጊዜ ተጨምሯል (medium speed OK)
 
 _nvidia_text_index = 0
 _nvidia_text_clients = [
@@ -274,7 +280,7 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
                         messages=messages,
                         max_tokens=max_tokens,
                         temperature=0.2,
-                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # thinking=False → Non-think (ፈጣን) mode
+                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # Qwen3 enable_thinking toggle (env-controlled)
                     )
                 ),
                 timeout=NVIDIA_TEXT_REQUEST_TIMEOUT + 5,  # SDK timeout + buffer — hard ceiling
@@ -315,12 +321,19 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
             call_elapsed = time.time() - t_call_start
             last_error = e
             err_str = str(e).lower()
-            if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[NVIDIA Text] ⛔ Key #{idx+1} rate limited ({call_elapsed:.1f}s) — attempt {attempt+1}/{max_attempts}")
+            is_rate = "rate" in err_str or "429" in err_str or "limit" in err_str
+            is_timeout = (
+                "timeout" in err_str
+                or "timed out" in err_str
+                or "timeout" in type(e).__name__.lower()
+            )
+            if is_rate or is_timeout:
+                reason = "rate limited" if is_rate else "TIMEOUT"
+                logger.warning(f"[NVIDIA Text] ⛔ Key #{idx+1} {reason} ({call_elapsed:.1f}s) — next key ይሞከራል | attempt {attempt+1}/{max_attempts}")
                 _nvidia_text_mark_blocked(idx)
                 last_limited_idx = idx
                 continue
-            logger.error(f"[NVIDIA Text] ❌ Non-rate error ({call_elapsed:.1f}s): {e}")
+            logger.error(f"[NVIDIA Text] ❌ Non-rate/non-timeout error ({call_elapsed:.1f}s): {e}")
             raise
 
     total_elapsed = time.time() - call_started_at
