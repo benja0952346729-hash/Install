@@ -102,23 +102,17 @@ NVIDIA_TEXT_API_KEYS = [
     k.strip() for k in os.environ.get("NVIDIA_TEXT_API_KEYS", "").split(",") if k.strip()
 ]
 
-NVIDIA_TEXT_MODEL = "qwen/qwen3-32b"
+NVIDIA_TEXT_MODEL = "qwen/qwen3-next-80b-a3b-instruct"
 
-# NOTE: ትልቁ 235B-A22B MoE ሞዴል ተደጋጋሚ 404 ይሰጥ ነበር (ምናልባት free-tier
-# account access/entitlement ጉዳይ)። ወደ ትንሹ dense Qwen3-32B ተቀይሯል —
-# ተመሳሳይ Qwen3 tokenizer/training (አማርኛ ላይ የተሻሻለ) አለው፣ free-tier
-# catalog ላይ በብዛት ጥቅም ላይ ስለሚውል 404 የመሆን እድሉ ያንሳል። Qwen3-32B hybrid
-# thinking mode አለው (ከ -2507 በተለየ) ስለዚህ enable_thinking=False ተልኳል።
-NVIDIA_TEXT_ENABLE_THINKING = os.environ.get("NVIDIA_TEXT_ENABLE_THINKING", "false").lower() == "true"
+# NOTE: NVIDIA's official API sample (build.nvidia.com/qwen/qwen3-next-80b-a3b-instruct)
+# ላይ chat_template_kwargs ጨርሶ አልተጠቀሰም — ይህ ሞዴል simple parameters ብቻ
+# ይፈልጋል (thinking toggle አያስፈልገውም)። qwen3-235b-a22b NVIDIA's free
+# catalog ውስጥ ከቀድሞ ተነስቷል (ለዚያ ነው 404 ይሰጥ የነበረው)።
 
 # DeepSeek V4 Flash reasoning mode ቁጥጥር — ፍጥነት ስለሚያስፈልገን Non-think
 # (thinking=False) ሁልጊዜ ተልኳል። ይህ ካልገባ NVIDIA NIM endpoint ላይ
 # reasoning ራሱ በራሱ ሊበራ/ሊዘገይ ይችላል።
-NVIDIA_TEXT_EXTRA_BODY = {
-    "chat_template_kwargs": {
-        "enable_thinking": NVIDIA_TEXT_ENABLE_THINKING  # Qwen3 documented key
-    }
-}
+NVIDIA_TEXT_EXTRA_BODY = {}  # official NVIDIA sample chat_template_kwargs አይጠቀምም ለዚህ ሞዴል
 
 NVIDIA_TEXT_REQUEST_TIMEOUT = 45  # ሰከንድ — Qwen3-235B ትልቅ ሞዴል ስለሆነ ትንሽ ጊዜ ተጨምሯል (medium speed OK)
 
@@ -280,8 +274,9 @@ async def _call_nvidia_text_with_rotation(messages: list, max_tokens: int = 300)
                         model=NVIDIA_TEXT_MODEL,
                         messages=messages,
                         max_tokens=max_tokens,
-                        temperature=0.2,
-                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # enable_thinking toggle (env-controlled, default False)
+                        temperature=0.6,
+                        top_p=0.7,
+                        extra_body=NVIDIA_TEXT_EXTRA_BODY,  # {} — ይህ ሞዴል chat_template_kwargs አይፈልግም
                     )
                 ),
                 timeout=NVIDIA_TEXT_REQUEST_TIMEOUT + 5,  # SDK timeout + buffer — hard ceiling
