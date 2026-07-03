@@ -366,10 +366,22 @@ async def _save_to_db_background(current_hash: str):
 # ================================================================
 # DETECT INTENT VIA JINA — ASYNC
 # ================================================================
+# FIX: 2-tuple (intent, score) → 3-tuple (intent, score, available)
+#
+# ለምን፦ "Jina ሰርቶ ውጤቱ ደካማ ስለሆነ unknown መለሰ" ከ "Jina ራሱ ጨርሶ ሊሰራ
+# አልቻለም (rate limit/network/API error)" የሚለውን ለ caller (responder.py)
+# መለየት ስላስፈለገ ነው፦
+#   - available=True,  intent="unknown" → Jina ሰርቷል፣ ውጤቱ ግን
+#     ከ JINA_MIN_SCORE በታች ነው (ለምሳሌ latin/transliterated ጽሁፍ ላይ
+#     ደካማ ውጤት) → responder.py TF-IDF ላይ latin-retry ማድረግ ይችላል።
+#   - available=False, intent="unknown" → Jina ራሱ ሙሉ ለሙሉ ወድቋል
+#     (ready ካልሆነ ወይም API call ላይ exception ካጋጠመ) → responder.py
+#     TF-IDF ሙሉ ቁጥጥር (primary detector) እንዲይዝ ያደርጋል።
+# ================================================================
 
-async def jina_detect_intent(text: str) -> tuple[str, float]:
+async def jina_detect_intent(text: str) -> tuple[str, float, bool]:
     if not _is_ready or not _intent_embeddings:
-        return "unknown", 0.0
+        return "unknown", 0.0, False
 
     try:
         query_emb = (await _get_embeddings_async([text]))[0]
@@ -392,17 +404,17 @@ async def jina_detect_intent(text: str) -> tuple[str, float]:
                 f"[JinaBrain] 🔻 BELOW threshold ({JINA_MIN_SCORE}) | text='{text[:40]}' | "
                 f"best={best_intent}({best_score:.3f}) | top3=[{top3_str}] → returning 'unknown'"
             )
-            return "unknown", best_score
+            return "unknown", best_score, True
 
         logger.info(
             f"[JinaBrain] ✅ ABOVE threshold ({JINA_MIN_SCORE}) | text='{text[:40]}' | "
             f"best={best_intent}({best_score:.3f}) | top3=[{top3_str}]"
         )
-        return best_intent, best_score
+        return best_intent, best_score, True
 
     except Exception as e:
-        logger.error(f"❌ Jina detect failed: {e}")
-        return "unknown", 0.0
+        logger.error(f"❌ Jina detect failed (API/network down): {e}")
+        return "unknown", 0.0, False
 
 
 def jina_is_ready() -> bool:
