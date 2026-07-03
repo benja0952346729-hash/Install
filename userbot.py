@@ -25,17 +25,28 @@ logger = logging.getLogger(__name__)
 
 def init_userbot_db():
     conn = get_conn()
+    conn.autocommit = True
     cur = conn.cursor()
 
-    cur.execute("""
+    def run(sql: str, label: str):
+        """Run one DDL statement in isolation, commit it immediately, and
+        log success/failure so a single bad statement never silently
+        aborts the rest of the migration (or hides which step broke)."""
+        try:
+            cur.execute(sql)
+            logger.info(f"[DB-Migrate] ✅ {label}")
+        except Exception as e:
+            logger.error(f"[DB-Migrate] ❌ {label}: {e}")
+
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_admins (
             user_id BIGINT PRIMARY KEY,
             added_by BIGINT NOT NULL,
             added_at TIMESTAMP DEFAULT NOW()
         )
-    """)
+    """, "create userbot_admins")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_accounts (
             id SERIAL PRIMARY KEY,
             owner_id BIGINT NOT NULL DEFAULT 0,
@@ -51,35 +62,35 @@ def init_userbot_db():
             created_at TIMESTAMP DEFAULT NOW(),
             UNIQUE(owner_id, label)
         )
-    """)
+    """, "create userbot_accounts")
 
     # --- FIX: older deployments created userbot_accounts before owner_id
     # existed (single-tenant era). Backfill it here too, same reason as
     # userbot_settings below. ---
-    cur.execute("""
+    run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
-    """)
+    """, "userbot_accounts.owner_id backfill")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_settings (
             owner_id BIGINT NOT NULL DEFAULT 0,
             key TEXT NOT NULL,
             value TEXT NOT NULL,
             PRIMARY KEY (owner_id, key)
         )
-    """)
+    """, "create userbot_settings")
 
     # --- FIX: older deployments created userbot_settings before owner_id
     # existed (single-tenant era). CREATE TABLE IF NOT EXISTS above is a
     # no-op on those, so owner_id column (and the composite PK) never gets
     # added. This backfills it safely for both old and new DBs. ---
-    cur.execute("""
+    run("""
         ALTER TABLE userbot_settings
         ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
-    """)
+    """, "userbot_settings.owner_id backfill")
 
-    cur.execute("""
+    run("""
         DO $$
         BEGIN
             IF NOT EXISTS (
@@ -94,9 +105,9 @@ def init_userbot_db():
         EXCEPTION WHEN OTHERS THEN
             NULL;
         END $$;
-    """)
+    """, "userbot_settings composite PK fix")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_groups (
             id SERIAL PRIMARY KEY,
             owner_id BIGINT NOT NULL DEFAULT 0,
@@ -106,74 +117,74 @@ def init_userbot_db():
             added_at TIMESTAMP DEFAULT NOW(),
             UNIQUE(owner_id, group_id)
         )
-    """)
+    """, "create userbot_groups")
 
     # --- FIX: same owner_id backfill for userbot_groups (older deployments
     # created this table before multi-tenant owner_id was introduced). ---
-    cur.execute("""
+    run("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
-    """)
+    """, "userbot_groups.owner_id backfill")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_added_users (
             user_id BIGINT NOT NULL,
             group_id BIGINT NOT NULL,
             PRIMARY KEY (user_id, group_id)
         )
-    """)
+    """, "create userbot_added_users")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_contacted_users (
             user_id BIGINT NOT NULL,
             account_label CHAR(1) NOT NULL,
             PRIMARY KEY (user_id, account_label)
         )
-    """)
+    """, "create userbot_contacted_users")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_recent_messages (
             user_id BIGINT NOT NULL,
             group_id BIGINT NOT NULL,
             sent_at TIMESTAMP DEFAULT NOW(),
             PRIMARY KEY (user_id, group_id)
         )
-    """)
+    """, "create userbot_recent_messages")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_blocked_users (
             user_id BIGINT PRIMARY KEY,
             blocked_at TIMESTAMP DEFAULT NOW()
         )
-    """)
+    """, "create userbot_blocked_users")
 
-    cur.execute("""
+    run("""
         CREATE TABLE IF NOT EXISTS userbot_daily_adds (
             account_label CHAR(1) NOT NULL,
             add_date DATE NOT NULL DEFAULT CURRENT_DATE,
             count INTEGER DEFAULT 0,
             PRIMARY KEY (account_label, add_date)
         )
-    """)
+    """, "create userbot_daily_adds")
 
-    cur.execute("""
+    run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS label CHAR(1) UNIQUE
-    """)
-    cur.execute("""
+    """, "userbot_accounts.label backfill")
+    run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS flood_until TIMESTAMP DEFAULT NULL
-    """)
-    cur.execute("""
+    """, "userbot_accounts.flood_until backfill")
+    run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS spam_until TIMESTAMP DEFAULT NULL
-    """)
-    cur.execute("""
+    """, "userbot_accounts.spam_until backfill")
+    run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS is_listener BOOLEAN DEFAULT FALSE
-    """)
+    """, "userbot_accounts.is_listener backfill")
 
-    cur.execute("""
+    run("""
         DO $$
         BEGIN
             IF EXISTS (
@@ -183,28 +194,45 @@ def init_userbot_db():
                 ALTER TABLE userbot_groups DROP COLUMN username;
             END IF;
         END $$;
-    """)
+    """, "userbot_groups drop legacy username column")
 
-    cur.execute("""
+    run("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS group_id BIGINT UNIQUE
-    """)
-    cur.execute("""
+    """, "userbot_groups.group_id backfill")
+    run("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS group_name TEXT DEFAULT NULL
-    """)
-    cur.execute("""
+    """, "userbot_groups.group_name backfill")
+    run("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS is_source BOOLEAN DEFAULT FALSE
-    """)
+    """, "userbot_groups.is_source backfill")
 
-    cur.execute("""
+    run("""
         CREATE INDEX IF NOT EXISTS idx_groups_source
         ON userbot_groups(group_id)
         WHERE is_source = TRUE
-    """)
+    """, "idx_groups_source index")
 
-    conn.commit()
+    # --- FIX: db_add_group() / _auto_detect_groups() use
+    # ON CONFLICT (owner_id, group_id), which needs an actual unique
+    # index on that exact column pair. Older deployments may only have
+    # had a single-column UNIQUE on group_id (or none matching this
+    # pair), so create it explicitly here. ---
+    run("""
+        CREATE UNIQUE INDEX IF NOT EXISTS userbot_groups_owner_group_uidx
+        ON userbot_groups (owner_id, group_id)
+    """, "userbot_groups (owner_id, group_id) unique index")
+
+    # Same class of issue for userbot_accounts — db_add_account() relies
+    # on ON CONFLICT (phone) only, but keep this in place preventively
+    # in case future code conflicts on (owner_id, label) too.
+    run("""
+        CREATE UNIQUE INDEX IF NOT EXISTS userbot_accounts_owner_label_uidx
+        ON userbot_accounts (owner_id, label)
+    """, "userbot_accounts (owner_id, label) unique index")
+
     cur.close()
     conn.close()
     logger.info("✅ Userbot DB tables ready")
@@ -266,8 +294,11 @@ def _is_main_admin(user_id: int) -> bool:
 
 def _is_admin(user_id: int) -> bool:
     if user_id in ADMIN_IDS:
+        logger.info(f"[AdminCheck] user_id={user_id} → main admin ✅")
         return True
-    return db_is_uadmin(user_id)
+    result = db_is_uadmin(user_id)
+    logger.info(f"[AdminCheck] user_id={user_id} → uadmin={result}")
+    return result
 
 
 # ============================================================
@@ -1594,6 +1625,7 @@ async def cmd_settargetlink(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"[Command] /addgroup called by {update.effective_user.id}")
     if not _is_admin(update.effective_user.id):
         return
     owner_id = update.effective_user.id
@@ -1643,6 +1675,7 @@ PAGE_SIZE = 20
 
 
 async def cmd_listgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"[Command] /listgroups called by {update.effective_user.id}")
     if not _is_admin(update.effective_user.id):
         return
     owner_id = update.effective_user.id
@@ -1967,6 +2000,7 @@ async def cmd_broadcast(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_myapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"[Command] /myapi called by {update.effective_user.id}")
     if not _is_admin(update.effective_user.id):
         return
     owner_id = update.effective_user.id
@@ -1986,6 +2020,7 @@ async def cmd_myapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    logger.info(f"[Command] /ubothelp (or /status2) called by {update.effective_user.id}")
     if not _is_admin(update.effective_user.id):
         return
     owner_id = update.effective_user.id
@@ -2091,6 +2126,28 @@ async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
+# GLOBAL ERROR HANDLER — so failures are visible in logs
+# ============================================================
+
+async def _global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """PTB swallows unhandled exceptions unless an error handler is
+    registered (that's the 'No error handlers are registered' warning).
+    This logs the full traceback so real causes show up in Railway logs
+    instead of the command just silently doing nothing."""
+    logger.error(
+        f"‼️ [UnhandledError] update={update} error={context.error}",
+        exc_info=context.error
+    )
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                f"❌ Internal error: {context.error}"
+            )
+    except Exception:
+        pass
+
+
+# ============================================================
 # REGISTER ALL HANDLERS
 # ============================================================
 
@@ -2128,5 +2185,7 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("status2", cmd_status2))
     app.add_handler(CommandHandler("broadcast", cmd_broadcast))
     app.add_handler(CallbackQueryHandler(cb_group_action, pattern="^grp_"))
+
+    app.add_error_handler(_global_error_handler)
 
     logger.info("✅ Userbot handlers registered")
