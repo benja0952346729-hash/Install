@@ -1,11 +1,30 @@
 """
 userbot.py — Telethon-based userbot commands
+
+⚠️ CHANGE (per owner request): this module now uses its OWN dedicated
+Postgres database (USERBOT_DATABASE_URL), completely separate from the
+main lottery DB in database.py. This is for isolation/simplicity — userbot
+traffic/load/schema never touches lottery data, and the two can be
+backed up, migrated, or wiped independently.
+
+⚠️ CHANGE: DB calls inside the per-message "hot path" (functions that run
+automatically for every message in a source group: _get_client, handler,
+_contact_and_add_by_sender, _reload_listeners, _add_workers_to_source_group,
+_auto_detect_groups, _sync_all_account_groups, _spam_recovery_loop,
+_cleanup_loop, _do_broadcast) are now wrapped in asyncio.to_thread so they
+no longer block the shared asyncio event loop (which also runs bot.py's
+screenshot/winner-photo AI analysis). Admin-only command handlers
+(cmd_addaccount, cmd_listgroups, etc.) were left untouched since they only
+run when an admin explicitly issues a command — negligible impact, and
+touching them adds risk with no real benefit.
 """
 
+import os
 import asyncio
 import logging
 import random
 from datetime import datetime, timedelta
+import psycopg2
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import AddContactRequest
@@ -14,10 +33,25 @@ from telethon.errors import FloodWaitError, PeerFloodError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 
-from database import get_conn
 from config import ADMIN_IDS
 
 logger = logging.getLogger(__name__)
+
+# ============================================================
+# DEDICATED USERBOT DB CONNECTION (separate from database.py)
+# ============================================================
+
+USERBOT_DATABASE_URL = os.environ.get("USERBOT_DATABASE_URL")
+
+
+def get_conn():
+    """userbot.py's own dedicated Postgres connection. Deliberately NOT the
+    same connection as database.py's get_conn() — lottery data and userbot
+    data live in two separate Postgres instances now."""
+    if not USERBOT_DATABASE_URL:
+        raise RuntimeError("USERBOT_DATABASE_URL ያልተቀመጠም! Railway/env ላይ አክል።")
+    return psycopg2.connect(USERBOT_DATABASE_URL)
+
 
 # ============================================================
 # DB INIT
@@ -235,7 +269,7 @@ def init_userbot_db():
 
     cur.close()
     conn.close()
-    logger.info("✅ Userbot DB tables ready")
+    logger.info("✅ Userbot DB tables ready (dedicated DB)")
 
 
 # ============================================================
@@ -691,6 +725,50 @@ def db_increment_daily_add(label: str):
 
 
 # ============================================================
+# RAW-SQL HELPERS (used only from hot-path async functions, so their
+# whole body runs inside asyncio.to_thread at the call site — see
+# _spam_recovery_loop / _auto_detect_groups / _sync_all_account_groups /
+# _reload_listeners below).
+# ============================================================
+
+def _sql_distinct_owner_ids_with_spam():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE spam_until IS NOT NULL AND is_listener=FALSE")
+    owner_ids = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return owner_ids
+
+
+def _sql_distinct_owner_ids_with_listeners(owner_id: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    if owner_id:
+        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE AND owner_id=%s", (owner_id,))
+    else:
+        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE")
+    owner_ids = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return owner_ids
+
+
+def _sql_upsert_detected_group(owner_id: int, normalized_id: int, name: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO userbot_groups (owner_id, group_id, group_name, is_source)
+        VALUES (%s, %s, %s, FALSE)
+        ON CONFLICT (owner_id, group_id) DO UPDATE SET
+            group_name=COALESCE(EXCLUDED.group_name, userbot_groups.group_name)
+    """, (owner_id, normalized_id, name))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
 # ROUND ROBIN
 # ============================================================
 
@@ -793,7 +871,7 @@ async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
 
 
 # ============================================================
-# TELETHON CLIENT
+# TELETHON CLIENT  (hot path — wrapped in to_thread)
 # ============================================================
 
 async def _get_client(account: dict, owner_id: int = 0) -> TelegramClient:
@@ -807,8 +885,8 @@ async def _get_client(account: dict, owner_id: int = 0) -> TelegramClient:
     logger.info(f"[_get_client] 🔌 [{account.get('label')}] connected")
 
     try:
-        target_link = db_get_setting(owner_id, "target_group_link")
-        target_str = db_get_setting(owner_id, "target_group_id")
+        target_link = await asyncio.to_thread(db_get_setting, owner_id, "target_group_link")
+        target_str = await asyncio.to_thread(db_get_setting, owner_id, "target_group_id")
         target = target_link if target_link else (int(target_str) if target_str else None)
         if target:
             await client.get_entity(target)
@@ -819,7 +897,7 @@ async def _get_client(account: dict, owner_id: int = 0) -> TelegramClient:
         logger.warning(f"[_get_client] ❌ [{account.get('label')}] target group cache failed: {e}")
 
     try:
-        groups = db_list_groups(owner_id)
+        groups = await asyncio.to_thread(db_list_groups, owner_id)
         source_ids = [g[1] for g in groups if g[3]]
         if source_ids:
             for sid in source_ids:
@@ -857,7 +935,7 @@ def _normalize_source_id(gid) -> int:
 
 
 # ============================================================
-# CORE ACTIONS
+# CORE ACTIONS  (hot path — wrapped in to_thread)
 # ============================================================
 
 async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int, owner_id: int = 0):
@@ -878,7 +956,8 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             logger.info(f"[Resolve] [{account['label']}] {user_id} not in cache: {e}")
 
         if not resolved_user:
-            if not db_is_user_contacted(user_id, account["label"]):
+            already_contacted = await asyncio.to_thread(db_is_user_contacted, user_id, account["label"])
+            if not already_contacted:
                 try:
                     await client(AddContactRequest(
                         id=user_id,
@@ -887,14 +966,14 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                         phone=phone,
                         add_phone_privacy_exception=False
                     ))
-                    db_mark_user_contacted(user_id, account["label"])
+                    await asyncio.to_thread(db_mark_user_contacted, user_id, account["label"])
                     logger.info(f"[Contact] ✅ [{account['label']}] contacted {user_id}")
                 except FloodWaitError as e:
-                    db_set_flood(account["phone"], e.seconds)
+                    await asyncio.to_thread(db_set_flood, account["phone"], e.seconds)
                     logger.warning(f"[Contact] 🚫 Flood [{account['label']}]: {e.seconds}s")
                     return
                 except PeerFloodError:
-                    db_set_spam(account["phone"])
+                    await asyncio.to_thread(db_set_spam, account["phone"])
                     logger.warning(f"[Contact] 🚫 SPAM BAN [{account['label']}]")
                     await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
                     return
@@ -911,22 +990,23 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             logger.warning(f"[Add] ⏭ [{account['label']}] user {user_id} unresolvable — skip")
             return
 
-        if not db_is_user_added(user_id, target_group_id):
+        already_added = await asyncio.to_thread(db_is_user_added, user_id, target_group_id)
+        if not already_added:
             try:
-                target_link = db_get_setting(owner_id, "target_group_link")
+                target_link = await asyncio.to_thread(db_get_setting, owner_id, "target_group_link")
                 target = target_link if target_link else target_group_id
                 group = await client.get_entity(target)
                 logger.info(f"[Add] ✅ [{account['label']}] target group resolved: {target}")
 
                 await client(InviteToChannelRequest(channel=group, users=[resolved_user]))
-                db_mark_user_added(user_id, target_group_id)
-                db_increment_daily_add(account["label"])
+                await asyncio.to_thread(db_mark_user_added, user_id, target_group_id)
+                await asyncio.to_thread(db_increment_daily_add, account["label"])
                 logger.info(f"[Add] ✅✅ [{account['label']}] user {user_id} → {target_group_id} SUCCESS!")
             except FloodWaitError as e:
-                db_set_flood(account["phone"], e.seconds)
+                await asyncio.to_thread(db_set_flood, account["phone"], e.seconds)
                 logger.warning(f"[Add] 🚫 Flood [{account['label']}]: {e.seconds}s")
             except PeerFloodError:
-                db_set_spam(account["phone"])
+                await asyncio.to_thread(db_set_spam, account["phone"])
                 logger.warning(f"[Add] 🚫 SPAM BAN [{account['label']}]")
                 await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
             except Exception as e:
@@ -939,7 +1019,7 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
 
 
 # ============================================================
-# SPAM RECOVERY LOOP
+# SPAM RECOVERY LOOP  (hot path — wrapped in to_thread)
 # ============================================================
 
 async def _spam_recovery_loop():
@@ -947,16 +1027,10 @@ async def _spam_recovery_loop():
     while True:
         await asyncio.sleep(5 * 3600)  # every 5 ሰዓት
         try:
-            # ሁሉም owners spam accounts
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE spam_until IS NOT NULL AND is_listener=FALSE")
-            owner_ids = [r[0] for r in cur.fetchall()]
-            cur.close()
-            conn.close()
+            owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_spam)
             spam_accounts = []
             for oid in owner_ids:
-                spam_accounts.extend(db_get_spam_accounts(oid))
+                spam_accounts.extend(await asyncio.to_thread(db_get_spam_accounts, oid))
             now = datetime.now()
             for account in spam_accounts:
                 if not account.get("session"):
@@ -981,7 +1055,7 @@ async def _spam_recovery_loop():
                         await client.send_message("@SpamBot", "/start")
                         await asyncio.sleep(2)
                         # Error ካልመጣ → spam ተነሳ
-                        db_clear_spam(account["phone"])
+                        await asyncio.to_thread(db_clear_spam, account["phone"])
                         logger.info(f"[SpamCheck] ✅ [{account['label']}] spam ban ተነሳ!")
                         await _notify_admins(f"✅ Account [{account['label']}] {account['phone']} spam ban ተነሳ! እንደገና active ሆነ።")
                     except PeerFloodError:
@@ -998,16 +1072,16 @@ async def _spam_recovery_loop():
 
 
 # ============================================================
-# WORKER AUTO-JOIN TO SOURCE GROUP
+# WORKER AUTO-JOIN TO SOURCE GROUP  (hot path — wrapped in to_thread)
 # ============================================================
 
 async def _add_workers_to_source_group(group_id: int, owner_id: int = 0):
-    listeners = db_get_all_listeners(owner_id)
+    listeners = await asyncio.to_thread(db_get_all_listeners, owner_id)
     if not listeners:
         logger.warning("[WorkerAutoJoin] ⚠️ listener account የለም")
         return
 
-    accounts = db_get_all_accounts(owner_id)
+    accounts = await asyncio.to_thread(db_get_all_accounts, owner_id)
     workers = [a for a in accounts if not a.get("is_listener") and a.get("session")]
 
     if not workers:
@@ -1059,7 +1133,7 @@ async def _add_workers_to_source_group(group_id: int, owner_id: int = 0):
                 logger.info(f"[WorkerAutoJoin] ✅✅ [{worker['label']}] added to source group")
 
             except FloodWaitError as e:
-                db_set_flood(listener_account["phone"], e.seconds)
+                await asyncio.to_thread(db_set_flood, listener_account["phone"], e.seconds)
                 logger.warning(f"[WorkerAutoJoin] 🚫 Flood: {e.seconds}s")
                 break
             except Exception as e:
@@ -1075,7 +1149,7 @@ async def _add_workers_to_source_group(group_id: int, owner_id: int = 0):
 
 
 # ============================================================
-# AUTO-DETECT GROUPS
+# AUTO-DETECT GROUPS  (hot path — wrapped in to_thread)
 # ============================================================
 
 async def _auto_detect_groups(account: dict, owner_id: int = 0):
@@ -1085,17 +1159,7 @@ async def _auto_detect_groups(account: dict, owner_id: int = 0):
         async for dialog in client.iter_dialogs():
             if dialog.is_group or dialog.is_channel:
                 normalized_id = _normalize_source_id(dialog.id)
-                conn = get_conn()
-                cur = conn.cursor()
-                cur.execute("""
-                    INSERT INTO userbot_groups (owner_id, group_id, group_name, is_source)
-                    VALUES (%s, %s, %s, FALSE)
-                    ON CONFLICT (owner_id, group_id) DO UPDATE SET
-                        group_name=COALESCE(EXCLUDED.group_name, userbot_groups.group_name)
-                """, (owner_id, normalized_id, dialog.name))
-                conn.commit()
-                cur.close()
-                conn.close()
+                await asyncio.to_thread(_sql_upsert_detected_group, owner_id, normalized_id, dialog.name)
                 count += 1
         logger.info(f"✅ [{account['label']}] auto-detected {count} groups")
     except Exception as e:
@@ -1105,24 +1169,16 @@ async def _auto_detect_groups(account: dict, owner_id: int = 0):
 
 
 async def _sync_all_account_groups(owner_id: int = None):
-    conn = get_conn()
-    cur = conn.cursor()
-    if owner_id:
-        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE AND owner_id=%s", (owner_id,))
-    else:
-        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE")
-    owner_ids = [r[0] for r in cur.fetchall()]
-    cur.close()
-    conn.close()
+    owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_listeners, owner_id)
     for oid in owner_ids:
-        listeners = db_get_all_listeners(oid)
+        listeners = await asyncio.to_thread(db_get_all_listeners, oid)
         for account in listeners:
             if account.get("session"):
                 await _auto_detect_groups(account, oid)
 
 
 # ============================================================
-# TELETHON EVENT LISTENERS
+# TELETHON EVENT LISTENERS  (hot path — wrapped in to_thread)
 # ============================================================
 
 _telethon_clients = []
@@ -1139,19 +1195,10 @@ async def _reload_listeners(owner_id: int = None):
 
     await _sync_all_account_groups(owner_id)
 
-    # ሁሉም active owners ያግኝ
-    conn = get_conn()
-    cur = conn.cursor()
-    if owner_id:
-        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE AND owner_id=%s", (owner_id,))
-    else:
-        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE")
-    owner_ids = [r[0] for r in cur.fetchall()]
-    cur.close()
-    conn.close()
+    owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_listeners, owner_id)
 
     for oid in owner_ids:
-        groups = db_list_groups(oid)
+        groups = await asyncio.to_thread(db_list_groups, oid)
         source_ids = [_normalize_source_id(g[1]) for g in groups if g[3]]
 
         if not source_ids:
@@ -1160,7 +1207,7 @@ async def _reload_listeners(owner_id: int = None):
 
         logger.info(f"[Reload] ✅ owner={oid} source groups: {source_ids}")
 
-        listeners = db_get_all_listeners(oid)
+        listeners = await asyncio.to_thread(db_get_all_listeners, oid)
         for account in listeners:
             if not account.get("session"):
                 continue
@@ -1212,27 +1259,28 @@ async def _reload_listeners(owner_id: int = None):
                         finally:
                             await check_client.disconnect()
 
-                        db_record_message(user_id, chat_id)
+                        await asyncio.to_thread(db_record_message, user_id, chat_id)
 
-                        target_str = db_get_setting(o, "target_group_id")
+                        target_str = await asyncio.to_thread(db_get_setting, o, "target_group_id")
                         if not target_str:
                             return
 
                         target_group_id = int(target_str)
 
-                        if db_is_user_added(user_id, target_group_id):
+                        already_added = await asyncio.to_thread(db_is_user_added, user_id, target_group_id)
+                        if already_added:
                             return
 
-                        auto_add = db_get_setting(o, "auto_add_enabled") or "true"
+                        auto_add = (await asyncio.to_thread(db_get_setting, o, "auto_add_enabled")) or "true"
                         if auto_add == "false":
                             return
 
-                        daily_limit_str = db_get_setting(o, "daily_limit")
+                        daily_limit_str = await asyncio.to_thread(db_get_setting, o, "daily_limit")
                         if not daily_limit_str:
                             logger.info("[AutoAdd] ⏭ daily_limit አልተቀመጠም — auto add skip")
                             return
 
-                        chosen = get_next_account(o)
+                        chosen = await asyncio.to_thread(get_next_account, o)
                         if not chosen:
                             logger.warning("[AutoAdd] ⚠️ available worker account የለም!")
                             return
@@ -1253,7 +1301,7 @@ async def _reload_listeners(owner_id: int = None):
 async def _cleanup_loop():
     while True:
         await asyncio.sleep(3600)
-        db_cleanup_old_messages(24)
+        await asyncio.to_thread(db_cleanup_old_messages, 24)
         logger.info("✅ Old messages cleaned up")
 
 
@@ -1272,6 +1320,8 @@ _pending_sessions: dict = {}
 
 # ============================================================
 # COMMAND HANDLERS
+# (admin-triggered only, infrequent — left as direct sync DB calls
+# on purpose, see module docstring at top)
 # ============================================================
 
 async def cmd_adduadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1910,16 +1960,19 @@ async def cmd_e(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def _do_broadcast(msg, users: list, status_msg, owner_id: int = 0):
+    """Loops over potentially many users — wrapped in to_thread since a
+    large broadcast list would otherwise hold the event loop hostage for
+    its whole duration via repeated blocking DB calls between sends."""
     total = len(users)
     success = failed = 0
 
-    dm_accounts = get_dm_accounts(owner_id)
+    dm_accounts = await asyncio.to_thread(get_dm_accounts, owner_id)
     if not dm_accounts:
         await status_msg.edit_text("❌ DM accounts አልተሟሉም! ቢያንስ 6 worker accounts ያስፈልጋሉ።")
         return
 
     for i, user_id in enumerate(users):
-        account = get_next_dm_account(owner_id)
+        account = await asyncio.to_thread(get_next_dm_account, owner_id)
         if not account:
             await status_msg.edit_text("❌ Available DM account የለም!")
             return
@@ -1953,16 +2006,16 @@ async def _do_broadcast(msg, users: list, status_msg, owner_id: int = 0):
             finally:
                 await client.disconnect()
         except FloodWaitError as e:
-            db_set_flood(account["phone"], e.seconds)
+            await asyncio.to_thread(db_set_flood, account["phone"], e.seconds)
             failed += 1
         except PeerFloodError:
-            db_set_spam(account["phone"])
+            await asyncio.to_thread(db_set_spam, account["phone"])
             await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!")
             failed += 1
         except Exception as e:
             err = str(e).lower()
             if "blocked" in err or "privacy" in err:
-                db_mark_user_blocked(user_id)
+                await asyncio.to_thread(db_mark_user_blocked, user_id)
             else:
                 logger.warning(f"[Broadcast] {user_id}: {e}")
             failed += 1
