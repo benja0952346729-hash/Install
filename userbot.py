@@ -53,6 +53,14 @@ def init_userbot_db():
         )
     """)
 
+    # --- FIX: older deployments created userbot_accounts before owner_id
+    # existed (single-tenant era). Backfill it here too, same reason as
+    # userbot_settings below. ---
+    cur.execute("""
+        ALTER TABLE userbot_accounts
+        ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
+    """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS userbot_settings (
             owner_id BIGINT NOT NULL DEFAULT 0,
@@ -98,6 +106,13 @@ def init_userbot_db():
             added_at TIMESTAMP DEFAULT NOW(),
             UNIQUE(owner_id, group_id)
         )
+    """)
+
+    # --- FIX: same owner_id backfill for userbot_groups (older deployments
+    # created this table before multi-tenant owner_id was introduced). ---
+    cur.execute("""
+        ALTER TABLE userbot_groups
+        ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
     """)
 
     cur.execute("""
