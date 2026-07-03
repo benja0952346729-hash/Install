@@ -62,6 +62,32 @@ def init_userbot_db():
         )
     """)
 
+    # --- FIX: older deployments created userbot_settings before owner_id
+    # existed (single-tenant era). CREATE TABLE IF NOT EXISTS above is a
+    # no-op on those, so owner_id column (and the composite PK) never gets
+    # added. This backfills it safely for both old and new DBs. ---
+    cur.execute("""
+        ALTER TABLE userbot_settings
+        ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
+    """)
+
+    cur.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (
+                SELECT 1 FROM pg_constraint
+                WHERE conname = 'userbot_settings_pkey'
+                AND conrelid = 'userbot_settings'::regclass
+                AND array_length(conkey, 1) = 2
+            ) THEN
+                ALTER TABLE userbot_settings DROP CONSTRAINT IF EXISTS userbot_settings_pkey;
+                ALTER TABLE userbot_settings ADD PRIMARY KEY (owner_id, key);
+            END IF;
+        EXCEPTION WHEN OTHERS THEN
+            NULL;
+        END $$;
+    """)
+
     cur.execute("""
         CREATE TABLE IF NOT EXISTS userbot_groups (
             id SERIAL PRIMARY KEY,
