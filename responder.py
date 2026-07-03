@@ -1,4 +1,5 @@
 import re
+import os
 import math
 import random
 import logging
@@ -440,6 +441,46 @@ def cosine_similarity(vec_a: dict, vec_b: dict) -> float:
 print("🔧 Building intent vectors...")
 TFIDF_VECTORS, GLOBAL_IDF = build_tfidf(INTENT_EXAMPLES)
 print(f"✅ Intent engine ready — {len(TFIDF_VECTORS)} intents loaded")
+
+
+# ================================================================
+# TF-IDF LATIN RETRY THRESHOLD (env-configurable)
+# ================================================================
+# Jina embedding model latin/transliterated ጽሁፍ ላይ (ለምሳሌ "sint alegn")
+# ደካማ ውጤት ስለሚሰጥ፣ Jina "unknown" ሲመልስ (ግን ራሱ ሰርቶ ከሆነ — available=True)
+# እና ጽሁፉ latin ፊደል ካለው፣ TF-IDF ሁለተኛ ሙከራ (retry) ያደርጋል። ውጤቱ ከዚህ
+# threshold በላይ ከሆነ TF-IDF intent ተቀብሎ ጥቅም ላይ ይውላል።
+#
+# ENV OVERRIDE: TFIDF_LATIN_THRESHOLD env var ካለ ከዛ ይነበባል (redeploy
+# ሳያስፈልግ ለ testing ቁጥር መቀያየር እንዲቻል)። ካልተቀመጠ ወይም ልክ ያልሆነ ካልሆነ
+# ነባሪ 0.60 ይያዛል።
+def _read_tfidf_latin_threshold() -> float:
+    val = os.environ.get("TFIDF_LATIN_THRESHOLD")
+    if val is None:
+        return 0.60
+    try:
+        score = float(val)
+        if not (0.0 <= score <= 1.0):
+            logger.warning(
+                f"[Responder] TFIDF_LATIN_THRESHOLD={val} range (0.0-1.0) ውጪ ነው — ነባሪ 0.60 ይያዛል"
+            )
+            return 0.60
+        return score
+    except ValueError:
+        logger.warning(f"[Responder] TFIDF_LATIN_THRESHOLD='{val}' ቁጥር አይደለም — ነባሪ 0.60 ይያዛል")
+        return 0.60
+
+
+TFIDF_LATIN_THRESHOLD = _read_tfidf_latin_threshold()
+logger.info(
+    f"[Responder] TFIDF_LATIN_THRESHOLD = {TFIDF_LATIN_THRESHOLD} "
+    f"(env override: {'yes' if os.environ.get('TFIDF_LATIN_THRESHOLD') else 'no, default'})"
+)
+
+
+def _has_latin_chars(text: str) -> bool:
+    """ጽሁፉ ውስጥ ቢያንስ አንድ latin ፊደል (a-z/A-Z) ካለ True ይመልሳል።"""
+    return bool(re.search(r"[a-zA-Z]", text))
 
 
 # ================================================================
@@ -1652,7 +1693,8 @@ def _build_game_data_slice(kwargs: dict) -> dict:
 
 
 # ================================================================
-# ASYNC WRAPPER — booking ካልሆነ Jina ብቻ intent ይለያል
+# ASYNC WRAPPER — booking ካልሆነ Jina → (latin ከሆነ) TF-IDF retry →
+# AI fallback የሚል ቅደም ተከተል ይከተላል
 # ================================================================
 
 async def get_response_async(text: str, **kwargs) -> dict:
@@ -1662,15 +1704,24 @@ async def get_response_async(text: str, **kwargs) -> dict:
          is_clear_pattern=True) → intent detection ጨርሶ አይሞከርም፤
          ባዶ result ተመልሶ bot.py ራሱ parse_numbers/process_registration
          flow ይረከበዋል (ልክ ካለፈው ባህሪ ጋር ተመሳሳይ)።
-      2. booking ካልሆነ (ወይም ambiguous ከሆነ) → Jina embedding ብቻ
-         intent ይለያል (TF-IDF ጨርሶ አይጠራም) — synonym/paraphrase
-         generalization እንዲኖረው።
-      3. Jina "unknown" ከመለሰ ወይም Jina ready ካልሆነ → context-aware
-         NVIDIA fallback (ai_fallback.get_ai_fallback) የመጨረሻ አማራጭ
-         ሆኖ ይሞከራል — ያለፈውን conversation context + ትንሽ game data
-         slice ተጠቅሞ።
+      2. booking ካልሆነ (ወይም ambiguous ከሆነ) → Jina embedding መጀመሪያ
+         ይሞከራል።
+           a) Jina በራስ መተማመን intent መልሶ ከሆነ (≥ JINA_MIN_SCORE) →
+              ያ intent ጥቅም ላይ ይውላል።
+           b) Jina "unknown" ቢመልስ ግን ራሱ ሰርቶ ከሆነ (available=True) እና
+              ጽሁፉ latin ፊደል ካለው (transliterated Amharic፣ Jina በዚህ
+              ላይ ደካማ ስለሆነ) → TF-IDF ሁለተኛ ሙከራ ያደርጋል
+              (TFIDF_LATIN_THRESHOLD፣ default 0.60)። ውጤቱ threshold
+              በላይ ከሆነ TF-IDF intent ጥቅም ላይ ይውላል።
+           c) Jina ራሱ ጨርሶ ሊሰራ ካልቻለ (available=False — rate limit,
+              API/network error) ወይም ready ካልሆነ → TF-IDF ሙሉ ቁጥጥር
+              ይይዛል (legacy detect_intent() thresholds፣ 0.40/0.12)
+              እንደ primary detector።
+      3. ከላይ ያሉት ሁሉ ውጤት ያላመጡ ከሆነ (Jina unknown + latin ያልሆነ ወይም
+         latin retry ደካማ ውጤት ካመጣ) → context-aware NVIDIA fallback
+         (ai_fallback.get_ai_fallback) የመጨረሻ አማራጭ ሆኖ ይሞከራል።
 
-    ስኬታማ ውጤት ባገኘ ቁጥር (Jina resolved ወይም AI fallback resolved)
+    ስኬታማ ውጤት ባገኘ ቁጥር (Jina/TF-IDF resolved ወይም AI fallback resolved)
     save_context() ይጠራል፣ ስለዚህ ቀጣይ follow-up ጥያቄ ይህን context ያገኛል።
     """
     user_id = kwargs.get("user_id", 0)
@@ -1690,6 +1741,17 @@ async def get_response_async(text: str, **kwargs) -> dict:
         "number_owner_query": None,
     }
 
+    def _save_context_safe(used_intent: str, reply: str):
+        if reply and user_id and group_id:
+            try:
+                from ai_fallback import save_context
+                save_context(
+                    user_id, group_id, used_intent,
+                    _build_game_data_slice(kwargs), reply,
+                )
+            except Exception:
+                pass
+
     # ── STEP 1: ግልፅ booking pattern ከሆነ → intent detection skip ──
     price_full = float(settings.get("price_full") or 0)
     price_half = float(settings.get("price_half") or 0)
@@ -1702,30 +1764,57 @@ async def get_response_async(text: str, **kwargs) -> dict:
     if parsed and parsed.get("is_clear_pattern", True):
         return dict(empty_result)
 
-    # ── STEP 2: booking ካልሆነ → Jina ብቻ ──────────────────────────
+    # ── STEP 2: booking ካልሆነ → Jina መጀመሪያ ──────────────────────
     from jina_brain import jina_detect_intent, jina_is_ready
 
     if jina_is_ready():
         try:
-            jina_intent, jina_score = await jina_detect_intent(text)
+            jina_intent, jina_score, jina_available = await jina_detect_intent(text)
         except Exception as e:
             logger.warning(f"[Jina] detect error: {e}")
-            jina_intent, jina_score = "unknown", 0.0
+            jina_intent, jina_score, jina_available = "unknown", 0.0, False
 
+        # ✅ 2a: Jina በራስ መተማመን intent መልሷል → ተጠቀም
         if jina_intent != "unknown":
             result = get_response(text=text, intent=jina_intent, score=jina_score, **kwargs)
-            if result.get("reply") and user_id and group_id:
-                try:
-                    from ai_fallback import save_context
-                    save_context(
-                        user_id, group_id, jina_intent,
-                        _build_game_data_slice(kwargs), result["reply"],
-                    )
-                except Exception:
-                    pass
+            _save_context_safe(jina_intent, result.get("reply"))
             return result
 
-    # ── STEP 3: Jina "unknown" ወይም not ready → AI fallback (last resort) ──
+        # ⚠️ 2b: Jina ሰርቷል ግን "unknown" መለሰ (ዝቅተኛ score) —
+        # latin ጽሁፍ ከሆነ TF-IDF ሁለተኛ ሙከራ ያድርግ
+        if jina_available and _has_latin_chars(text):
+            tfidf_intent, tfidf_score = detect_intent(text)
+            if tfidf_score >= TFIDF_LATIN_THRESHOLD:
+                logger.info(
+                    f"[Responder] 🔤 Latin retry via TF-IDF | text='{text[:40]}' | "
+                    f"intent={tfidf_intent}({tfidf_score:.3f}) ≥ {TFIDF_LATIN_THRESHOLD}"
+                )
+                result = get_response(text=text, intent=tfidf_intent, score=tfidf_score, **kwargs)
+                _save_context_safe(tfidf_intent, result.get("reply"))
+                return result
+
+        # ❌ 2c: Jina ራሱ ሙሉ ለሙሉ ወድቋል (rate limit/API/network error)
+        # → TF-IDF ሙሉ ቁጥጥር ይያዝ (legacy thresholds በራሱ በ get_response ውስጥ)
+        if not jina_available:
+            logger.warning(
+                f"[Responder] 🚨 Jina completely down — TF-IDF full control | text='{text[:40]}'"
+            )
+            tfidf_intent, tfidf_score = detect_intent(text)
+            result = get_response(text=text, intent=tfidf_intent, score=tfidf_score, **kwargs)
+            _save_context_safe(tfidf_intent, result.get("reply"))
+            return result
+
+        # ↓ Jina available ግን (latin አይደለም ወይም TF-IDF ደካማ) → STEP 3 (AI fallback)
+
+    else:
+        # Jina ready ካልሆነ (init አልተሳካም/keys የሉም) → TF-IDF ሙሉ ቁጥጥር
+        logger.warning(f"[Responder] 🚨 Jina not ready — TF-IDF full control | text='{text[:40]}'")
+        tfidf_intent, tfidf_score = detect_intent(text)
+        result = get_response(text=text, intent=tfidf_intent, score=tfidf_score, **kwargs)
+        _save_context_safe(tfidf_intent, result.get("reply"))
+        return result
+
+    # ── STEP 3: Jina "unknown" (available, non-latin ወይም latin retry ደካማ) → AI fallback (last resort) ──
     if user_id and group_id:
         try:
             from ai_fallback import get_ai_fallback, save_context
