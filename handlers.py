@@ -1287,12 +1287,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
         announcement = "\n".join(lines)
         await msg.reply_text(announcement)
 
-        if _group_id:
-            try:
-                await bot.send_message(chat_id=_group_id, text=announcement)
-            except Exception:
-                pass
-
         return True
 
     except Exception as e:
