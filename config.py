@@ -62,6 +62,19 @@ NVIDIA_API_KEYS = [
 ]
 
 # ============================================================
+# MISTRAL API KEYS — እስከ 10 ይቻላል
+# (handlers.py's screenshot/winner-photo vision calls — mistral-small-2506)
+# ============================================================
+MISTRAL_API_KEYS = [
+    key.strip()
+    for key in [
+        os.environ.get(f"MISTRAL_API_KEY_{i}") or (os.environ.get("MISTRAL_API_KEY") if i == 1 else None)
+        for i in range(1, 11)
+    ]
+    if key and key.strip()
+]
+
+# ============================================================
 # JINA API KEYS — እስከ 10 ይቻላል
 # ============================================================
 JINA_API_KEYS = [
