@@ -468,64 +468,6 @@ def init_db():
 
 
 # ============================================================
-# WINNER PHOTO DEDUP
-# ============================================================
-
-def is_winner_photo_used(photo_unique_id: str) -> bool:
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM winner_photos WHERE photo_unique_id=%s", (photo_unique_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row is not None
-
-
-def save_winner_photo(photo_unique_id: str, group_id: int = None):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO winner_photos (photo_unique_id, group_id)
-        VALUES (%s, %s)
-        ON CONFLICT (photo_unique_id) DO NOTHING
-    """, (photo_unique_id, group_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-# ============================================================
-# ADMIN — OWNERSHIP REASSIGNMENT (reply-to-user "#/ NUM NUM+SLOT")
-# ============================================================
-
-def admin_set_owner(game_id: int, number: int, new_user_id: int, slot: int = None) -> bool:
-    """
-    ነባር registration ላይ user_id ብቻ ይቀይራል (user_name/is_paid/is_half ሳይነካ)።
-    ባለቤቱ manual/board-edit ስም ገብቶ ተመዝግቦ ከሆነ ግን telegram user_id
-    ካልተያያዘ፣ admin reply-ochenን ተጠቅሞ ትክክለኛውን ባለቤት ለማያያዝ ይጠቅማል።
-    slot ካልተሰጠ ያ ቁጥር ላይ ያሉትን ሁሉንም slots ይቀይራል።
-    ቁጥር ካልተገኘ False ይመልሳል።
-    """
-    conn = get_conn()
-    cur = conn.cursor()
-    if slot is not None:
-        cur.execute("""
-            UPDATE registrations SET user_id=%s
-            WHERE game_id=%s AND number=%s AND slot=%s
-        """, (new_user_id, game_id, number, slot))
-    else:
-        cur.execute("""
-            UPDATE registrations SET user_id=%s
-            WHERE game_id=%s AND number=%s
-        """, (new_user_id, game_id, number))
-    found = cur.rowcount > 0
-    conn.commit()
-    cur.close()
-    conn.close()
-    return found
-
-
-# ============================================================
 # COMPLETE STICKERS
 # ============================================================
 
@@ -565,6 +507,45 @@ def remove_complete_sticker_by_index(index: int) -> bool:
     cur.close()
     conn.close()
     return True
+
+
+def is_winner_photo_processed(photo_unique_id: str) -> bool:
+    """ያ photo ቀድሞ processed ሆኗል ወይ DB ላይ ያረጋግጥ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT 1 FROM winner_photos WHERE photo_unique_id=%s
+    """, (photo_unique_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def mark_winner_photo_processed(photo_unique_id: str, group_id: int = None):
+    """photo_unique_id DB ላይ ያስቀምጥ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO winner_photos (photo_unique_id, group_id)
+        VALUES (%s, %s)
+        ON CONFLICT (photo_unique_id) DO NOTHING
+    """, (photo_unique_id, group_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def cleanup_old_winner_photos(days: int = 3):
+    """3 ቀን ያለፋቸውን winner photos ያጸዳ"""
+    conn = get_conn()
+    cur = conn.cursor()
+    from datetime import datetime, timedelta
+    cutoff = datetime.now() - timedelta(days=days)
+    cur.execute("DELETE FROM winner_photos WHERE created_at < %s", (cutoff,))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 # ============================================================
