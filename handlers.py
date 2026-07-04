@@ -57,7 +57,7 @@ _groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS el
 # Model used for Groq text calls (llama-3.3-70b-versatile was deprecated
 # by Groq on 2026-06-17). qwen/qwen3.6-27b is Groq's recommended replacement.
 # Groq is now used for text-only calls (parse_sms, HTML parsing, Amharic
-# descriptions) — all vision/image calls go through NVIDIA/Gemini instead.
+# descriptions) — all vision/image calls go through Mistral/Gemini instead.
 GROQ_TEXT_MODEL = "qwen/qwen3.6-27b"
 
 
@@ -84,7 +84,7 @@ def _strip_think_block(text: str) -> str:
 
 def _extract_json_object(text: str) -> str:
     """Pull out just the {...} object from a response, even if the model
-    wrapped it in prose/explanation (e.g. NVIDIA narrating its reasoning
+    wrapped it in prose/explanation (e.g. a provider narrating its reasoning
     before the JSON, or markdown fences). Falls back to the original text
     (after fence-stripping) if no braces are found, so json.loads still
     gets a fair shot and raises a normal, catchable error."""
@@ -144,8 +144,8 @@ async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str
 
 
 # Groq vision — used ONLY as a last-resort fallback for analyze_winner_photo
-# (NVIDIA and Gemini are tried first). Kept because this used to work
-# reliably before the NVIDIA/Gemini switch.
+# (Mistral and Gemini are tried first). Kept because this used to work
+# reliably before the switch.
 GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
 
 
@@ -202,18 +202,29 @@ def _get_jina_key() -> str:
 
 
 # ============================================================
-# NVIDIA KEY ROTATION
+# MISTRAL KEY ROTATION  (replaces NVIDIA for vision — same rotation/
+# rate-limit/health-check structure as before, just pointed at a
+# different provider + model. NVIDIA_API_KEYS/config left untouched
+# elsewhere in case it's still referenced; this pool reads
+# MISTRAL_API_KEYS instead.)
 # ============================================================
+
+try:
+    from config import MISTRAL_API_KEYS
+except ImportError:
+    MISTRAL_API_KEYS = []
 
 _nvidia_index = 0
 _nvidia_clients = [
     OpenAI(
-        base_url="https://integrate.api.nvidia.com/v1",
+        base_url="https://api.mistral.ai/v1",
         api_key=key
-    ) for key in NVIDIA_API_KEYS
-] if NVIDIA_API_KEYS else []
+    ) for key in MISTRAL_API_KEYS
+] if MISTRAL_API_KEYS else []
 
-NVIDIA_RPM_LIMIT = 38
+MISTRAL_VISION_MODEL = "mistral-small-2506"
+
+NVIDIA_RPM_LIMIT = 280  # mistral-small-2506 dashboard limit ~300 RPM — kept a safety margin
 NVIDIA_WINDOW_SECONDS = 60
 NVIDIA_MAX_WAIT_SECONDS = 120
 NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
@@ -227,7 +238,7 @@ _nvidia_health_task_started = False
 def _get_nvidia_client():
     global _nvidia_index
     if not _nvidia_clients:
-        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+        raise RuntimeError("MISTRAL_API_KEYS ያልተቀመጠ!")
     client = _nvidia_clients[_nvidia_index]
     _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
     return client
@@ -265,11 +276,11 @@ async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
 
         now = time.time()
         if now >= deadline:
-            raise RuntimeError("All NVIDIA keys are at their rate limit — timed out waiting")
+            raise RuntimeError("All Mistral keys are at their rate limit — timed out waiting")
 
         wait_time = max(0.5, (soonest_free_at or now + 1) - now)
         wait_time = min(wait_time, deadline - now, 5)
-        logger.info(f"[NVIDIA] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
+        logger.info(f"[Mistral] ሁሉም keys busy — {wait_time:.1f}s እየጠበቅን...")
         await asyncio.sleep(wait_time)
 
 
@@ -295,7 +306,7 @@ async def _background_recheck_blocked_nvidia_keys():
                 try:
                     await asyncio.to_thread(
                         lambda c=client: c.chat.completions.create(
-                            model="meta/llama-4-maverick-17b-128e-instruct",
+                            model=MISTRAL_VISION_MODEL,
                             messages=[{"role": "user", "content": "ping"}],
                             max_tokens=1,
                         )
@@ -303,16 +314,16 @@ async def _background_recheck_blocked_nvidia_keys():
                     _nvidia_clear_blocked(idx)
                     async with _nvidia_lock:
                         _nvidia_call_times[idx].clear()
-                    logger.info(f"[NVIDIA Health] Key {idx} ነፃ ሆኗል — ወደ rotation ተመለሰ")
+                    logger.info(f"[Mistral Health] Key {idx} ነፃ ሆኗል — ወደ rotation ተመለሰ")
                 except Exception as e:
                     err_str = str(e).lower()
                     if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                        logger.info(f"[NVIDIA Health] Key {idx} ገና busy — {NVIDIA_HEALTH_RECHECK_INTERVAL//60} ደቂቃ ይጠብቅ")
+                        logger.info(f"[Mistral Health] Key {idx} ገና busy — {NVIDIA_HEALTH_RECHECK_INTERVAL//60} ደቂቃ ይጠብቅ")
                         _nvidia_mark_blocked(idx)
                     else:
-                        logger.warning(f"[NVIDIA Health] Key {idx} non-rate error during recheck: {e}")
+                        logger.warning(f"[Mistral Health] Key {idx} non-rate error during recheck: {e}")
         except Exception as loop_err:
-            logger.error(f"[NVIDIA Health] background loop error: {loop_err}", exc_info=True)
+            logger.error(f"[Mistral Health] background loop error: {loop_err}", exc_info=True)
 
 
 def ensure_nvidia_health_task_started():
@@ -322,7 +333,7 @@ def ensure_nvidia_health_task_started():
     _nvidia_health_task_started = True
     try:
         asyncio.create_task(_background_recheck_blocked_nvidia_keys())
-        logger.info("[NVIDIA Health] background recheck task started")
+        logger.info("[Mistral Health] background recheck task started")
     except RuntimeError:
         _nvidia_health_task_started = False
 
@@ -330,7 +341,7 @@ def ensure_nvidia_health_task_started():
 async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
     total_keys = len(_nvidia_clients)
     if total_keys == 0:
-        raise RuntimeError("NVIDIA_API_KEY ያልተቀመጠ!")
+        raise RuntimeError("MISTRAL_API_KEYS ያልተቀመጠ!")
 
     max_attempts = total_keys * 3
     last_error = None
@@ -340,14 +351,14 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
         try:
             client, idx = await _get_available_nvidia_client()
         except RuntimeError as e:
-            logger.warning(f"[NVIDIA] {e} — retrying once more after short wait")
+            logger.warning(f"[Mistral] {e} — retrying once more after short wait")
             await asyncio.sleep(2)
             continue
 
         try:
             response = await asyncio.to_thread(
                 lambda c=client: c.chat.completions.create(
-                    model="meta/llama-4-maverick-17b-128e-instruct",
+                    model=MISTRAL_VISION_MODEL,
                     messages=[{
                         "role": "user",
                         "content": [
@@ -362,27 +373,27 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
             _nvidia_clear_blocked(idx)
             raw = response.choices[0].message.content or ""
             text = raw.strip()
-            logger.info(f"[NVIDIA] raw response (key {idx+1}): {raw[:300]!r}")
+            logger.info(f"[Mistral] raw response (key {idx+1}): {raw[:300]!r}")
             if not text:
-                logger.warning(f"[NVIDIA] Key #{idx+1} returned empty content — attempt {attempt+1}/{max_attempts}")
+                logger.warning(f"[Mistral] Key #{idx+1} returned empty content — attempt {attempt+1}/{max_attempts}")
                 last_limited_idx = idx
                 continue
             if last_limited_idx is not None and last_limited_idx != idx:
-                logger.info(f"[NVIDIA] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
-            logger.info(f"[NVIDIA] ✅ Key #{idx+1}/{total_keys} used (llama-4-maverick)")
+                logger.info(f"[Mistral] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
+            logger.info(f"[Mistral] ✅ Key #{idx+1}/{total_keys} used ({MISTRAL_VISION_MODEL})")
             return text
         except Exception as e:
             last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
-                logger.warning(f"[NVIDIA] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
+                logger.warning(f"[Mistral] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
                 _nvidia_mark_blocked(idx)
                 last_limited_idx = idx
                 continue
-            logger.error(f"[NVIDIA] Non-rate error: {e}")
+            logger.error(f"[Mistral] Non-rate error: {e}")
             raise
 
-    raise RuntimeError(f"All NVIDIA keys exhausted after {max_attempts} attempts: {last_error}")
+    raise RuntimeError(f"All Mistral keys exhausted after {max_attempts} attempts: {last_error}")
 
 
 # ============================================================
@@ -996,7 +1007,7 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
 
 
 # ============================================================
-# SCREENSHOT ANALYZER — NVIDIA primary, Gemini fallback (Amharic)
+# SCREENSHOT ANALYZER — Mistral primary, Gemini fallback (Amharic)
 # ============================================================
 
 async def analyze_screenshot(image_base64: str) -> dict:
@@ -1044,17 +1055,17 @@ JSON object below, starting with { and ending with }.
     nvidia_parsed = None
     try:
         text = await _call_nvidia_with_rotation(image_base64, prompt)
-        logger.info(f"[Screenshot] NVIDIA raw response: {text[:300]!r}")
-        nvidia_parsed = _parse(text, "NVIDIA")
+        logger.info(f"[Screenshot] Mistral raw response: {text[:300]!r}")
+        nvidia_parsed = _parse(text, "Mistral")
     except Exception as e:
-        logger.warning(f"[Screenshot] NVIDIA failed/unparseable: {e}")
+        logger.warning(f"[Screenshot] Mistral failed/unparseable: {e}")
 
-    # Use Gemini if NVIDIA failed outright, OR if NVIDIA succeeded but flagged Amharic text
+    # Use Gemini if Mistral failed outright, OR if Mistral succeeded but flagged Amharic text
     needs_gemini = nvidia_parsed is None or nvidia_parsed.get("lang") == "amharic"
 
     if needs_gemini:
         try:
-            reason = "detected Amharic" if nvidia_parsed else "NVIDIA failed"
+            reason = "detected Amharic" if nvidia_parsed else "Mistral failed"
             logger.info(f"[Screenshot] → Gemini fallback ({reason})")
             text2 = await _call_gemini_with_rotation(image_base64, prompt)
             logger.info(f"[Screenshot] Gemini raw response: {text2[:300]!r}")
@@ -1062,18 +1073,18 @@ JSON object below, starting with { and ending with }.
         except Exception as e:
             logger.warning(f"[Screenshot] Gemini fallback failed: {e}")
             if nvidia_parsed is not None:
-                # NVIDIA succeeded (even if Amharic) — better than nothing
+                # Mistral succeeded (even if Amharic) — better than nothing
                 return nvidia_parsed
 
     if nvidia_parsed is not None:
         return nvidia_parsed
 
-    logger.error("[Screenshot] Both NVIDIA and Gemini failed to produce a parseable result")
+    logger.error("[Screenshot] Both Mistral and Gemini failed to produce a parseable result")
     return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
 
 
 # ============================================================
-# WINNER PHOTO ANALYZER — NVIDIA primary, Gemini fallback
+# WINNER PHOTO ANALYZER — Mistral primary, Gemini fallback
 # ============================================================
 
 async def analyze_winner_photo(image_base64: str, settings: dict) -> dict:
@@ -1117,7 +1128,7 @@ JSON object below, starting with {{ and ending with }}.
 }}"""
 
     providers = [
-        ("NVIDIA", _call_nvidia_with_rotation),
+        ("Mistral", _call_nvidia_with_rotation),
         ("Gemini", _call_gemini_with_rotation),
         ("Groq", _call_groq_vision_with_rotation),
     ]
@@ -1192,7 +1203,7 @@ JSON object below, starting with {{ and ending with }}.
         logger.warning(f"[Winner] Could not get a second opinion — using {provider_name}'s low-confidence result: {outcome['result']}")
         return outcome["result"]
 
-    logger.error("[Winner] All providers (NVIDIA, Gemini, Groq) failed to produce a parseable result")
+    logger.error("[Winner] All providers (Mistral, Gemini, Groq) failed to produce a parseable result")
     return None
 
 
