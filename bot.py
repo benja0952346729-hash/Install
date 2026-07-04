@@ -44,9 +44,8 @@ from database import (
     delete_winner,
     add_complete_sticker, get_complete_stickers, remove_complete_sticker_by_index,
     add_prebooking_media, get_prebooking_media, remove_prebooking_media_by_index,
+    is_winner_photo_processed, mark_winner_photo_processed, cleanup_old_winner_photos,
     get_user_balance,
-    is_winner_photo_used, save_winner_photo,
-    admin_set_owner,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -2170,99 +2169,6 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 
 # ============================================================
-# OWNER REASSIGNMENT — admin replies to a REAL USER's message with
-# "#/ 01 21 31+1" to attach that user's telegram_id to numbers that
-# were registered manually (board edit / /register) without a real
-# telegram user_id. Only fixes ownership (user_id) — user_name and
-# paid status entered by the admin are left untouched.
-#   #/ 01        → number 1, all slots → this user
-#   #/ 31+1      → number 31, slot 1 only → this user
-#   #/ 11        → if number 11 already belongs to someone else,
-#                   ownership is transferred to this user
-# ============================================================
-
-async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    msg = update.message
-    if not msg or not msg.text:
-        return
-
-    group_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id, group_id):
-        return
-
-    if not is_group_enabled(group_id):
-        return
-
-    if not is_group_active(group_id):
-        return
-
-    text = msg.text.strip()
-    if not text.startswith("#/"):
-        return
-
-    # winner-correction replies (reply to the BOT's Winners announcement)
-    # are handled by handle_winner_correction_reply — this handler is only
-    # for replies to a REAL USER's message (ownership fix).
-    if not msg.reply_to_message:
-        return
-    if not msg.reply_to_message.from_user:
-        return
-    if msg.reply_to_message.from_user.is_bot:
-        return
-
-    settings = get_active_settings(group_id=group_id)
-    if not settings:
-        return
-
-    game_id = settings["id"]
-    owner = msg.reply_to_message.from_user
-    owner_id = owner.id
-
-    parts = text[2:].strip().split()
-    if not parts:
-        await msg.reply_text("❌ ምሳሌ: #/ 01 21 31+1")
-        return
-
-    import re as _re_owner
-    assigned = []
-    errors = []
-
-    for part in parts:
-        slot_match = _re_owner.match(r'^(\d+)\+(\d+)$', part)
-        if slot_match:
-            number = int(slot_match.group(1))
-            slot = int(slot_match.group(2))
-        else:
-            try:
-                number = int(part.rstrip("+"))
-            except ValueError:
-                errors.append(part)
-                continue
-            slot = None
-
-        if number < 1 or number > settings["total_numbers"]:
-            errors.append(part)
-            continue
-
-        found = admin_set_owner(game_id, number, owner_id, slot=slot)
-        if found:
-            label = f"{number:02d}" + (f"+{slot}" if slot else "")
-            assigned.append(label)
-        else:
-            errors.append(part)
-
-    reply_lines = []
-    if assigned:
-        reply_lines.append(f"✅ {', '.join(assigned)} → ባለቤት ተስተካክሏል!")
-    if errors:
-        reply_lines.append(f"❌ ያልተገኘ: {', '.join(errors)}")
-    if reply_lines:
-        await msg.reply_text("\n".join(reply_lines))
-
-
-# ============================================================
 # ADMIN COMMANDS
 # ============================================================
 
@@ -2974,16 +2880,12 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         settings = get_active_settings(group_id=group_id)
         if settings:
             photo_uid = update.message.photo[-1].file_unique_id
-            # ✅ used ፎቶ ከሆነ (ቀድሞ real winner አምጥቶ የነበረ) AI ጨርሶ አንጠራም
-            if photo_uid in handled_winner_photos or is_winner_photo_used(photo_uid):
+            if photo_uid in handled_winner_photos:
                 return
+            handled_winner_photos.add(photo_uid)
 
             winner_found = await handle_winner_photo(ctx.bot, update.message, settings, group_id=group_id)
             if winner_found:
-                # ✅ winner ሲገኝ ብቻ ነው "used" የሚደረገው — not-lottery/failed ፎቶ
-                # ድጋሚ መላክ ቢቻል (retry) እንዲኖር used አይደረግም
-                handled_winner_photos.add(photo_uid)
-                save_winner_photo(photo_uid, group_id=group_id)
                 # announcement ወዲያውኑ ተላከ — board 30 seconds ቆይቶ ይምጣ
                 await asyncio.sleep(30)
                 await _auto_newgame(ctx.bot, settings, group_id)
@@ -3694,11 +3596,6 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_winner_correction_reply
-    ), group=-1)
-
-    app.add_handler(MessageHandler(
-        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
-        handle_owner_reply
     ), group=-1)
 
     app.add_handler(MessageHandler(
