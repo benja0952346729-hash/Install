@@ -325,6 +325,7 @@ def init_db():
             """)
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS sent BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS group_id BIGINT;")
+            cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS sent_amount NUMERIC DEFAULT 0;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_enabled BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS countdown_minutes NUMERIC DEFAULT 2;")
@@ -468,6 +469,64 @@ def init_db():
 
 
 # ============================================================
+# WINNER PHOTO DEDUP
+# ============================================================
+
+def is_winner_photo_used(photo_unique_id: str) -> bool:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT 1 FROM winner_photos WHERE photo_unique_id=%s", (photo_unique_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row is not None
+
+
+def save_winner_photo(photo_unique_id: str, group_id: int = None):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO winner_photos (photo_unique_id, group_id)
+        VALUES (%s, %s)
+        ON CONFLICT (photo_unique_id) DO NOTHING
+    """, (photo_unique_id, group_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# ADMIN — OWNERSHIP REASSIGNMENT (reply-to-user "#/ NUM NUM+SLOT")
+# ============================================================
+
+def admin_set_owner(game_id: int, number: int, new_user_id: int, slot: int = None) -> bool:
+    """
+    ነባር registration ላይ user_id ብቻ ይቀይራል (user_name/is_paid/is_half ሳይነካ)።
+    ባለቤቱ manual/board-edit ስም ገብቶ ተመዝግቦ ከሆነ ግን telegram user_id
+    ካልተያያዘ፣ admin reply-ochenን ተጠቅሞ ትክክለኛውን ባለቤት ለማያያዝ ይጠቅማል።
+    slot ካልተሰጠ ያ ቁጥር ላይ ያሉትን ሁሉንም slots ይቀይራል።
+    ቁጥር ካልተገኘ False ይመልሳል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    if slot is not None:
+        cur.execute("""
+            UPDATE registrations SET user_id=%s
+            WHERE game_id=%s AND number=%s AND slot=%s
+        """, (new_user_id, game_id, number, slot))
+    else:
+        cur.execute("""
+            UPDATE registrations SET user_id=%s
+            WHERE game_id=%s AND number=%s
+        """, (new_user_id, game_id, number))
+    found = cur.rowcount > 0
+    conn.commit()
+    cur.close()
+    conn.close()
+    return found
+
+
+# ============================================================
 # COMPLETE STICKERS
 # ============================================================
 
@@ -507,45 +566,6 @@ def remove_complete_sticker_by_index(index: int) -> bool:
     cur.close()
     conn.close()
     return True
-
-
-def is_winner_photo_processed(photo_unique_id: str) -> bool:
-    """ያ photo ቀድሞ processed ሆኗል ወይ DB ላይ ያረጋግጥ"""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT 1 FROM winner_photos WHERE photo_unique_id=%s
-    """, (photo_unique_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-    return row is not None
-
-
-def mark_winner_photo_processed(photo_unique_id: str, group_id: int = None):
-    """photo_unique_id DB ላይ ያስቀምጥ"""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        INSERT INTO winner_photos (photo_unique_id, group_id)
-        VALUES (%s, %s)
-        ON CONFLICT (photo_unique_id) DO NOTHING
-    """, (photo_unique_id, group_id))
-    conn.commit()
-    cur.close()
-    conn.close()
-
-
-def cleanup_old_winner_photos(days: int = 3):
-    """3 ቀን ያለፋቸውን winner photos ያጸዳ"""
-    conn = get_conn()
-    cur = conn.cursor()
-    from datetime import datetime, timedelta
-    cutoff = datetime.now() - timedelta(days=days)
-    cur.execute("DELETE FROM winner_photos WHERE created_at < %s", (cutoff,))
-    conn.commit()
-    cur.close()
-    conn.close()
 
 
 # ============================================================
@@ -1630,11 +1650,38 @@ def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        UPDATE winners SET sent=TRUE WHERE game_id=%s AND telegram_id=%s
-    """, (game_id, telegram_id))
+        UPDATE winners SET sent=TRUE, sent_amount=%s WHERE game_id=%s AND telegram_id=%s
+    """, (amount, game_id, telegram_id))
     conn.commit()
     cur.close()
     conn.close()
+
+
+def get_active_winner_for_user(game_id: int, telegram_id: int) -> dict:
+    """
+    Fix: group-chat #/<amount> reply ለ winner ክፍያ ማረጋገጫ ለመጠቀም፣ ይህ ሰው
+    ለዚህ (አሁን active) ጨዋታ real winner መሆኑን ያረጋግጣል፣ እና ቀድሞ ስንት ብር
+    እንደተላከለት (sent_amount) ይመልሳል (ካልተላከ 0)። Winner ካልሆነ None ይመልሳል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT place, prize, sent_amount, group_id
+        FROM winners
+        WHERE game_id=%s AND telegram_id=%s
+        ORDER BY place ASC LIMIT 1
+    """, (game_id, telegram_id))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not row:
+        return None
+    return {
+        "place": row[0],
+        "prize": float(row[1] or 0),
+        "sent_amount": float(row[2] or 0),
+        "group_id": row[3],
+    }
 
 
 def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None) -> dict:
@@ -1883,6 +1930,27 @@ def clear_prize_balance(group_id: int):
         SET winner_carried=TRUE,
             updated_at=NOW()
         WHERE group_id=%s AND winner_carried=FALSE AND prize_balance > 0
+    """, (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def clear_carry_balance(group_id: int):
+    """
+    Fix: /newgame በተጀመረ ቁጥር carry_balance (ተጫዋቾች manually ያስቀመጡት ተራ ገንዘብ)
+    ሙሉ በሙሉ ይጸዳል። prize_balance/winner_carried carry-over logic (ከላይ ያለው
+    clear_prize_balance) አልተነካም — ይህ function ከ clear_prize_balance ቀጥሎ
+    ብቻ ይጠራል። group_id የግድ ጥቅም ላይ ይውላል፣ ሌላ group's balances አይነካም።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE user_balance
+        SET carry_balance=0,
+            balance=prize_balance,
+            updated_at=NOW()
+        WHERE group_id=%s
     """, (group_id,))
     conn.commit()
     cur.close()
@@ -2881,37 +2949,4 @@ def calculate_game_profit(game_id: int) -> dict:
     """, (game_id,))
     row = cur.fetchone()
     if not row:
-        cur.close()
-        conn.close()
-        return {}
-
-    price_full, price_half, prize_1st, prize_2nd, prize_3rd, \
-        per_person, total_numbers, group_id = row
-
-    price_full = float(price_full or 0)
-    prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
-
-    cur.execute("""
-        SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
-    """, (game_id,))
-    filled_groups = cur.fetchone()[0] or 0
-
-    cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
-    registered_count = cur.fetchone()[0] or 0
-
-    total_bet = filled_groups * price_full
-    profit = total_bet - prize_total
-
-    cur.close()
-    conn.close()
-
-    return {
-        "game_id": game_id,
-        "group_id": group_id,
-        "filled_groups": filled_groups,
-        "total_bet": total_bet,
-        "prize_total": prize_total,
-        "profit": profit,
-        "registered_count": registered_count,
-        "counted": registered_count >= 15,
-    }
+        cur.c
