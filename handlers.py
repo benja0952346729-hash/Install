@@ -45,7 +45,13 @@ PAYMENT_SUCCESS_MESSAGES = [
 # confirm before the result is trusted. Tune this based on real logs —
 # lower = fewer cross-checks (faster/cheaper) but more risk of a silent
 # misread; higher = more cross-checks (slower) but safer.
-WINNER_CONFIDENCE_THRESHOLD = 99
+WINNER_CONFIDENCE_THRESHOLD = 90
+
+# Gemini is the second-opinion provider (only called when Mistral is below
+# WINNER_CONFIDENCE_THRESHOLD). Unlike Mistral, Gemini's result is trusted
+# outright (no cross-check against Mistral's reading needed) as long as its
+# own confidence clears this lower bar.
+GEMINI_TRUST_THRESHOLD = 75
 
 # ============================================================
 # GROQ KEY ROTATION
@@ -1127,12 +1133,6 @@ JSON object below, starting with {{ and ending with }}.
   "confidence": <integer 0-100>
 }}"""
 
-    providers = [
-        ("Mistral", _call_nvidia_with_rotation),
-        ("Gemini", _call_gemini_with_rotation),
-        ("Groq", _call_groq_vision_with_rotation),
-    ]
-
     async def _try_provider(provider_name: str, call_fn) -> Optional[dict]:
         """Call one provider and parse its response. Returns a dict with
         keys {result, confidence, raw_parsed} on success, or None on any failure."""
@@ -1171,39 +1171,47 @@ JSON object below, starting with {{ and ending with }}.
             confidence = 0
         return {"result": result, "confidence": confidence, "not_lottery": False}
 
-    for i, (provider_name, call_fn) in enumerate(providers):
-        outcome = await _try_provider(provider_name, call_fn)
-        if outcome is None:
-            continue  # this provider failed entirely — try the next one
+    # 1) Mistral first. High confidence (>= WINNER_CONFIDENCE_THRESHOLD) → trust it outright.
+    mistral_outcome = await _try_provider("Mistral", _call_nvidia_with_rotation)
+    if mistral_outcome and mistral_outcome["not_lottery"]:
+        return None  # valid classification (not a lottery photo)
 
-        if outcome["not_lottery"]:
-            return None  # valid classification (not a lottery photo)
+    if mistral_outcome and mistral_outcome["confidence"] >= WINNER_CONFIDENCE_THRESHOLD:
+        logger.info(f"[Winner] ✅ Analyzed via Mistral (confidence={mistral_outcome['confidence']}) | result={mistral_outcome['result']}")
+        return mistral_outcome["result"]
 
-        if outcome["confidence"] >= WINNER_CONFIDENCE_THRESHOLD:
-            logger.info(f"[Winner] ✅ Analyzed via {provider_name} (confidence={outcome['confidence']}) | result={outcome['result']}")
-            return outcome["result"]
+    # 2) Mistral missing/failed/low-confidence → ask Gemini. Gemini's own
+    # reading is trusted outright (no cross-check against Mistral) as long
+    # as it clears the lower GEMINI_TRUST_THRESHOLD bar.
+    if mistral_outcome:
+        logger.info(f"[Winner] Mistral confidence={mistral_outcome['confidence']} < {WINNER_CONFIDENCE_THRESHOLD} — asking Gemini")
+    else:
+        logger.info("[Winner] Mistral unavailable — asking Gemini")
 
-        # Low confidence — get a second opinion from the remaining providers
-        logger.info(f"[Winner] {provider_name} confidence={outcome['confidence']} < {WINNER_CONFIDENCE_THRESHOLD} — seeking a second opinion")
-        for confirm_name, confirm_fn in providers[i + 1:]:
-            confirm_outcome = await _try_provider(confirm_name, confirm_fn)
-            if confirm_outcome is None or confirm_outcome["not_lottery"]:
-                continue  # couldn't get a usable second opinion from this one — try the next
-            if confirm_outcome["result"] == outcome["result"]:
-                logger.info(f"[Winner] ✅ Confirmed by {confirm_name} | result={outcome['result']}")
-                return outcome["result"]
-            else:
-                logger.warning(
-                    f"[Winner] ⚠️ Disagreement: {provider_name}={outcome['result']} vs "
-                    f"{confirm_name}={confirm_outcome['result']} — trusting {confirm_name}'s reading"
-                )
-                return confirm_outcome["result"]
+    gemini_outcome = await _try_provider("Gemini", _call_gemini_with_rotation)
+    if gemini_outcome and gemini_outcome["not_lottery"]:
+        return None  # valid classification (not a lottery photo)
 
-        # No other provider could confirm or deny — fall back to the low-confidence result
-        logger.warning(f"[Winner] Could not get a second opinion — using {provider_name}'s low-confidence result: {outcome['result']}")
-        return outcome["result"]
+    if gemini_outcome and gemini_outcome["confidence"] >= GEMINI_TRUST_THRESHOLD:
+        logger.info(f"[Winner] ✅ Analyzed via Gemini (confidence={gemini_outcome['confidence']}) | result={gemini_outcome['result']}")
+        return gemini_outcome["result"]
 
-    logger.error("[Winner] All providers (Mistral, Gemini, Groq) failed to produce a parseable result")
+    # 3) Neither provider cleared its trust bar — fall back to whichever
+    # reading we do have, preferring the higher-confidence one.
+    if gemini_outcome and mistral_outcome:
+        if gemini_outcome["confidence"] >= mistral_outcome["confidence"]:
+            logger.warning(f"[Winner] Neither cleared trust bar — using Gemini's lower-confidence result: {gemini_outcome['result']} (confidence={gemini_outcome['confidence']})")
+            return gemini_outcome["result"]
+        logger.warning(f"[Winner] Neither cleared trust bar — using Mistral's lower-confidence result: {mistral_outcome['result']} (confidence={mistral_outcome['confidence']})")
+        return mistral_outcome["result"]
+    if gemini_outcome:
+        logger.warning(f"[Winner] Only Gemini responded (low confidence) — using its result: {gemini_outcome['result']} (confidence={gemini_outcome['confidence']})")
+        return gemini_outcome["result"]
+    if mistral_outcome:
+        logger.warning(f"[Winner] Only Mistral responded (low confidence) — using its result: {mistral_outcome['result']} (confidence={mistral_outcome['confidence']})")
+        return mistral_outcome["result"]
+
+    logger.error("[Winner] Both Mistral and Gemini failed to produce a parseable result")
     return None
 
 
