@@ -2196,21 +2196,10 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not msg or not msg.text:
         return
 
-    group_id = update.effective_chat.id
-    user_id = update.effective_user.id
-
-    if not is_admin(user_id, group_id):
-        return
-
-    if not is_group_enabled(group_id):
-        return
-
-    if not is_group_active(group_id):
-        return
-
     text = msg.text.strip()
 
-    # ✅ FIX: 2 ሙሉ በሙሉ የተለያዩ syntax — እንዳይምታቱ
+    # ✅ FIX: 2 ሙሉ በሙሉ የተለያዩ syntax — እንዳይምታቱ (ይህ ፍተሻ ቀድሞ እንዲደረግ
+    # ተንቀሳቅሷል፣ ስለዚህ "#" ባልጀመረ message ላይ ዋጋ የሌለው DB call አይደረግም)
     #   "#<amount>"   (ስላሽ የለውም) → Winner ክፍያ ብቻ, ለምሳሌ #300
     #   "#/ NUM ..."  (ስላሽ አለው)  → Owner reassignment ብቻ, ለምሳሌ #/ 01 21 31+1
     is_payment_form = text.startswith("#") and not text.startswith("#/")
@@ -2218,14 +2207,34 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not (is_payment_form or is_owner_form):
         return
 
+    logging.info(f"[OwnerReply] Triggered: text={text!r} chat={update.effective_chat.id} user={update.effective_user.id}")
+
+    group_id = update.effective_chat.id
+    user_id = update.effective_user.id
+
+    if not is_admin(user_id, group_id):
+        logging.info(f"[OwnerReply] Rejected: user {user_id} is not admin in group {group_id}")
+        return
+
+    if not is_group_enabled(group_id):
+        logging.info(f"[OwnerReply] Rejected: group {group_id} not enabled")
+        return
+
+    if not is_group_active(group_id):
+        logging.info(f"[OwnerReply] Rejected: group {group_id} not active")
+        return
+
     # winner-correction replies (reply to the BOT's Winners announcement)
     # are handled by handle_winner_correction_reply — this handler is only
     # for replies to a REAL USER's message (ownership fix / payment).
     if not msg.reply_to_message:
+        logging.info("[OwnerReply] Rejected: not a reply to any message")
         return
     if not msg.reply_to_message.from_user:
+        logging.info("[OwnerReply] Rejected: reply_to_message has no from_user")
         return
     if msg.reply_to_message.from_user.is_bot:
+        logging.info("[OwnerReply] Rejected: replied-to message is from the bot (handled elsewhere)")
         return
 
     owner = msg.reply_to_message.from_user
@@ -2249,6 +2258,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         winner_record = get_recent_winner_for_user(group_id, owner_id)
         if not winner_record:
+            logging.info(f"[OwnerReply] Payment rejected: telegram_id {owner_id} has no recent winner record with prize_balance>0 in group {group_id}")
             await msg.reply_text("❌ ይህ ሰው በቅርብ ጊዜ winner አይደለም — ክፍያ አይሰራም!")
             return
 
@@ -3817,10 +3827,14 @@ def main():
         handle_winner_correction_reply
     ), group=-1)
 
+    # ✅ FIX: የራሱ group (-2) ላይ መመዝገብ አለበት! python-telegram-bot በአንድ
+    # group ውስጥ የመጀመሪያውን filter-matching handler ብቻ ይጠራል — ይህ
+    # ከ handle_winner_correction_reply ጋር ተመሳሳይ group (-1) እና ተመሳሳይ
+    # filter ስለነበረው፣ ፈጽሞ አይጠራም ነበር (dead code)።
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_owner_reply
-    ), group=-1)
+    ), group=-2)
 
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
