@@ -2208,12 +2208,18 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     text = msg.text.strip()
-    if not text.startswith("#/"):
+
+    # ✅ FIX: 2 ሙሉ በሙሉ የተለያዩ syntax — እንዳይምታቱ
+    #   "#<amount>"   (ስላሽ የለውም) → Winner ክፍያ ብቻ, ለምሳሌ #300
+    #   "#/ NUM ..."  (ስላሽ አለው)  → Owner reassignment ብቻ, ለምሳሌ #/ 01 21 31+1
+    is_payment_form = text.startswith("#") and not text.startswith("#/")
+    is_owner_form = text.startswith("#/")
+    if not (is_payment_form or is_owner_form):
         return
 
     # winner-correction replies (reply to the BOT's Winners announcement)
     # are handled by handle_winner_correction_reply — this handler is only
-    # for replies to a REAL USER's message (ownership fix).
+    # for replies to a REAL USER's message (ownership fix / payment).
     if not msg.reply_to_message:
         return
     if not msg.reply_to_message.from_user:
@@ -2221,74 +2227,85 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if msg.reply_to_message.from_user.is_bot:
         return
 
-    settings = get_active_settings(group_id=group_id)
-    if not settings:
-        return
-
-    game_id = settings["id"]
     owner = msg.reply_to_message.from_user
     owner_id = owner.id
 
-    parts = text[2:].strip().split()
-    if not parts:
-        await msg.reply_text("❌ ምሳሌ: #/ 01 21 31+1  ወይም  #/ 300 (ለ winner ክፍያ)")
-        return
-
     import re as _re_owner
 
-    # ✅ WINNER PAYMENT/CORRECTION: reply ተደረገበት ሰው ለአሁኑ ጨዋታ real winner
-    # ሆኖ፣ "#/<amount>" (አንድ ቁጥር ብቻ) ከሆነ — AI/userbot ሳይጠቀም admin ራሱ
-    # ስንት ብር እንደላከ በ reply ያረጋግጣል። ድጋሚ ተመሳሳይ ሰው (የትኛውም message ላይ)
-    # #/<new_amount> ቢልክ፣ ቀድሞ የተላከው ይሻራል (reverse) እና አዲሱ amount ብቻ
-    # ተቀናሽ ይደረጋል (ድምር ሳይሆን ትክክለኛው የመጨረሻ amount ብቻ ውጤት ይሆናል)።
-    if len(parts) == 1:
-        amount_match = _re_owner.match(r'^(\d+(?:\.\d+)?)$', parts[0])
-        if amount_match:
-            winner_record = get_recent_winner_for_user(group_id, owner_id)
-            if winner_record:
-                new_amount = float(amount_match.group(1))
-                prev_sent = winner_record["sent_amount"]
-                place = winner_record["place"]
-                win_game_id = winner_record["game_id"]
-                delta = new_amount - prev_sent
+    if is_payment_form:
+        # ✅ WINNER PAYMENT/CORRECTION: "#<amount>" (ስላሽ የለውም) — reply
+        # ተደረገበት ሰው real winner ሆኖ ብቻ ይሰራል። AI/userbot ሳይጠቀም admin ራሱ
+        # ስንት ብር እንደላከ በ reply ያረጋግጣል። ይህ active game መኖር አያስፈልገውም
+        # (ገንዘቡ ቀድሞ ለተመዘገበ winner ብቻ ስለሚሰራ)። ድጋሚ ተመሳሳይ ሰው (የትኛውም
+        # message ላይ) #<new_amount> ቢልክ፣ ቀድሞ የተላከው ይሻራል (reverse) እና
+        # አዲሱ amount ብቻ ተቀናሽ ይደረጋል (ድምር ሳይሆን ትክክለኛው የመጨረሻ amount ብቻ
+        # ውጤት ይሆናል)።
+        body = text[1:].strip()
+        amount_match = _re_owner.match(r'^(\d+(?:\.\d+)?)$', body)
+        if not amount_match:
+            await msg.reply_text("❌ ምሳሌ: #300  (ለ winner ክፍያ ብቻ፣ ቁጥር ብቻ ጻፍ)")
+            return
 
-                result = deduct_winner_balance(game_id, owner_id, delta, group_id=group_id)
-                new_balance = result["new_balance"]
-                mark_winner_sent(win_game_id, owner_id, new_amount)
+        winner_record = get_recent_winner_for_user(group_id, owner_id)
+        if not winner_record:
+            await msg.reply_text("❌ ይህ ሰው በቅርብ ጊዜ winner አይደለም — ክፍያ አይሰራም!")
+            return
 
-                try:
-                    from ai_fallback import log_transaction
-                    log_transaction(
-                        group_id=group_id, game_id=game_id,
-                        telegram_id=owner_id, amount=-delta,
-                        reason="winner_sent" if prev_sent == 0 else "winner_sent_correction",
-                        done_by="admin", balance_after=new_balance,
-                    )
-                except Exception as _log_err:
-                    logging.warning(f"[log_transaction] Error: {_log_err}")
+        new_amount = float(amount_match.group(1))
+        prev_sent = winner_record["sent_amount"]
+        place = winner_record["place"]
+        win_game_id = winner_record["game_id"]
+        delta = new_amount - prev_sent
 
-                place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(place, f"{place}ኛ")
-                winner_name = owner.first_name or owner.username or "Unknown"
+        result = deduct_winner_balance(win_game_id, owner_id, delta, group_id=group_id)
+        new_balance = result["new_balance"]
+        mark_winner_sent(win_game_id, owner_id, new_amount)
 
-                if prev_sent > 0 and prev_sent != new_amount:
-                    out_text = f"✏️ {place_label} winner: {winner_name} → ተስተካክሏል: ETB {prev_sent:.0f} → ETB {new_amount:.0f}"
-                else:
-                    out_text = f"💸 {place_label} winner: {winner_name} → ETB {new_amount:.0f} ተልኳል"
+        try:
+            from ai_fallback import log_transaction
+            log_transaction(
+                group_id=group_id, game_id=win_game_id,
+                telegram_id=owner_id, amount=-delta,
+                reason="winner_sent" if prev_sent == 0 else "winner_sent_correction",
+                done_by="admin", balance_after=new_balance,
+            )
+        except Exception as _log_err:
+            logging.warning(f"[log_transaction] Error: {_log_err}")
 
-                # ✅ ተቀባይነት ስላገኘ ብቻ admin's own "#/<amount>" message ይጠፋል
-                try:
-                    await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
-                except Exception:
-                    pass
+        place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(place, f"{place}ኛ")
+        winner_name = owner.first_name or owner.username or "Unknown"
 
-                await ctx.bot.send_message(chat_id=group_id, text=out_text)
+        if prev_sent > 0 and prev_sent != new_amount:
+            out_text = f"✏️ {place_label} winner: {winner_name} → ተስተካክሏል: ETB {prev_sent:.0f} → ETB {new_amount:.0f}"
+        else:
+            out_text = f"💸 {place_label} winner: {winner_name} → ETB {new_amount:.0f} ተልኳል"
 
-                fresh = get_active_settings(group_id=group_id)
-                if fresh:
-                    await _refresh_board(ctx, fresh, group_id)
-                return
-            # winner ካልሆነ → ወደ ታች owner-reassignment logic ይቀጥላል (ለምሳሌ
-            # ቁጥር ባለቤት ማስተካከያ አድርጎ ሊሆን ስለሚችል)
+        # ✅ ተቀባይነት ስላገኘ ብቻ admin's own "#<amount>" message ይጠፋል
+        try:
+            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+        except Exception:
+            pass
+
+        await ctx.bot.send_message(chat_id=group_id, text=out_text)
+
+        fresh = get_active_settings(group_id=group_id)
+        if fresh:
+            await _refresh_board(ctx, fresh, group_id)
+        return
+
+    # ============================================================
+    # OWNER REASSIGNMENT — "#/ NUM NUM+SLOT" ብቻ (ስላሽ አለው)፣ active
+    # game ያስፈልገዋል (total_numbers ማረጋገጥ ስላለበት)
+    # ============================================================
+    settings = get_active_settings(group_id=group_id)
+    if not settings:
+        return
+    game_id = settings["id"]
+
+    parts = text[2:].strip().split()
+    if not parts:
+        await msg.reply_text("❌ ምሳሌ: #/ 01 21 31+1")
+        return
 
     assigned = []
     errors = []
