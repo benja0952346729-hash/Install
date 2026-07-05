@@ -332,6 +332,7 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS game_rule TEXT;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS pre_wipe_snapshot JSONB;")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS carry_balance NUMERIC DEFAULT 0;")
@@ -1497,6 +1498,14 @@ def get_user_by_number(game_id: int, number: int) -> dict:
 
 
 def get_users_by_number(game_id: int, number: int) -> list:
+    """
+    ✅ FIX: pre-booking ሲጀምር (handle_video_chat_started) registrations
+    በጸጥታ ይጠፋሉ። Winner photo ገና ውጤቱ ካልታወቀ በፊት ይህ ቢፈጠር፣ live
+    registrations ምንም ስለማይገኝ "user አልተገኘም" ይሆናል። ስለዚህ live ውጤት ባዶ
+    ከሆነ፣ ከመጥፋቱ በፊት የተቀመጠውን game_settings.pre_wipe_snapshot ላይ
+    ተመልክቶ ትክክለኛውን ባለቤት ያገኛል። ይህ ማንኛውም caller (handlers.py፣
+    userbot2.py፣ ወዘተ) ራሱ ምንም ሳይቀየር በራሱ ይጠቀማል።
+    """
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -1507,7 +1516,65 @@ def get_users_by_number(game_id: int, number: int) -> list:
     rows = cur.fetchall()
     cur.close()
     conn.close()
-    return [{"telegram_id": r[0], "user_name": r[1], "slot": r[2], "is_half": r[3]} for r in rows]
+
+    live = [{"telegram_id": r[0], "user_name": r[1], "slot": r[2], "is_half": r[3]} for r in rows]
+    if live:
+        return live
+
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT pre_wipe_snapshot FROM game_settings WHERE id=%s", (game_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    if not row or not row[0]:
+        return []
+
+    snapshot = row[0]
+    if isinstance(snapshot, str):
+        try:
+            snapshot = _json.loads(snapshot)
+        except Exception:
+            return []
+
+    entry = snapshot.get(str(number))
+    return entry if entry else []
+
+
+def save_registrations_snapshot(game_id: int):
+    """
+    Fix: pre-booking ሲጀምር (handle_video_chat_started) registrations
+    በጸጥታ ይጠፋሉ። Winner photo ገና ውጤቱ ካልታወቀ በፊት ይህ ቢፈጠር፣ winner
+    lookup ምንም ማግኘት ስለማይችል "user አልተገኘም" ይሆናል። ስለዚህ ከመጥፋቱ በፊት
+    ነባሩን registrations ሙሉ በሙሉ (number→users mapping) snapshot አድርጎ
+    game_settings.pre_wipe_snapshot ላይ ያስቀምጣል። ነባሩ wipe logic ራሱ
+    ምንም አልተነካም — ይህ ተጨማሪ safety net ብቻ ነው።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT number, user_id, user_name, slot, is_half
+        FROM registrations WHERE game_id=%s
+    """, (game_id,))
+    rows = cur.fetchall()
+
+    snapshot = {}
+    for number, user_id, user_name, slot, is_half in rows:
+        key = str(number)
+        snapshot.setdefault(key, []).append({
+            "telegram_id": user_id,
+            "user_name": user_name,
+            "slot": slot,
+            "is_half": is_half,
+        })
+
+    cur.execute("""
+        UPDATE game_settings SET pre_wipe_snapshot=%s WHERE id=%s
+    """, (_json.dumps(snapshot), game_id))
+    conn.commit()
+    cur.close()
+    conn.close()
 
 
 def add_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None):
