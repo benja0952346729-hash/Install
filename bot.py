@@ -49,6 +49,7 @@ from database import (
     admin_set_owner,
     clear_carry_balance,
     get_recent_winner_for_user,
+    save_registrations_snapshot,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -3562,6 +3563,11 @@ async def handle_video_chat_started(update: Update, ctx: ContextTypes.DEFAULT_TY
         return
 
     game_id = settings["id"]
+
+    # ✅ FIX: registrations ከመጥፋቱ በፊት snapshot ያድርግ — winner photo
+    # ገና ውጤቱ ካልታወቀ (ገና admin ካልላከው) በፊት pre-booking ቢጀምር፣ winner
+    # lookup snapshot ላይ ተመልክቶ ትክክለኛውን ባለቤት ማግኘት ይችላል
+    save_registrations_snapshot(game_id)
 
     # silently clear registrations only (game_settings row ይቀራል)
     conn = get_conn()
