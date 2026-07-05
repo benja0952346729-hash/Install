@@ -2936,4 +2936,61 @@ def get_report(group_id: int) -> dict:
     }
 
 
-def clea
+def cleanup_old_reports():
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=24)
+    try:
+        cur.execute("DELETE FROM game_reports WHERE created_at < %s", (cutoff,))
+        conn.commit()
+    except Exception:
+        pass
+    cur.close()
+    conn.close()
+
+
+def calculate_game_profit(game_id: int) -> dict:
+    conn = get_conn()
+    cur = conn.cursor()
+
+    cur.execute("""
+        SELECT price_full, price_half, prize_1st, prize_2nd, prize_3rd,
+               numbers_per_person, total_numbers, group_id
+        FROM game_settings WHERE id=%s
+    """, (game_id,))
+    row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return {}
+
+    price_full, price_half, prize_1st, prize_2nd, prize_3rd, \
+        per_person, total_numbers, group_id = row
+
+    price_full = float(price_full or 0)
+    prize_total = float((prize_1st or 0) + (prize_2nd or 0) + (prize_3rd or 0))
+
+    cur.execute("""
+        SELECT COUNT(DISTINCT number) FROM registrations WHERE game_id=%s
+    """, (game_id,))
+    filled_groups = cur.fetchone()[0] or 0
+
+    cur.execute("SELECT COUNT(*) FROM registrations WHERE game_id=%s", (game_id,))
+    registered_count = cur.fetchone()[0] or 0
+
+    total_bet = filled_groups * price_full
+    profit = total_bet - prize_total
+
+    cur.close()
+    conn.close()
+
+    return {
+        "game_id": game_id,
+        "group_id": group_id,
+        "filled_groups": filled_groups,
+        "total_bet": total_bet,
+        "prize_total": prize_total,
+        "profit": profit,
+        "registered_count": registered_count,
+        "counted": registered_count >= 15,
+    }
