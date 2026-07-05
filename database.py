@@ -1657,30 +1657,41 @@ def mark_winner_sent(game_id: int, telegram_id: int, amount: float):
     conn.close()
 
 
-def get_active_winner_for_user(game_id: int, telegram_id: int) -> dict:
+def get_recent_winner_for_user(group_id: int, telegram_id: int, hours: int = 24) -> dict:
     """
     Fix: group-chat #/<amount> reply ለ winner ክፍያ ማረጋገጫ ለመጠቀም፣ ይህ ሰው
-    ለዚህ (አሁን active) ጨዋታ real winner መሆኑን ያረጋግጣል፣ እና ቀድሞ ስንት ብር
-    እንደተላከለት (sent_amount) ይመልሳል (ካልተላከ 0)። Winner ካልሆነ None ይመልሳል።
+    በዚህ group ላይ በቅርብ ጊዜ (default 24 ሰዓት) real winner መሆኑን ያረጋግጣል
+    (ልክ /winners command እንደሚያደርገው) — active game_id ገና ተቀይሮ ቢሆንም እንኳ
+    (ለምሳሌ admin /setgame ካደረገ) ያለፈውን winner ማግኘት ይችላል።
+
+    ✅ FIX: ነባሩ prize_balance carry-over ስርዓት (clear_prize_balance 2-cycle)
+    ራሱ እውነተኛው ገደብ ሆኖ ያገለግላል — ተጫዋቹ prize_balance > 0 ገና ካለው ብቻ
+    ይገኛል (ማለትም ገንዘቡ ገና ካልጸዳ)። ስለዚህ round 1 ላይ ያሸነፈ ሰው round 3 ላይ
+    (2 newgame cycles አልፎ prize_balance ቀድሞ ከጸዳ) አይገኝም — ግን round 2 ላይ
+    ያሸነፈ ሰው round 3 ላይ (still within carry window) በትክክል ይገኛል።
     """
     conn = get_conn()
     cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=hours)
     cur.execute("""
-        SELECT place, prize, sent_amount, group_id
-        FROM winners
-        WHERE game_id=%s AND telegram_id=%s
-        ORDER BY place ASC LIMIT 1
-    """, (game_id, telegram_id))
+        SELECT w.game_id, w.place, w.prize, w.sent_amount
+        FROM winners w
+        JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
+        WHERE w.group_id=%s AND w.telegram_id=%s
+          AND w.created_at >= %s
+          AND ub.prize_balance > 0
+        ORDER BY w.created_at DESC LIMIT 1
+    """, (group_id, telegram_id, cutoff))
     row = cur.fetchone()
     cur.close()
     conn.close()
     if not row:
         return None
     return {
-        "place": row[0],
-        "prize": float(row[1] or 0),
-        "sent_amount": float(row[2] or 0),
-        "group_id": row[3],
+        "game_id": row[0],
+        "place": row[1],
+        "prize": float(row[2] or 0),
+        "sent_amount": float(row[3] or 0),
     }
 
 
@@ -2925,28 +2936,4 @@ def get_report(group_id: int) -> dict:
     }
 
 
-def cleanup_old_reports():
-    conn = get_conn()
-    cur = conn.cursor()
-    cutoff = datetime.now() - timedelta(hours=24)
-    try:
-        cur.execute("DELETE FROM game_reports WHERE created_at < %s", (cutoff,))
-        conn.commit()
-    except Exception:
-        pass
-    cur.close()
-    conn.close()
-
-
-def calculate_game_profit(game_id: int) -> dict:
-    conn = get_conn()
-    cur = conn.cursor()
-
-    cur.execute("""
-        SELECT price_full, price_half, prize_1st, prize_2nd, prize_3rd,
-               numbers_per_person, total_numbers, group_id
-        FROM game_settings WHERE id=%s
-    """, (game_id,))
-    row = cur.fetchone()
-    if not row:
-        cur.c
+def clea
