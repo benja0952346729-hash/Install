@@ -48,7 +48,7 @@ from database import (
     is_winner_photo_used, save_winner_photo,
     admin_set_owner,
     clear_carry_balance,
-    get_active_winner_for_user,
+    get_recent_winner_for_user,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -785,6 +785,7 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     game_id = settings["id"]
+    per_person = settings["numbers_per_person"]
     taken = get_taken_numbers(game_id)
 
     numbers = []   # (num, is_half, slot_only) — slot_only=None means all slots
@@ -797,16 +798,20 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if slot_match:
             num = int(slot_match.group(1))
             slot = int(slot_match.group(2))
-            if num < 1 or num > settings["total_numbers"]:
+            # ✅ FIX: 1-5 ቡድን ቢሆን (numbers_per_person>1)፣ ማንኛውም ቁጥር
+            # በዚያ ቡድን ውስጥ (ለምሳሌ 4) → group's first number (1) ይሆናል፣
+            # ምክንያቱም DB ላይ የተመዘገበው በ group start ብቻ ነው
+            actual_num = get_group_start(num, per_person) if per_person > 1 else num
+            if actual_num < 1 or actual_num > settings["total_numbers"]:
                 errors.append(part)
                 continue
             # ያ slot exist ያረጋግጥ
-            slots_for_num = taken.get(num, [])
+            slots_for_num = taken.get(actual_num, [])
             slot_exists = any(s[2] == slot for s in slots_for_num)
             if not slot_exists:
                 errors.append(part)
                 continue
-            numbers.append((num, True, slot))
+            numbers.append((actual_num, True, slot))
             continue
 
         # NUM+ or NUM pattern
@@ -817,18 +822,20 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             errors.append(part)
             continue
-        if num < 1 or num > settings["total_numbers"]:
+        # ✅ FIX: እዚህም ተመሳሳይ group-start mapping
+        actual_num = get_group_start(num, per_person) if per_person > 1 else num
+        if actual_num < 1 or actual_num > settings["total_numbers"]:
             errors.append(part)
             continue
 
         # NUM+ ሲሆን 2 slots ካለ አይሰራም
         if is_half:
-            slots_for_num = taken.get(num, [])
+            slots_for_num = taken.get(actual_num, [])
             if len(slots_for_num) > 1:
                 errors.append(part + " (2 slots አለ — 5+1 ወይም 5+2 ጠቀስ)")
                 continue
 
-        numbers.append((num, is_half, None))
+        numbers.append((actual_num, is_half, None))
 
     if not numbers:
         await update.message.reply_text("❌ ትክክለኛ ቁጥር አልተገኘም!")
@@ -2237,16 +2244,17 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if len(parts) == 1:
         amount_match = _re_owner.match(r'^(\d+(?:\.\d+)?)$', parts[0])
         if amount_match:
-            winner_record = get_active_winner_for_user(game_id, owner_id)
+            winner_record = get_recent_winner_for_user(group_id, owner_id)
             if winner_record:
                 new_amount = float(amount_match.group(1))
                 prev_sent = winner_record["sent_amount"]
                 place = winner_record["place"]
+                win_game_id = winner_record["game_id"]
                 delta = new_amount - prev_sent
 
                 result = deduct_winner_balance(game_id, owner_id, delta, group_id=group_id)
                 new_balance = result["new_balance"]
-                mark_winner_sent(game_id, owner_id, new_amount)
+                mark_winner_sent(win_game_id, owner_id, new_amount)
 
                 try:
                     from ai_fallback import log_transaction
@@ -2314,7 +2322,18 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         reply_lines.append(f"✅ {', '.join(assigned)} → ባለቤት ተስተካክሏል!")
     if errors:
         reply_lines.append(f"❌ ያልተገኘ: {', '.join(errors)}")
-    if reply_lines:
+
+    if assigned:
+        # ✅ ተቀባይነት ስላገኘ (ቢያንስ አንድ ቁጥር ስለተስተካከለ) admin's own
+        # "#/ ..." message ይጠፋል — ልክ እንደ board reply
+        try:
+            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+        except Exception:
+            pass
+        if reply_lines:
+            await ctx.bot.send_message(chat_id=group_id, text="\n".join(reply_lines))
+    elif reply_lines:
+        # ምንም ካልተስተካከለ message እንዳለ ይቆያል (admin ምን እንደጻፈ እንዲያይ)
         await msg.reply_text("\n".join(reply_lines))
 
 
@@ -2328,13 +2347,14 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /remove 5  ወይም  /remove 5:1 10 15:2")
+        await update.message.reply_text("❌ ምሳሌ: /remove 5  ወይም  /remove 5:1 10 15:2  ወይም  5+1 15+2")
         return
 
     settings = get_active_settings(group_id=group_id)
     if not settings:
         return
 
+    per_person = settings["numbers_per_person"]
     removed = []
     errors = []
 
@@ -2344,20 +2364,27 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 num_str, slot_str = part.split(":", 1)
                 number = int(num_str)
                 slot = int(slot_str)
+            elif "+" in part:
+                # ✅ FIX: NUM+SLOT (ለምሳሌ 5+1 ወይም 5+2) — ልክ እንደ /nekay slot መለያ
+                num_str, slot_str = part.split("+", 1)
+                number = int(num_str)
+                slot = int(slot_str)
             else:
                 number = int(part)
                 slot = None
-            admin_remove_player(settings["id"], number, slot)
-            label = f"{format_number(number)}:{slot}" if slot else format_number(number)
+            # ✅ FIX: 1-5 ቡድን ቢሆን (numbers_per_person>1)፣ group start ይሆናል
+            actual_num = get_group_start(number, per_person) if per_person > 1 else number
+            admin_remove_player(settings["id"], actual_num, slot)
+            label = f"{format_number(actual_num)}:{slot}" if slot else format_number(actual_num)
             removed.append(label)
         except ValueError:
             errors.append(part)
 
+    # ✅ FIX: duplicate board — _check_all_paid_and_resend እዚህ መጠራት
+    # የለበትም ነበር (ማስወገድ ውጤት "ሁሉም ተከፍሏል" ፈጽሞ ማምጣት ስለማይችል፣ ያንን
+    # ይህ function ራሱ ካስፈለገ resend ስለሚያደርግ ከ _refresh_board's edit ጋር
+    # ግጭት ውስጥ ገብቶ 2 board messages ይፈጥር ነበር)
     await _refresh_board(ctx, settings, group_id)
-
-    fresh = get_active_settings(group_id=group_id)
-    if fresh:
-        await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
     msg = ""
     if removed:
@@ -2373,7 +2400,7 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /paid 5 10 15  ወይም  /paid 5:2")
+        await update.message.reply_text("❌ ምሳሌ: /paid 5 10 15  ወይም  /paid 5:2  ወይም  5+2")
         return
 
     is_paid = update.message.text.startswith("/paid")
@@ -2381,6 +2408,7 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not settings:
         return
 
+    per_person = settings["numbers_per_person"]
     updated = []
     errors = []
 
@@ -2390,16 +2418,23 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 num_str, slot_str = part.split(":", 1)
                 number = int(num_str)
                 slot = int(slot_str)
+            elif "+" in part:
+                # ✅ FIX: NUM+SLOT (ለምሳሌ 5+1 ወይም 5+2) — ልክ እንደ /nekay slot መለያ
+                num_str, slot_str = part.split("+", 1)
+                number = int(num_str)
+                slot = int(slot_str)
             else:
                 number = int(part)
                 slot = 1
-            admin_mark_paid(settings["id"], number, slot, is_paid)
-            updated.append((number, slot))
+            # ✅ FIX: 1-5 ቡድን ቢሆን (numbers_per_person>1)፣ group start ይሆናል
+            actual_num = get_group_start(number, per_person) if per_person > 1 else number
+            admin_mark_paid(settings["id"], actual_num, slot, is_paid)
+            updated.append((actual_num, slot))
 
             if is_paid and settings["id"] in nekay_active:
                 snap = nekay_numbers.get(settings["id"], {})
-                if number in snap:
-                    del snap[number]
+                if actual_num in snap:
+                    del snap[actual_num]
                     nekay_numbers[settings["id"]] = snap
         except ValueError:
             errors.append(part)
