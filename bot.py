@@ -5,7 +5,7 @@ import time
 import json
 from datetime import datetime, timedelta
 from aiohttp import web
-from telegram import Update
+from telegram import Update, ReactionTypeEmoji
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ConversationHandler, ContextTypes, filters
@@ -50,6 +50,7 @@ from database import (
     clear_carry_balance,
     get_recent_winner_for_user,
     save_registrations_snapshot,
+    set_name_override, get_name_override, clear_name_override,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -375,6 +376,52 @@ def _increment_counter(group_id: int) -> bool:
         msg_counter[group_id] = 0
         return True
     return False
+
+
+# ============================================================
+# FIX #6: fire-and-forget helpers — reply/reaction Telegram API
+# call ን board edit ከመጀመሩ በፊት እንዲጠብቅ ላለማድረግ (ቀድሞ sequential ስለነበር
+# board edit ይዘገይ ነበር)። ውጤቱን አንጠብቅም፣ ስህተት ቢፈጠር log ብቻ እናደርጋለን።
+# ============================================================
+
+async def _safe_reply_text(msg, text: str):
+    try:
+        await msg.reply_text(text)
+    except Exception as e:
+        logging.warning(f"[SafeReply] Error: {e}")
+
+
+async def _safe_set_reaction(bot, chat_id: int, message_id: int, emoji: str = "👍"):
+    try:
+        await bot.set_message_reaction(
+            chat_id=chat_id, message_id=message_id,
+            reaction=[ReactionTypeEmoji(emoji=emoji)],
+        )
+    except Exception as e:
+        logging.warning(f"[SafeReaction] Error: {e}")
+
+
+# ============================================================
+# FIX #4: admin confirmation messages ("✅ ...") ከተላኩ ከ1.5-2 ሰከንድ
+# በኋላ በራሳቸው ይጠፉ (admin ካየ በቂ ነው)።
+# ============================================================
+
+async def _send_temp_admin_message(bot, chat_id: int, text: str, delay: float = 1.75):
+    try:
+        sent = await bot.send_message(chat_id=chat_id, text=text)
+    except Exception as e:
+        logging.warning(f"[TempAdminMsg] Send error: {e}")
+        return None
+
+    async def _delete_later():
+        await asyncio.sleep(delay)
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=sent.message_id)
+        except Exception:
+            pass
+
+    asyncio.create_task(_delete_later())
+    return sent
 
 
 def _build_nekay_from_snap(snap: dict) -> list:
@@ -891,7 +938,8 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     msg = f"✅ ነቃይ ተቀምጧል: {reg_list}"
     if errors:
         msg += f"\n❌ ያልተቀበለ: {', '.join(errors)}"
-    await update.message.reply_text(msg)
+    # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
+    await _send_temp_admin_message(ctx.bot, group_id, msg)
 
 
 # ============================================================
@@ -1591,6 +1639,10 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     allow_toggle = (len(numbers) == 1)
 
+    # FIX #3: admin "#name <name>" override ካለ (highest priority) —
+    # parsed_name/telegram username ምንም ይሁኑ ሁሌም override ስም ጥቅም ላይ ይውላል።
+    name_override = get_name_override(group_id, user_id)
+
     for num, is_half, parsed_name in numbers:
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
 
@@ -1601,7 +1653,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_nekay = (nekay_snap_value is not None)
         is_nekay_force = (nekay_snap_value == 0)
 
-        if is_nekay_force:
+        if name_override:
+            actual_name = name_override
+        elif is_nekay_force:
             actual_name = parsed_name if parsed_name else user_name
         elif parsed_name:
             actual_name = parsed_name
@@ -1665,6 +1719,13 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     reg_result = "registered" if registered else ("taken" if all_taken else None)
 
+    # FIX #2: ሁሉም ቁጥሮች ✅ (ሁሉም ተከፍለው) ካለቁ በኋላ (ውጤት ገና ካልታወቀ/pre-booking
+    # ገና ካልጀመረ)፣ ሰው ቁጥር ለመያዝ ቢሞክር "ተቀደምክ" ከመመለስ ይልቅ "አሁን የውጤት ሰዓት
+    # ነው" ይመለስ።
+    if reg_result == "taken" and all_numbers_paid(game_id, settings):
+        await msg.reply_text("አሁን የውጤት ሰዓት ነው ቤተሰብ ትንሽ ይጠብቁ 🙏")
+        return
+
     is_paid_result = None
     if registered:
         is_paid_result = all(
@@ -1685,8 +1746,16 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_paid=is_paid_result,
     )
 
-    if resp["reply"]:
-        await msg.reply_text(resp["reply"])
+    # FIX #1 + #6: pre-booking ሰዓት (ውጤት/board ገና ስላልታወቀ ገንዘቡ ማን
+    # እንደሚይዘው ገና ስለማይታወቅ) የተሳካ ምዝገባ ላይ የጽሁፍ reply ሳይሆን 👍 reaction
+    # ብቻ ይላክ። ደግሞም reply/reaction Telegram API call ን fire-and-forget
+    # (asyncio.create_task) አድርገን እንልካለን፣ ስለዚህ ከታች ያለው board edit
+    # ይህን call እስኪመለስ ድረስ መጠበቅ አያስፈልገውም (ቀድሞ sequential ስለነበር board
+    # edit ይዘገይ ነበር)።
+    if reg_result == "registered" and group_id in prebooking_groups:
+        asyncio.create_task(_safe_set_reaction(ctx.bot, group_id, msg.message_id))
+    elif resp["reply"]:
+        asyncio.create_task(_safe_reply_text(msg, resp["reply"]))
 
     if not registered:
         return
@@ -2202,9 +2271,12 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # ተንቀሳቅሷል፣ ስለዚህ "#" ባልጀመረ message ላይ ዋጋ የሌለው DB call አይደረግም)
     #   "#<amount>"   (ስላሽ የለውም) → Winner ክፍያ ብቻ, ለምሳሌ #300
     #   "#/ NUM ..."  (ስላሽ አለው)  → Owner reassignment ብቻ, ለምሳሌ #/ 01 21 31+1
-    is_payment_form = text.startswith("#") and not text.startswith("#/")
+    #   "#name <ስም>"  → FIX #3: name override, ለምሳሌ #name አበበ ወይም #name አበበ ከበደ
+    #                    "#name" ብቻ (ስም ሳይከተል) → override reset
+    is_name_form = text.lower().startswith("#name")
+    is_payment_form = text.startswith("#") and not text.startswith("#/") and not is_name_form
     is_owner_form = text.startswith("#/")
-    if not (is_payment_form or is_owner_form):
+    if not (is_payment_form or is_owner_form or is_name_form):
         return
 
     logging.info(f"[OwnerReply] Triggered: text={text!r} chat={update.effective_chat.id} user={update.effective_user.id}")
@@ -2241,6 +2313,25 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     owner_id = owner.id
 
     import re as _re_owner
+
+    # ============================================================
+    # FIX #3: "#name <name>" — name override reply-to-user command
+    # "#name" ብቻ (ስም ሳይከተል) → override ይጠፋል፣ ወደ original ስም-መለያ logic
+    # ይመለሳል (parsed_name ራሱ አልተነካም)። admin ደጋግሞ ሊቀይረው ይችላል — ሁልጊዜ
+    # የመጨረሻው ትዕዛዝ ይሰራል። admin's own "#name ..." message ወዲያውኑ ይጠፋል
+    # (ልክ እንደ #/ እና # ትዕዛዞች)።
+    # ============================================================
+    if is_name_form:
+        body = text[len("#name"):].strip()
+        if body:
+            set_name_override(group_id, owner_id, body)
+        else:
+            clear_name_override(group_id, owner_id)
+        try:
+            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+        except Exception:
+            pass
+        return
 
     if is_payment_form:
         # ✅ WINNER PAYMENT/CORRECTION: "#<amount>" (ስላሽ የለውም) — reply
@@ -2297,7 +2388,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
 
-        await ctx.bot.send_message(chat_id=group_id, text=out_text)
+        # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
+        await _send_temp_admin_message(ctx.bot, group_id, out_text)
 
         fresh = get_active_settings(group_id=group_id)
         if fresh:
@@ -2359,7 +2451,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         if reply_lines:
-            await ctx.bot.send_message(chat_id=group_id, text="\n".join(reply_lines))
+            # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
+            await _send_temp_admin_message(ctx.bot, group_id, "\n".join(reply_lines))
     elif reply_lines:
         # ምንም ካልተስተካከለ message እንዳለ ይቆያል (admin ምን እንደጻፈ እንዲያይ)
         await msg.reply_text("\n".join(reply_lines))
