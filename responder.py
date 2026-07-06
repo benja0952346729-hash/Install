@@ -189,15 +189,6 @@ INTENT_EXAMPLES = {
         "ሁሉም ተይዘዋል", "ሁሉም ተያዘ", "ሁሉም አልተያዙም",
         "ሁሉም ቁጥሮች ተያዙ", "ሁሉም አለቀ", "ሁሉም ተወሰደ",
     ],
-    "greeting": [
-        "ሰላም", "እንዴት ነህ", "ደና አደርክ", "ደና ዋልክ",
-        "እንዴት አመሸህ", "ሰላም ዋልክ", "ሰላም አመሸህ",
-        "በሰላም አደርክ", "እንዴት አረፈድክ", "ጤና ይስጥልኝ",
-        "እንደምን ናችሁ", "እንደምን አላችሁ", "እንዴት ናችሁ",
-        "ሰላም እንዴት ነህ", "ሰላም ወዳጄ", "ሰላምታ",
-        "hi", "hello", "hey",
-        "selam", "salam", "selem",
-    ],
     "cancel_number": [
         "አልፈልግም", "ሽጠው", "አጥፋው", "ይጥፋ", "ሰርዝ", "አውጣ",
         "አጥፋልኝ", "ሰርዝልኝ", "አውጣልኝ",
@@ -776,8 +767,6 @@ def detect_intent(text: str) -> tuple:
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
-        if intent == "greeting" and not numbers_in_text:
-            bonus += 0.05
         if intent in ("complaint_removed", "complaint_why_sold",
                       "complaint_paid_removed") and not numbers_in_text:
             bonus += 0.05
@@ -831,14 +820,6 @@ RESPONSES = {
     ],
     "remaining_send_ack": ["እሺ 🙏"],
     "all_taken_nekay": ["አዎ ተይዘዋል ነቃይ ጠብቅ ቤተሰብ 🙏"],
-    "greeting": [
-        "ፈጣሪ የተመሰገነ ይሁን 🙏", "ፈጣሪ የተመሰገነ ይሁን ወዳጄ 🙏",
-        "ይመስገን እንዴት ነህ ወዳጄ 🙏", "ፈጣሪ ይመስገን እንኳን በደና መጣህ 🙏",
-        "በጉጉት ስንጠብቅህ ነበር እንኳን በደና መጣህ 🙏", "ሰላም እንኳን በሰላም መጣህ 🙏",
-    ],
-    "greeting_help": [
-        "በምን ላግዝህ? 🙏", "ምን እናግዝህ ትፈልጋለህ? 🙏",
-    ],
     "cancel_number_ack": ["እሺ ተሰርዟል 🙏", "እሺ ተነቅሏል 🙏"],
     "complaint_removed_taken": [
         "አዎ ገቢ ማረግ ረሳክ የጫወታው ባህሪ ነው 🙏",
@@ -1577,14 +1558,6 @@ def get_response(
             result["reply"] = random.choice(RESPONSES["all_taken_nekay"])
         else:
             result["resend_remaining"] = True
-        return result
-
-    # ── greeting ──────────────────────────────────────────────────
-    if intent == "greeting":
-        msg = random.choice(RESPONSES["greeting"])
-        if random.random() < 0.20:
-            msg += " " + random.choice(RESPONSES["greeting_help"])
-        result["reply"] = msg
         return result
 
     # ── price_query ───────────────────────────────────────────────
