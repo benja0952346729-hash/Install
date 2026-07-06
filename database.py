@@ -497,6 +497,73 @@ def save_winner_photo(photo_unique_id: str, group_id: int = None):
 
 
 # ============================================================
+# ADMIN — NAME OVERRIDE (reply-to-user "#name <name>")
+# ============================================================
+# Admin ተጠቃሚ መልእክት reply አድርጎ "#name <ስም>" ቢልክ፣ ያ ተጠቃሚ ከዚያ በኋላ
+# ቁጥር በሚይዝበት ጊዜ ሁሉ (parsed_name/telegram username ምንም ይሁኑ) override
+# ስሙ ብቻ ጥቅም ላይ ይውላል። "#name" ብቻ (ስም ሳይከተል) ከላከ override ይጠፋል እና
+# ወደ ነባሩ ስም-መለያ logic ይመለሳል (parsed_name ራሱ አይነካም)።
+
+def set_name_override(group_id: int, telegram_id: int, name: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS name_overrides (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            override_name TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(group_id, telegram_id)
+        )
+    """)
+    cur.execute("""
+        INSERT INTO name_overrides (group_id, telegram_id, override_name)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (group_id, telegram_id) DO UPDATE
+            SET override_name=EXCLUDED.override_name, updated_at=NOW()
+    """, (group_id, telegram_id, name))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def get_name_override(group_id: int, telegram_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        cur.execute("""
+            SELECT override_name FROM name_overrides
+            WHERE group_id=%s AND telegram_id=%s
+        """, (group_id, telegram_id))
+        row = cur.fetchone()
+    except Exception:
+        row = None
+    cur.close()
+    conn.close()
+    return row[0] if row else None
+
+
+def clear_name_override(group_id: int, telegram_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS name_overrides (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            override_name TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(group_id, telegram_id)
+        )
+    """)
+    cur.execute("DELETE FROM name_overrides WHERE group_id=%s AND telegram_id=%s", (group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
 # ADMIN — OWNERSHIP REASSIGNMENT (reply-to-user "#/ NUM NUM+SLOT")
 # ============================================================
 
