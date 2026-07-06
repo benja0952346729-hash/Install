@@ -5,7 +5,7 @@ import time
 import json
 from datetime import datetime, timedelta
 from aiohttp import web
-from telegram import Update, ReactionTypeEmoji
+from telegram import Update
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
     ConversationHandler, ContextTypes, filters
@@ -393,9 +393,13 @@ async def _safe_reply_text(msg, text: str):
 
 async def _safe_set_reaction(bot, chat_id: int, message_id: int, emoji: str = "👍"):
     try:
+        try:
+            from telegram import ReactionTypeEmoji
+            reaction = [ReactionTypeEmoji(emoji=emoji)]
+        except ImportError:
+            reaction = [emoji]
         await bot.set_message_reaction(
-            chat_id=chat_id, message_id=message_id,
-            reaction=[ReactionTypeEmoji(emoji=emoji)],
+            chat_id=chat_id, message_id=message_id, reaction=reaction,
         )
     except Exception as e:
         logging.warning(f"[SafeReaction] Error: {e}")
