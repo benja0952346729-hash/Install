@@ -49,6 +49,7 @@ from database import (
     admin_set_owner,
     clear_carry_balance,
     get_recent_winner_for_user,
+    get_recent_winners_for_user,
     save_registrations_snapshot,
     set_name_override, get_name_override, clear_name_override,
 )
@@ -77,9 +78,13 @@ import random
     ASK_PRICE_HALF, ASK_PRIZE_1, ASK_PRIZE_2,
     ASK_PRIZE_3, ASK_PAYMENT, ASK_GAME_RULE,
     ASK_SLOT_SYMBOL, ASK_COUNTDOWN_ENABLED,
-    ASK_COUNTDOWN_MINUTES,
+    ASK_COUNTDOWN_MINUTES, ASK_PROFIT_PER_GAME,
     ASK_SEND_PLACE, ASK_SEND_AMOUNT, ASK_SEND_WINNER
-) = range(15)
+) = range(16)
+
+# ጨዋታ ካለቀ በኋላ (ሁሉም ✅ ሆነው live/pre-booking ሲጀምር ወይም ውጤት ሲላክ) daily
+# profit ድጋሚ እንዳይቆጠር የሚከታተል set — game_id-based guard
+profit_counted_games = set()
 
 pending_ambiguous = {}
 active_countdowns = {}
@@ -97,6 +102,11 @@ handled_winner_photos = set()
 low_remaining_trackers = {}
 
 prebooking_groups = set()  # groups in silent pre-booking mode (live started, all paid)
+
+# FIX: winner photo ከተላከ እስከ _auto_newgame ድረስ ያለው 30 ሰከንድ ክፍተት —
+# board/ቀጣይ ዙር ገና ስላልተጠናቀቀ፣ በዚህ ጊዜ ውስጥ registration ቢሳካ ልክ እንደ
+# prebooking_groups reaction-only (👍) ብቻ ይሆን (text reply አይላክም)
+winner_pending_groups = set()
 handled_video_boards = set()  # game_ids where 30s+ video board replace already done
 
 URGENCY_MESSAGES = [
@@ -431,7 +441,8 @@ async def _send_temp_admin_message(bot, chat_id: int, text: str, delay: float = 
 def _build_nekay_from_snap(snap: dict) -> list:
     result = []
     for number, slot in sorted(snap.items()):
-        is_half = (slot == 2)
+        # 0 = ሙሉ nekay (full)፣ 2/-1/-2 ሁሉም half/slot-specific nekay ናቸው
+        is_half = (slot != 0)
         result.append((number, is_half))
     return result
 
@@ -653,7 +664,7 @@ async def ask_countdown_enabled(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ASK_COUNTDOWN_MINUTES
     else:
         ctx.user_data["countdown_minutes"] = 0
-        return await _finish_setgame(update, ctx)
+        return await ask_profit_per_game_prompt(update, ctx)
 
 
 async def ask_countdown_minutes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -665,6 +676,22 @@ async def ask_countdown_minutes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except ValueError:
         await update.message.reply_text("❌ 0.5 እስከ 10 ብቻ ጻፍ!")
         return ASK_COUNTDOWN_MINUTES
+    return await ask_profit_per_game_prompt(update, ctx)
+
+
+async def ask_profit_per_game_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "📈 ከ1 ጨዋታ ስንት ብር profit ያገኛሉ? (ለምሳሌ: 300)"
+    )
+    return ASK_PROFIT_PER_GAME
+
+
+async def ask_profit_per_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        ctx.user_data["profit_per_game"] = float(update.message.text.strip())
+    except ValueError:
+        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ! (ለምሳሌ: 300)")
+        return ASK_PROFIT_PER_GAME
     return await _finish_setgame(update, ctx)
 
 
@@ -906,8 +933,9 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 UPDATE registrations SET is_nekay=TRUE
                 WHERE game_id=%s AND number=%s AND slot=%s
             """, (game_id, num, slot_only))
-            # snap ላይ slot_only እንደ half ያስቀምጥ
-            snap[num] = 2  # half (slot_only)
+            # FIX: የትኛው slot እንደሆነ ተለይቶ ይቀመጥ (-1 = slot 1, -2 = slot 2)
+            # ስለዚህ user ሲይዝ ትክክለኛው slot force-overwrite ይደረግለታል
+            snap[num] = -1 if slot_only == 1 else -2
         else:
             cur.execute("""
                 UPDATE registrations SET is_nekay=TRUE
@@ -1655,7 +1683,15 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             nekay_snap_value = nekay_numbers[game_id][actual_num]
 
         is_nekay = (nekay_snap_value is not None)
-        is_nekay_force = (nekay_snap_value == 0)
+        # FIX: -1/-2 (06+1 / 06+2 slot-specific nekay) ደግሞ force ናቸው —
+        # ቀደም ብሎ 0 ብቻ ነበር force ተብሎ የሚታየው፣ ስለዚህ +1/+2 slot-specific
+        # nekay ላይ force overwrite ፈጽሞ አይሰራም ነበር።
+        is_nekay_force = nekay_snap_value in (0, -1, -2)
+        force_slot = None
+        if nekay_snap_value == -1:
+            force_slot = 1
+        elif nekay_snap_value == -2:
+            force_slot = 2
 
         if name_override:
             actual_name = name_override
@@ -1694,10 +1730,11 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         result = register_number(
             game_id, user_id, actual_name, actual_num, is_half,
             force=is_nekay_force, allow_toggle=allow_toggle,
-            is_parsed_name=bool(parsed_name)
+            is_parsed_name=bool(parsed_name), force_slot=force_slot,
         )
         if result in ["registered", "registered_half"]:
-            registered.append((actual_num, is_half))
+            # force_slot ጥቅም ላይ ከዋለ ውጤቱ ሁልጊዜ half-slot ምዝገባ ነው
+            registered.append((actual_num, is_half or (force_slot is not None)))
         elif isinstance(result, dict) and result.get("status") == "ok":
             new_is_half = get_user_numbers(game_id, user_id)
             actual_is_half = is_half
@@ -1756,7 +1793,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     # (asyncio.create_task) አድርገን እንልካለን፣ ስለዚህ ከታች ያለው board edit
     # ይህን call እስኪመለስ ድረስ መጠበቅ አያስፈልገውም (ቀድሞ sequential ስለነበር board
     # edit ይዘገይ ነበር)።
-    if reg_result == "registered" and group_id in prebooking_groups:
+    if reg_result == "registered" and (group_id in prebooking_groups or group_id in winner_pending_groups):
         asyncio.create_task(_safe_set_reaction(ctx.bot, group_id, msg.message_id))
     elif resp["reply"]:
         asyncio.create_task(_safe_reply_text(msg, resp["reply"]))
@@ -1767,8 +1804,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     if skip_board_update:
         return
 
-    # pre-booking mode — registration ተሰርቷል ግን board አይታይም
-    if group_id in prebooking_groups:
+    # pre-booking mode (ወይም winner photo 30s ክፍተት) — registration ተሰርቷል
+    # ግን board አይታይም
+    if group_id in prebooking_groups or group_id in winner_pending_groups:
         return
 
     board_text = build_board(settings, taken, paid)
@@ -2345,27 +2383,42 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         # message ላይ) #<new_amount> ቢልክ፣ ቀድሞ የተላከው ይሻራል (reverse) እና
         # አዲሱ amount ብቻ ተቀናሽ ይደረጋል (ድምር ሳይሆን ትክክለኛው የመጨረሻ amount ብቻ
         # ውጤት ይሆናል)።
+        #
+        # FIX: አንድ ሰው ብዙ places (ለምሳሌ 2ኛ እና 3ኛ፣ ወይም 1ኛ እና 2ኛ) በአንድ ጊዜ
+        # ካሸነፈ፣ ልክ እንደ userbot2.py's process_winner_payment style ሁሉንም
+        # tied ቦታዎች ድምር አድርጎ በአንድ payment (single deduct + single
+        # announcement) ይይዛል፣ ምንም ቦታ ሳይዘነጋ።
         body = text[1:].strip()
         amount_match = _re_owner.match(r'^(\d+(?:\.\d+)?)$', body)
         if not amount_match:
             await msg.reply_text("❌ ምሳሌ: #300  (ለ winner ክፍያ ብቻ፣ ቁጥር ብቻ ጻፍ)")
             return
 
-        winner_record = get_recent_winner_for_user(group_id, owner_id)
-        if not winner_record:
+        all_winner_records = get_recent_winners_for_user(group_id, owner_id)
+        if not all_winner_records:
             logging.info(f"[OwnerReply] Payment rejected: telegram_id {owner_id} has no recent winner record with prize_balance>0 in group {group_id}")
             await msg.reply_text("❌ ይህ ሰው በቅርብ ጊዜ winner አይደለም — ክፍያ አይሰራም!")
             return
 
         new_amount = float(amount_match.group(1))
-        prev_sent = winner_record["sent_amount"]
-        place = winner_record["place"]
-        win_game_id = winner_record["game_id"]
+
+        # tied ቦታዎች ካሉ (ተመሳሳይ game_id+telegram_id) mark_winner_sent
+        # single call ሁሉንም rows ወደ ተመሳሳይ sent_amount ስለሚያደርግ፣ ድርብ-ቁጥር
+        # እንዳይፈጠር prev_sent የሚሰላው በ MAX (ድምር ሳይሆን) ነው።
+        prev_sent = max((w["sent_amount"] for w in all_winner_records), default=0.0)
+        primary = all_winner_records[0]  # ዝቅተኛው place (1ኛ ቀዳሚ)
+        win_game_id = primary["game_id"]
+        places = sorted(set(w["place"] for w in all_winner_records))
         delta = new_amount - prev_sent
 
         result = deduct_winner_balance(win_game_id, owner_id, delta, group_id=group_id)
         new_balance = result["new_balance"]
-        mark_winner_sent(win_game_id, owner_id, new_amount)
+
+        # ሁሉንም tied places (ምናልባትም የተለያዩ game_id ቢኖራቸውም) sent=TRUE
+        # እና sent_amount=new_amount አድርጎ ምልክት ያድርግ
+        distinct_game_ids = set(w["game_id"] for w in all_winner_records)
+        for gid in distinct_game_ids:
+            mark_winner_sent(gid, owner_id, new_amount)
 
         try:
             from ai_fallback import log_transaction
@@ -2378,7 +2431,9 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as _log_err:
             logging.warning(f"[log_transaction] Error: {_log_err}")
 
-        place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(place, f"{place}ኛ")
+        place_label = " & ".join(
+            {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(p, f"{p}ኛ") for p in places
+        )
         winner_name = owner.first_name or owner.username or "Unknown"
 
         if prev_sent > 0 and prev_sent != new_amount:
@@ -3202,8 +3257,12 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 handled_winner_photos.add(photo_uid)
                 save_winner_photo(photo_uid, group_id=group_id)
                 # announcement ወዲያውኑ ተላከ — board 30 seconds ቆይቶ ይምጣ
-                await asyncio.sleep(30)
-                await _auto_newgame(ctx.bot, settings, group_id)
+                winner_pending_groups.add(group_id)
+                try:
+                    await asyncio.sleep(30)
+                    await _auto_newgame(ctx.bot, settings, group_id)
+                finally:
+                    winner_pending_groups.discard(group_id)
         return
 
     _increment_counter(group_id)
@@ -3258,23 +3317,43 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
 
+# ============================================================
+# DAILY PROFIT: ጨዋታው ካለቀ (ሁሉም ✅ ሆነው) በኋላ admin በ /setgame ላይ
+# ካስገባው profit_per_game (ቋሚ ቁጥር) ውጪ ምንም ስሌት አይደረግም። 1 ጨዋታ = 1 ጊዜ
+# profit_per_game ይደመራል። ትሪገር ሁለት ቦታ ነው (የትኛውም መጀመሪያ ቢደርስ)፦
+#   1) ሁሉም ✅ ሆነው live/pre-booking ሲጀምር (handle_video_chat_started)
+#   2) Live ካልተጠቀሙ፣ ሁሉም ✅ ሆነው ውጤት (winner photo) ሲላክ (_auto_newgame)
+# profit_counted_games (in-memory set) ተመሳሳይ game_id ድጋሚ እንዳይቆጠር ይጠብቃል።
+# ============================================================
+
+def _maybe_record_game_profit(group_id: int, game_id: int, settings: dict):
+    if game_id in profit_counted_games:
+        return
+    try:
+        if not all_numbers_paid(game_id, settings):
+            return
+        profit_per_game = float(settings.get("profit_per_game") or 0)
+        taken = get_taken_numbers(game_id)
+        registered_count = len(taken)
+        save_game_report(
+            group_id=group_id,
+            game_id=game_id,
+            total_bet=0,
+            prize_total=0,
+            profit=profit_per_game,
+            registered_count=registered_count,
+        )
+        profit_counted_games.add(game_id)
+    except Exception as e:
+        logging.warning(f"[DailyProfit] Record error: {e}")
+
+
 async def _auto_newgame(bot, settings: dict, group_id: int = None):
     game_id = settings["id"]
     _group_id = group_id or settings.get("group_id") or GROUP_ID
 
-    try:
-        profit_data = calculate_game_profit(game_id)
-        if profit_data and profit_data.get("counted") and _group_id:
-            save_game_report(
-                group_id=_group_id,
-                game_id=game_id,
-                total_bet=profit_data["total_bet"],
-                prize_total=profit_data["prize_total"],
-                profit=profit_data["profit"],
-                registered_count=profit_data["registered_count"],
-            )
-    except Exception as e:
-        logging.warning(f"[AutoNewgame] Report save error: {e}")
+    if _group_id:
+        _maybe_record_game_profit(_group_id, game_id, settings)
 
     nekay_active.discard(game_id)
     admin_nekay_games.discard(game_id)
@@ -3671,6 +3750,10 @@ async def handle_video_chat_started(update: Update, ctx: ContextTypes.DEFAULT_TY
 
     game_id = settings["id"]
 
+    # FIX: daily profit — ሁሉም ✅ ሆነው live ሲጀምር 1 ጨዋታ ተብሎ profit_per_game
+    # ይመዘገባል (registrations ከመጥፋታቸው በፊት)
+    _maybe_record_game_profit(group_id, game_id, settings)
+
     # ✅ FIX: registrations ከመጥፋቱ በፊት snapshot ያድርግ — winner photo
     # ገና ውጤቱ ካልታወቀ (ገና admin ካልላከው) በፊት pre-booking ቢጀምር፣ winner
     # lookup snapshot ላይ ተመልክቶ ትክክለኛውን ባለቤት ማግኘት ይችላል
@@ -3827,6 +3910,7 @@ def main():
             ASK_SLOT_SYMBOL: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_slot_symbol)],
             ASK_COUNTDOWN_ENABLED: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_countdown_enabled)],
             ASK_COUNTDOWN_MINUTES: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_countdown_minutes)],
+            ASK_PROFIT_PER_GAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_profit_per_game)],
         },
         fallbacks=[CommandHandler("cancel", cancel_setup)],
     )
