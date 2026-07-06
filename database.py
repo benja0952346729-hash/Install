@@ -333,6 +333,7 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS slot_symbol TEXT DEFAULT '#';")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS pre_wipe_snapshot JSONB;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS profit_per_game NUMERIC DEFAULT 0;")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS carry_balance NUMERIC DEFAULT 0;")
@@ -972,8 +973,9 @@ def save_settings(data: dict, group_id: int = None):
         INSERT INTO game_settings
         (total_numbers, numbers_per_person, price_full, price_half,
          prize_1st, prize_2nd, prize_3rd, payment_info, group_id,
-         countdown_enabled, countdown_minutes, game_rule, slot_symbol, show_all_slots)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+         countdown_enabled, countdown_minutes, game_rule, slot_symbol,
+         show_all_slots, profit_per_game)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         RETURNING id
     """, (
         data["total_numbers"], data["numbers_per_person"],
@@ -985,6 +987,7 @@ def save_settings(data: dict, group_id: int = None):
         data.get("game_rule") or None,
         data.get("slot_symbol") or "#",
         data.get("show_all_slots", False),
+        data.get("profit_per_game", 0),
     ))
     game_id = cur.fetchone()[0]
     conn.commit()
@@ -1016,7 +1019,8 @@ def get_active_settings(group_id: int = None):
             "prize_1st", "prize_2nd", "prize_3rd", "payment_info",
             "board_message_id", "remaining_message_id", "group_id",
             "is_active", "created_at", "countdown_enabled", "countdown_minutes",
-            "game_rule", "slot_symbol", "show_all_slots"]
+            "game_rule", "slot_symbol", "show_all_slots", "pre_wipe_snapshot",
+            "profit_per_game"]
     return dict(zip(cols, row))
 
 
@@ -1124,7 +1128,7 @@ def get_registrations(game_id):
     return rows
 
 
-def register_number(game_id, user_id, user_name, number, is_half, force=False, allow_toggle=True, is_parsed_name=False):
+def register_number(game_id, user_id, user_name, number, is_half, force=False, allow_toggle=True, is_parsed_name=False, force_slot=None):
     conn = get_conn()
     cur = conn.cursor()
 
@@ -1139,7 +1143,8 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False, a
     price_full = float(price_row[0] or 0)
     price_half = float(price_row[1] or 0)
     group_id = price_row[2]
-    cost = price_half if is_half else price_full
+    # FIX: force_slot (06+1 / 06+2 slot-specific nekay) ሁልጊዜ half cost ነው
+    cost = price_half if (is_half or force_slot is not None) else price_full
 
     cur.execute("""
         SELECT balance, carry_balance, prize_balance FROM user_balance
@@ -1152,6 +1157,30 @@ def register_number(game_id, user_id, user_name, number, is_half, force=False, a
     can_pay = total_balance >= cost
 
     if force and existing:
+        # FIX: force_slot ካለ (06+1/06+2 slot-specific nekay)፣ ያንን slot
+        # ብቻ ይተካል፣ ሌላውን slot (የቀድሞ ባለቤት) አይነካውም። is_nekay=TRUE ባለበት
+        # slot ላይ ብቻ ይሰራል (ደህንነት)።
+        if force_slot is not None:
+            cur.execute("""
+                UPDATE registrations
+                SET user_id=%s, user_name=%s, is_half=TRUE, is_nekay=FALSE,
+                    is_paid=%s, pending_upgrade=FALSE, registered_at=NOW()
+                WHERE game_id=%s AND number=%s AND slot=%s AND is_nekay=TRUE
+            """, (user_id, user_name, can_pay, game_id, number, force_slot))
+            if cur.rowcount == 0:
+                # ያ slot is_nekay=TRUE ሆኖ አልተገኘም (ምናልባት ቀድሞ ተይዞ/ተቀይሮ) —
+                # taken እንደሆነ ይመለስ
+                conn.commit()
+                cur.close()
+                conn.close()
+                return "taken"
+            if can_pay:
+                _deduct_balance(cur, group_id, user_id, cost, prize_balance, carry_balance)
+            conn.commit()
+            cur.close()
+            conn.close()
+            return "registered_half"
+
         cur.execute("""
             UPDATE registrations
             SET user_id=%s, user_name=%s, is_half=%s, is_nekay=FALSE,
@@ -1827,6 +1856,41 @@ def get_recent_winner_for_user(group_id: int, telegram_id: int, hours: int = 24)
         "prize": float(row[2] or 0),
         "sent_amount": float(row[3] or 0),
     }
+
+
+def get_recent_winners_for_user(group_id: int, telegram_id: int, hours: int = 24) -> list:
+    """
+    FIX: "#<amount>" ክፍያ ላይ አንድ ሰው ብዙ places (ለምሳሌ 2ኛ እና 3ኛ፣ ወይም 1ኛ እና
+    2ኛ) በአንድ ጊዜ ካሸነፈ ሁሉንም ያምጣ (ልክ እንደ userbot2.py's
+    get_all_winners_by_telegram_id style) — admin ነጠላ ቁጥር ሲልክ ሁሉንም
+    tied ቦታዎች ድምር አድርጎ በአንድ payment እንዲይዝ። ከ get_recent_winner_for_user
+    ጋር ተመሳሳይ eligibility check (prize_balance > 0, ባለፉት `hours` ውስጥ)
+    ይጠቀማል፣ ግን LIMIT 1 ሳይሆን ሁሉንም tied records ይመልሳል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(hours=hours)
+    cur.execute("""
+        SELECT w.game_id, w.place, w.prize, w.sent_amount
+        FROM winners w
+        JOIN user_balance ub ON ub.group_id = w.group_id AND ub.telegram_id = w.telegram_id
+        WHERE w.group_id=%s AND w.telegram_id=%s
+          AND w.created_at >= %s
+          AND ub.prize_balance > 0
+        ORDER BY w.place ASC, w.created_at DESC
+    """, (group_id, telegram_id, cutoff))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    return [
+        {
+            "game_id": r[0],
+            "place": r[1],
+            "prize": float(r[2] or 0),
+            "sent_amount": float(r[3] or 0),
+        }
+        for r in rows
+    ]
 
 
 def deduct_winner_balance(game_id: int, telegram_id: int, amount: float, group_id: int = None) -> dict:
