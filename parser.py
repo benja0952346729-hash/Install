@@ -250,6 +250,115 @@ def _resolve_price_type(amount, price_full, price_half):
 
 
 # ================================================================
+# NOT-BOOKING PHRASE DETECTION (fuzzy, latin-normalized)
+# ================================================================
+# ተጠቃሚ በተለያየ የፊደል አጻጻፍ (ቀ→k/q፣ ኝ→g/gn) ቢጠቀም እንኳ ትክክል እንዲታወቅ፣
+# ጽሁፉን ወደ "canonical latin" እንቀይራለን — ቀ-family ("q") እና k ሁለቱም ወደ
+# "k" ይመለሳሉ፣ ኝ-family ("ny"/"gn") ሁለቱም ወደ "g" ይመለሳሉ። ከዛ በኋላ
+# NOT_BOOKING_PHRASES ጋር (≥3 ፊደል ላይ ብቻ) fuzzy/substring match እናደርጋለን።
+# ይህ ሙሉ ለሙሉ ገለልተኛ ንብርብር ነው — ከላይ ያለው ነባር parsing logic ላይ ምንም
+# ተጽዕኖ አያመጣም፣ parser.py ውስጥ ብቻ ነው የሚኖረው (ሌላ ፋይል አይነካም)።
+
+_PARSER_FIDEL_TO_LATIN = {
+    "ሀ": "ha", "ሁ": "hu", "ሂ": "hi", "ሃ": "ha", "ሄ": "he", "ህ": "h", "ሆ": "ho",
+    "ሐ": "ha", "ሑ": "hu", "ሒ": "hi", "ሓ": "ha", "ሔ": "he", "ሕ": "h", "ሖ": "ho",
+    "ለ": "le", "ሉ": "lu", "ሊ": "li", "ላ": "la", "ሌ": "le", "ል": "l", "ሎ": "lo",
+    "ረ": "re", "ሩ": "ru", "ሪ": "ri", "ራ": "ra", "ሬ": "re", "ር": "r", "ሮ": "ro",
+    "መ": "me", "ሙ": "mu", "ሚ": "mi", "ማ": "ma", "ሜ": "me", "ም": "m", "ሞ": "mo",
+    "ሰ": "se", "ሱ": "su", "ሲ": "si", "ሳ": "sa", "ሴ": "se", "ስ": "s", "ሶ": "so",
+    "ሠ": "se", "ሡ": "su", "ሢ": "si", "ሣ": "sa", "ሤ": "se", "ሥ": "s", "ሦ": "so",
+    "ሸ": "she", "ሹ": "shu", "ሺ": "shi", "ሻ": "sha", "ሼ": "she", "ሽ": "sh", "ሾ": "sho",
+    "ቀ": "qe", "ቁ": "qu", "ቂ": "qi", "ቃ": "qa", "ቄ": "qe", "ቅ": "q", "ቆ": "qo",
+    "ቈ": "qo", "ቊ": "qu", "ቋ": "qua", "ቌ": "qe", "ቍ": "qu",
+    "በ": "be", "ቡ": "bu", "ቢ": "bi", "ባ": "ba", "ቤ": "be", "ብ": "b", "ቦ": "bo",
+    "ተ": "te", "ቱ": "tu", "ቲ": "ti", "ታ": "ta", "ቴ": "te", "ት": "t", "ቶ": "to",
+    "ቸ": "che", "ቹ": "chu", "ቺ": "chi", "ቻ": "cha", "ቼ": "che", "ች": "ch", "ቾ": "cho",
+    "ነ": "ne", "ኑ": "nu", "ኒ": "ni", "ና": "na", "ኔ": "ne", "ን": "n", "ኖ": "no",
+    "ኘ": "nye", "ኙ": "nyu", "ኚ": "nyi", "ኛ": "nya", "ኜ": "nye", "ኝ": "ny", "ኞ": "nyo",
+    "አ": "a", "ኡ": "u", "ኢ": "i", "ኣ": "a", "ኤ": "e", "እ": "e", "ኦ": "o",
+    "ከ": "ke", "ኩ": "ku", "ኪ": "ki", "ካ": "ka", "ኬ": "ke", "ክ": "k", "ኮ": "ko",
+    "ወ": "we", "ዉ": "wu", "ዊ": "wi", "ዋ": "wa", "ዌ": "we", "ው": "w", "ዎ": "wo",
+    "የ": "ye", "ዩ": "yu", "ዪ": "yi", "ያ": "ya", "ዬ": "ye", "ይ": "y", "ዮ": "yo",
+    "ደ": "de", "ዱ": "du", "ዲ": "di", "ዳ": "da", "ዴ": "de", "ድ": "d", "ዶ": "do",
+    "ዘ": "ze", "ዙ": "zu", "ዚ": "zi", "ዛ": "za", "ዜ": "ze", "ዝ": "z", "ዞ": "zo",
+    "ዠ": "zhe", "ዡ": "zhu", "ዢ": "zhi", "ዣ": "zha", "ዤ": "zhe", "ዥ": "zh", "ዦ": "zho",
+    "ጀ": "je", "ጁ": "ju", "ጂ": "ji", "ጃ": "ja", "ጄ": "je", "ጅ": "j", "ጆ": "jo",
+    "ገ": "ge", "ጉ": "gu", "ጊ": "gi", "ጋ": "ga", "ጌ": "ge", "ግ": "g", "ጎ": "go",
+    "ጠ": "te", "ጡ": "tu", "ጢ": "ti", "ጣ": "ta", "ጤ": "te", "ጥ": "t", "ጦ": "to",
+    "ጰ": "pe", "ጱ": "pu", "ጲ": "pi", "ጳ": "pa", "ጴ": "pe", "ጵ": "p", "ጶ": "po",
+    "ጸ": "tse", "ጹ": "tsu", "ጺ": "tsi", "ጻ": "tsa", "ጼ": "tse", "ጽ": "ts", "ጾ": "tso",
+    "ፀ": "tse", "ፁ": "tsu", "ፂ": "tsi", "ፃ": "tsa", "ፄ": "tse", "ፅ": "ts", "ፆ": "tso",
+    "ፈ": "fe", "ፉ": "fu", "ፊ": "fi", "ፋ": "fa", "ፌ": "fe", "ፍ": "f", "ፎ": "fo",
+    "ፐ": "pe", "ፑ": "pu", "ፒ": "pi", "ፓ": "pa", "ፔ": "pe", "ፕ": "p", "ፖ": "po",
+}
+
+
+def _to_latin_parser(text: str) -> str:
+    return "".join(_PARSER_FIDEL_TO_LATIN.get(ch, ch.lower()) for ch in text)
+
+
+def _canonicalize_latin(text: str) -> str:
+    """ቀ-family(q) እና k → 'k'፣ ኝ-family (ny/gn) → 'g' ተደርገው canonical ይሆናሉ።"""
+    t = text.lower()
+    t = t.replace("q", "k")
+    t = t.replace("gn", "g")
+    t = t.replace("ny", "g")
+    return t
+
+
+def _canonical_form(text: str) -> str:
+    return _canonicalize_latin(_to_latin_parser(text))
+
+
+NOT_BOOKING_PHRASES = [
+    "ግልባጭ", "ከርብት",
+    "አለኝ", "ነበረኝ", "ነበረ",
+    "ላክ", "አላከም", "አልከረበትከም", "አልገለበትክም", "አላክልኝም",
+    "እልክልሀለው", "እየላኩልህ ነው",
+    "ይቀረኛል", "ቀረኝ", "ቀረ", "ቀሪ",
+    "ተኛ",
+    "የኔ ነው", "የኔ ነበረ",
+    "መድብ", "መድብልኝ",
+]
+
+_NOT_BOOKING_CANONICAL = [_canonical_form(p) for p in NOT_BOOKING_PHRASES]
+
+_NB_FUZZY_THRESHOLD = 70
+_NB_FUZZY_MIN_LEN = 3
+
+
+def _is_not_booking_phrase_present(text: str) -> bool:
+    """
+    ጽሁፉ ውስጥ NOT_BOOKING_PHRASES ጋር (substring exact ወይም word-level
+    fuzzy ≥70%, ≥3 ፊደል) ተመሳሳይነት ካለ True ይመልሳል። Amharic ኦርጅናል እና
+    ቀ→k/q፣ ኝ→g/gn ልዩነት ችላ ተብሎ ሁለቱም spelling variant ይሰራል።
+    """
+    canonical_text = _canonical_form(text)
+
+    # substring match — ordinal suffix (3ተኛ) ወይም ክፍተት-አልባ ጥምረት ይይዛል
+    for canon_phrase in _NOT_BOOKING_CANONICAL:
+        if len(canon_phrase.replace(" ", "")) < _NB_FUZZY_MIN_LEN:
+            continue
+        if canon_phrase in canonical_text:
+            return True
+
+    # word-level fuzzy match — typo/spelling variation ይይዛል
+    words = canonical_text.split()
+    for w in words:
+        if len(w) < _NB_FUZZY_MIN_LEN:
+            continue
+        for canon_phrase in _NOT_BOOKING_CANONICAL:
+            if " " in canon_phrase:
+                continue  # ብዙ-ቃል phrase ቀድሞ ከላይ በ substring ተይዟል
+            if len(canon_phrase) < _NB_FUZZY_MIN_LEN:
+                continue
+            if _fuzzy_ratio(w, canon_phrase) >= _NB_FUZZY_THRESHOLD:
+                return True
+
+    return False
+
+
+# ================================================================
 # IS CLEAR PATTERN
 # ================================================================
 
@@ -259,6 +368,10 @@ def _is_clear_booking_pattern(original, numbers, is_global_half, is_global_full,
     False → AI ይጠራ
     """
     latin_orig = original.lower()
+
+    # ── NOT-BOOKING phrase match (fuzzy, latin-normalized) → always AI ──
+    if _is_not_booking_phrase_present(original):
+        return False
 
     # ── query words ካሉ → always AI ──────────────────────────────
     for qw in QUERY_WORDS_SET:
@@ -518,6 +631,31 @@ if __name__ == "__main__":
         ("11 ትላንትና ሳልይዝ ቀረው",            False, None),
         ("11 የማነው",                        False, None),
         ("11 በሙሉ አበበ ብልህ ያዝ ወንድሜ ቢል",   True,  [(11, False, None)]),
+
+        # ── NOT-BOOKING (result-claim/ordinal/shortfall) ❌ ──
+        ("100 ግልባጭ",                       False, None),
+        ("100 ብር ግልባጭ",                    False, None),
+        ("100 ከርብት",                        False, None),
+        ("100 አለኝ",                         False, None),
+        ("1000 ላክ",                         False, None),
+        ("3 ተኛ አለኝ",                        False, None),
+        ("3 ተኛ ነበረኝ",                       False, None),
+        ("100 ብር ነበረኝ",                     False, None),
+        ("100 ነበረኝ",                        False, None),
+        ("600 አላከም",                        False, None),
+        ("600 አልከረበትከም",                    False, None),
+        ("600 አልገለበትክም",                    False, None),
+        ("600 አላክልኝም",                      False, None),
+        ("400 ይቀረኛል",                       False, None),
+        ("600 ቀረኝ",                         False, None),
+        ("400 እልክልሀለው",                     False, None),
+        ("200 እየላኩልህ ነው",                  False, None),
+        ("01 መድብ",                          False, None),
+        ("03 መድብልኝ",                        False, None),
+        ("1ኛ የኔ ነው",                        False, None),
+        ("200 ቀረ",                          False, None),
+        ("1ኛ የኔ ነበረ",                       False, None),
+        ("10 ቀሪ",                           False, None),
     ]
 
     print("=" * 60)
