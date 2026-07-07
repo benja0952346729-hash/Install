@@ -311,7 +311,7 @@ def _canonical_form(text: str) -> str:
 
 
 NOT_BOOKING_PHRASES = [
-    "ግልባጭ", "ከርብት",
+    "ግልባጭ", "ከርብት", "ገልብጥ",
     "አለኝ", "ነበረኝ", "ነበረ",
     "ላክ", "አላከም", "አልከረበትከም", "አልገለበትክም", "አላክልኝም",
     "እልክልሀለው", "እየላኩልህ ነው",
@@ -319,9 +319,14 @@ NOT_BOOKING_PHRASES = [
     "ተኛ",
     "የኔ ነው", "የኔ ነበረ",
     "መድብ", "መድብልኝ",
+    "ወርውረው",
 ]
 
+# ── exact-match-only words (fuzzy አይሰራላቸውም — ትክክለኛ ፊደል መምታት አለበት) ──
+NOT_BOOKING_EXACT_ONLY = ["send", "done"]
+
 _NOT_BOOKING_CANONICAL = [_canonical_form(p) for p in NOT_BOOKING_PHRASES]
+_NOT_BOOKING_EXACT_CANONICAL = [_canonical_form(p) for p in NOT_BOOKING_EXACT_ONLY]
 
 _NB_FUZZY_THRESHOLD = 70
 _NB_FUZZY_MIN_LEN = 3
@@ -332,8 +337,17 @@ def _is_not_booking_phrase_present(text: str) -> bool:
     ጽሁፉ ውስጥ NOT_BOOKING_PHRASES ጋር (substring exact ወይም word-level
     fuzzy ≥70%, ≥3 ፊደል) ተመሳሳይነት ካለ True ይመልሳል። Amharic ኦርጅናል እና
     ቀ→k/q፣ ኝ→g/gn ልዩነት ችላ ተብሎ ሁለቱም spelling variant ይሰራል።
+
+    NOT_BOOKING_EXACT_ONLY ("send", "done") ግን fuzzy አይሰራላቸውም —
+    ትክክለኛ ቃል (whole word) መምታት አለበት፣ አጠራጣሪ substring/fuzzy አይፈቀድም።
     """
     canonical_text = _canonical_form(text)
+    words = canonical_text.split()
+
+    # exact-only words — whole-word exact match ብቻ
+    for canon_phrase in _NOT_BOOKING_EXACT_CANONICAL:
+        if canon_phrase in words:
+            return True
 
     # substring match — ordinal suffix (3ተኛ) ወይም ክፍተት-አልባ ጥምረት ይይዛል
     for canon_phrase in _NOT_BOOKING_CANONICAL:
@@ -343,7 +357,6 @@ def _is_not_booking_phrase_present(text: str) -> bool:
             return True
 
     # word-level fuzzy match — typo/spelling variation ይይዛል
-    words = canonical_text.split()
     for w in words:
         if len(w) < _NB_FUZZY_MIN_LEN:
             continue
@@ -656,6 +669,10 @@ if __name__ == "__main__":
         ("200 ቀረ",                          False, None),
         ("1ኛ የኔ ነበረ",                       False, None),
         ("10 ቀሪ",                           False, None),
+        ("600 ገልብጥ አስገባ",                   False, None),
+        ("600 ወርውረው",                       False, None),
+        ("600 send",                        False, None),
+        ("600 done",                        False, None),
     ]
 
     print("=" * 60)
