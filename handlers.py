@@ -689,7 +689,7 @@ Rules:
 - type: "Telebirr", "CBE", "Awash", "BOA", or "Other"
 - amount: the amount received (not including service charges/VAT)
 - sender_name: name of who sent the money (if mentioned). null if not found.
-- ref: transaction reference number. Only extract if Telebirr (transaction number). null for others.
+- ref: the transaction/reference number, if the SMS shows one (e.g. Telebirr's transaction number, Awash's "የግብይት ቁጥር", CBE's reference number, or any other bank's transaction ID). Extract it for ANY bank, not just Telebirr. null if no reference number appears in the SMS at all.
 - phone_last4: the LAST 4 DIGITS of the sender's phone number, if a phone number appears in the SMS (common for Telebirr). null if not found.
 - account_last4: the LAST 4 DIGITS of the SENDER's bank account number (the account money came FROM), if it appears. IMPORTANT: many CBE-style SMS mention TWO accounts — "from account X (Sender Name) to your account Y". X is the sender's account (use this), Y is your own/recipient account (ignore this, never use it). null if not found.
 - url: any URL found in the SMS. null if none.
@@ -1200,7 +1200,7 @@ RULES:
 - photoType: use bank name like "CBE", "Telebirr", "Awash", "BOA", "Dashen", etc.
 - amount: transferred amount (number only)
 - sender_name: name of sender/payer. null if not found.
-- ref: transaction ref (Telebirr only). null for others.
+- ref: the transaction/reference number if visible on the receipt (any bank — Telebirr, CBE, Awash, etc, not just Telebirr). null if not shown.
 - description: brief English description
 - lang: is the receipt text in "amharic" or "english"?
 
