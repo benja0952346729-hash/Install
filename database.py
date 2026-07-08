@@ -3111,7 +3111,7 @@ def save_screenshot_payment(telegram_id: int, amount, sender_name: str,
             WHERE telegram_id=%s AND matched=FALSE
         """, (telegram_id,))
 
-    safe_ref = ref if (pay_type == "Telebirr" and ref) else str(uuid.uuid4())
+    safe_ref = ref if ref else str(uuid.uuid4())
 
     cur.execute("""
         INSERT INTO screenshot_payments
