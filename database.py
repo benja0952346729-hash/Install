@@ -415,6 +415,17 @@ def init_db():
                     UNIQUE(group_id, telegram_id, pay_type)
                 )
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS payment_claims (
+                    id SERIAL PRIMARY KEY,
+                    group_id BIGINT NOT NULL,
+                    game_id INT,
+                    telegram_id BIGINT NOT NULL,
+                    claim_chat_id BIGINT,
+                    claim_message_id BIGINT,
+                    created_at TIMESTAMP DEFAULT NOW()
+                )
+            """)
 
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS warning_media (
@@ -754,6 +765,154 @@ def find_unmatched_sms_for_user(group_id: int, sender_name: str = None,
         "amount": float(amount),
         "type": sms_type,
         "sender_name": sms_sender,
+    }
+
+
+# ============================================================
+# PENDING PAYMENT CLAIMS — user "ልኬያለው" ብሎ ጽሁፍ ብቻ ሲልክ ገና SMS
+# ካልደረሰ (screenshot_payments style) pending ሆኖ ይቀመጣል፣ SMS ሲደርስ
+# fingerprint via ራስ-ሰር ይዛመዳል፣ ኦርጅናል "ልኬያለው" message ላይ reply
+# ተደርጎ amount ይነገራል።
+# ============================================================
+
+def _ensure_payment_claims_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS payment_claims (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            game_id INT,
+            telegram_id BIGINT NOT NULL,
+            claim_chat_id BIGINT,
+            claim_message_id BIGINT,
+            created_at TIMESTAMP DEFAULT NOW()
+        )
+    """)
+
+
+def save_payment_claim(group_id: int, telegram_id: int, claim_chat_id: int,
+                        claim_message_id: int, game_id: int = None):
+    """
+    User "ልኬያለው" ብሎ ሲል SMS ገና ካልደረሰ ይህ ይጠራል። ቀድሞ pending claim ካለው
+    ለዚህ ተጠቃሚ (አሮጌው) ይተካል — አንድ ጊዜ ብቻ አንድ pending claim ይኖራል
+    (ልክ screenshot_payments እንደሚያደርገው)።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_payment_claims_table(cur)
+    cur.execute("""
+        DELETE FROM payment_claims WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, telegram_id))
+    cur.execute("""
+        INSERT INTO payment_claims (group_id, game_id, telegram_id, claim_chat_id, claim_message_id)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (group_id, game_id, telegram_id, claim_chat_id, claim_message_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def delete_payment_claim(group_id: int, telegram_id: int):
+    """ይህ user's pending payment claim (ካለ) ያጠፋል — ##paste ስኬታማ ከሆነ ወይም ##cancel ሲጠየቅ ይጠቅማል።"""
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_payment_claims_table(cur)
+    cur.execute("""
+        DELETE FROM payment_claims WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def delete_pending_screenshot_payment(group_id: int, telegram_id: int):
+    """
+    ✅ Stale-cleanup: user screenshot/URL ልኮ pending screenshot_payments
+    ውስጥ ተቀምጦ ከነበረ፣ ግን ገንዘቡ በሌላ ዘዴ (ለምሳሌ "ልኬያለው" fingerprint via
+    ወይም admin ##paste) ቀድሞ ከተረጋገጠ፣ ያ leftover unmatched screenshot
+    record stale ሆኖ እንዳይቀር ያጠፋል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        DELETE FROM screenshot_payments WHERE group_id=%s AND telegram_id=%s AND matched=FALSE
+    """, (group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def clear_payment_claims(group_id: int):
+    """/newgame ወይም pre-booking wipe ላይ ሁሉንም pending claims ለዚህ group ያጸዳል።"""
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_payment_claims_table(cur)
+    cur.execute("DELETE FROM payment_claims WHERE group_id=%s", (group_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def find_payment_claim_by_fingerprint(group_id: int, sender_name: str = None,
+                                       phone_last4: str = None, account_last4: str = None):
+    """
+    SMS ሲደርስ (handle_sms_webhook) ይህ ይጠራል። ያሉትን pending payment_claims
+    ሁሉ ፈልጎ፣ እያንዳንዱ claim's telegram_id ያለውን fingerprint (ስም + last4
+    ሁለቱም — ደህንነት ለማጠናከር) ካመሳሰለ ያንን claim ይመልሳል (dict) እና ወዲያውኑ
+    ያጠፋዋል (duplicate re-match እንዳይፈጠር)። ካልተገኘ None ይመልሳል።
+    """
+    if not group_id or not sender_name or not (phone_last4 or account_last4):
+        return None
+
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_payment_claims_table(cur)
+    cur.execute("""
+        SELECT id, telegram_id, claim_chat_id, claim_message_id
+        FROM payment_claims WHERE group_id=%s ORDER BY created_at ASC
+    """, (group_id,))
+    claims = cur.fetchall()
+
+    if not claims:
+        cur.close()
+        conn.close()
+        return None
+
+    _ensure_fingerprint_table(cur)
+    fp_rows = _get_group_fingerprints(cur, group_id)
+    fp_by_user = {}
+    for telegram_id, full_name, fp_phone, fp_account, pay_type in fp_rows:
+        fp_by_user.setdefault(telegram_id, []).append((full_name, fp_phone, fp_account))
+
+    chosen = None
+    for claim_id, telegram_id, claim_chat_id, claim_message_id in claims:
+        for full_name, fp_phone, fp_account in fp_by_user.get(telegram_id, []):
+            if not full_name or not _names_match(sender_name, full_name):
+                continue
+            last4_ok = (
+                (phone_last4 and fp_phone and phone_last4 == fp_phone) or
+                (account_last4 and fp_account and account_last4 == fp_account)
+            )
+            if last4_ok:
+                chosen = (claim_id, telegram_id, claim_chat_id, claim_message_id)
+                break
+        if chosen:
+            break
+
+    if not chosen:
+        cur.close()
+        conn.close()
+        return None
+
+    claim_id, telegram_id, claim_chat_id, claim_message_id = chosen
+    cur.execute("DELETE FROM payment_claims WHERE id=%s", (claim_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "telegram_id": telegram_id,
+        "claim_chat_id": claim_chat_id,
+        "claim_message_id": claim_message_id,
     }
 
 
@@ -2381,6 +2540,10 @@ def clear_game(game_id: int):
         cur.execute("""
             DELETE FROM screenshot_payments
             WHERE matched=FALSE AND group_id=%s
+        """, (group_id,))
+        cur.execute("""
+            DELETE FROM payment_claims
+            WHERE group_id=%s
         """, (group_id,))
 
     conn.commit()
