@@ -207,7 +207,7 @@ INTENT_EXAMPLES = {
     "complaint_why_sold": [
         "ለምን ሸጥከው", "ለምን ሸጠከው", "ለምን ትነቅላለህ",
         "ለምን ትሸጣለህ", "ለምን ሸጥህ", "ቁጥሬን ለምን ሸጥህ",
-        "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥከው",
+        "ቁጥሬን ለምን ነቀልክ", "ለምን ቁጥሬን ሸጥህ",
     ],
     "complaint_paid_removed": [
         "ከፍዬ ነቀልክ", "ተከፍሎ ነቀልክ", "ከፍዬ ሸጥክ",
@@ -343,6 +343,13 @@ INTENT_EXAMPLES = {
         "ቁጥሬ ተቀደመ", "ቀድሞብኛል", "ቀድሞብኝ",
         "lmin alyazkilgnim", "qedmalehu", "qedmobign",
         "yize neberku", "yene new", "qitre teqedeme",
+    ],
+    "payment_claim": [
+        "ልኬያለው", "ልኪያለው", "ላክያለው", "ልኬልሃለው",
+        "ተልኳል", "ልኩአለው", "ደርሷል", "ላክሁ", "ላከው",
+        "ገቢ አርጌያለው", "ገቢ አድርጌያለው", "ከፍያለው", "ተከፍያለው",
+        "done", "sent", "send አረግኩ", "paid", "✅",
+        "lkiyalew", "lkyalew", "derso", "gebi argeyalew",
     ],
 }
 
@@ -489,6 +496,23 @@ def detect_intent(text: str) -> tuple:
     _continuous_nums = re.findall(r'\b\d{9,}\b', text)
     if _continuous_nums:
         return "account_query", 1.0
+
+    # ── payment_claim ("ልኬያለው"/"done"/"✅") — booking numbers ከሌለ ብቻ
+    # fast-path ተፈትሽ (ቁጥር ካለ parse_numbers/booking flow ቅድሚያ ይኑረው)
+    PAYMENT_CLAIM_KW = [
+        normalize_to_latin("ልኬያለው"), normalize_to_latin("ልኪያለው"),
+        normalize_to_latin("ላክያለው"), normalize_to_latin("ልኬልሃለው"),
+        normalize_to_latin("ተልኳል"), normalize_to_latin("ልኩአለው"),
+        normalize_to_latin("ደርሷል"), normalize_to_latin("ላክሁ"),
+        normalize_to_latin("ላከው"), normalize_to_latin("ገቢ አርጌያለው"),
+        normalize_to_latin("ገቢ አድርጌያለው"), normalize_to_latin("ከፍያለው"),
+        normalize_to_latin("ተከፍያለው"),
+        "done", "sent", "paid", "lkiyalew", "lkyalew", "derso",
+    ]
+    text_stripped = text.strip()
+    if text_stripped in ("✅",) or any(kw in latin for kw in PAYMENT_CLAIM_KW):
+        if not numbers_in_text:
+            return "payment_claim", 1.0
 
     # ── i_won_query ───────────────────────────────────────────────
     I_WON_KW = [
@@ -763,7 +787,7 @@ def detect_intent(text: str) -> tuple:
                                 "result_query", "balance_query", "shortfall_query",
                                 "payment_not_received", "number_owner_query",
                                 "my_numbers_query", "winner_query", "i_won_query",
-                                "claim_ownership"):
+                                "claim_ownership", "payment_claim"):
                 bonus -= 0.10
         if not numbers_in_text and intent == "booking":
             bonus -= 0.15
@@ -1189,6 +1213,7 @@ def get_response(
         "why_not_registered": None,
         "my_numbers_query": False,
         "number_owner_query": None,
+        "payment_claim": False,
     }
 
     if registration_result is not None:
@@ -1218,6 +1243,13 @@ def get_response(
             return result
     # intent ከውጪ (Jina) ከመጣ threshold ድጋሚ አይፈተሽም —
     # Jina's own JINA_MIN_SCORE already gated it in jina_brain.py
+
+    # ── payment_claim ("ልኬያለው"/"done"/"✅") — reply ራሱ bot.py ውስጥ
+    # handle_payment_claim() ተጠቅሞ ይሰራል (fingerprint lookup ስለሚያስፈልግ)፣
+    # ስለዚህ እዚህ ምንም ጽሁፍ አንሰጥም፣ flag ብቻ እናነሳለን
+    if intent == "payment_claim":
+        result["payment_claim"] = True
+        return result
 
     # ── balance_query ─────────────────────────────────────────────
     if intent == "balance_query":
@@ -1712,6 +1744,7 @@ async def get_response_async(text: str, **kwargs) -> dict:
         "why_not_registered": None,
         "my_numbers_query": False,
         "number_owner_query": None,
+        "payment_claim": False,
     }
 
     def _save_context_safe(used_intent: str, reply: str):
