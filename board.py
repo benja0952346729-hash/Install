@@ -105,36 +105,57 @@ def get_group_start(number: int, per_person: int) -> int:
 
 
 def build_remaining(settings: dict, taken: dict) -> str:
+    """
+    FIX: ቀሪ ቁጥሮች ዝርዝር ማሳያ 3 ደረጃ ይከተላል፣ threshold ራሱ የሚሰላው ሙሉ ለሙሉ
+    ክፍት (full_open) ቁጥሮች ብዛት ላይ ብቻ ነው — ግማሽ ("+") ቁጥሮችን ሳይቆጥር።
+    ድምር (combined) ብዛት ምንም ያህል ትልቅ ቢሆንም ግድ የለውም፦
+
+      • full_open > 6  → ምንም ልዩ ዝርዝር አይታይም (None ይመለሳል)
+      • full_open 3-6  → ዝርዝር ይታያል፣ ግን ሙሉ-ብቻ ቁጥሮች (ግማሽ አይታይም)
+      • full_open ≤ 2  → ኦርጅናል/አሁኑ ባህሪ — ሙሉ እና ግማሽ ሁሉም አንድ ላይ ይታያሉ
+
+    ይህ display-only ለውጥ ነው፤ booking/count_remaining logic አልተነካም።
+    """
     total = settings["total_numbers"]
     per_person = settings["numbers_per_person"]
 
-    remaining = []
+    full_open = []
+    half_open = []
+
+    def _classify(n):
+        entry = taken.get(n, [])
+        if not entry:
+            full_open.append(n)
+        elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
+            half_open.append(n)
 
     if per_person == 1:
         for n in range(1, total + 1):
-            entry = taken.get(n, [])
-            if not entry:
-                remaining.append((n, False))
-            elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
-                remaining.append((n, True))
+            _classify(n)
     else:
         n = 1
         while n <= total:
-            group_start = n
-            entry = taken.get(group_start, [])
-            if not entry:
-                remaining.append((group_start, False))
-            elif len(entry) == 1 and entry[0][1] and not entry[0][4]:
-                remaining.append((group_start, True))
+            _classify(n)
             n += per_person
 
-    if not remaining:
+    if not full_open and not half_open:
+        return None
+
+    full_count = len(full_open)
+
+    if full_count > 6:
         return None
 
     lines = ["⚠️ ቀሪ ቁጥሮች!"]
-    for num, is_half in remaining:
-        label = format_number(num)
-        lines.append(f"{label}+" if is_half else label)
+
+    if full_count <= 2:
+        combined = sorted(set(full_open) | set(half_open))
+        for num in combined:
+            label = format_number(num)
+            lines.append(f"{label}+" if num in half_open else label)
+    else:
+        for num in sorted(full_open):
+            lines.append(format_number(num))
 
     return "\n".join(lines)
 
