@@ -28,6 +28,9 @@ from database import (
     save_winner,
     log_activity,
     find_matching_sms,
+    save_user_fingerprint,
+    find_user_by_fingerprint,
+    find_unmatched_sms_for_user,
 )
 from jina_brain import get_shared_jina_key
 
@@ -195,7 +198,6 @@ async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str
                 continue
             logger.error(f"[Groq Vision] Non-rate error: {e}")
             raise
-    raise RuntimeError("All Groq vision keys exhausted or returned empty content")
     raise RuntimeError("All Groq keys exhausted")
 
 
@@ -606,6 +608,8 @@ Rules:
 - amount: the amount received (not including service charges/VAT)
 - sender_name: name of who sent the money (if mentioned). null if not found.
 - ref: transaction reference number. Only extract if Telebirr (transaction number). null for others.
+- phone_last4: the LAST 4 DIGITS of the sender's phone number, if a phone number appears in the SMS (common for Telebirr). null if not found.
+- account_last4: the LAST 4 DIGITS of the SENDER's bank account number (the account money came FROM), if it appears. IMPORTANT: many CBE-style SMS mention TWO accounts — "from account X (Sender Name) to your account Y". X is the sender's account (use this), Y is your own/recipient account (ignore this, never use it). null if not found.
 - url: any URL found in the SMS. null if none.
 
 Respond ONLY in this exact JSON format with no extra text:
@@ -615,6 +619,8 @@ Respond ONLY in this exact JSON format with no extra text:
   "amount": <number or null>,
   "sender_name": "<name or null>",
   "ref": "<ref or null>",
+  "phone_last4": "<4 digits or null>",
+  "account_last4": "<4 digits or null>",
   "url": "<url or null>"
 }"""
 
@@ -629,7 +635,7 @@ Respond ONLY in this exact JSON format with no extra text:
         text = re.sub(r"\s*```$", "", text)
         parsed = json.loads(text.strip())
 
-        for field in ("sender_name", "ref", "url"):
+        for field in ("sender_name", "ref", "url", "phone_last4", "account_last4"):
             if parsed.get(field) in ("null", "None", "", "N/A"):
                 parsed[field] = None
 
@@ -665,6 +671,10 @@ REFERENCE RULES:
 - Look for: "Reference No", "Transaction ID", "Ref", "Transaction No", "የግብይት ቁጥር"
 - Return as-is
 
+LAST-4-DIGIT RULES:
+- phone_last4: last 4 digits of sender's/payer's phone number if shown
+- account_last4: last 4 digits of the SENDER's/PAYER's bank account (the account money came FROM). If the receipt also shows the recipient's own account, ignore that one — only use the payer's account.
+
 BANK DETECTION:
 - mbreciept.cbe.com.et → "CBE"
 - telebirr → "Telebirr"
@@ -674,12 +684,12 @@ BANK DETECTION:
 - Otherwise detect from page content
 
 If the page is NOT a bank receipt at all, return:
-{"amount": null, "sender_name": null, "ref": null, "bank": null}
+{"amount": null, "sender_name": null, "ref": null, "bank": null, "phone_last4": null, "account_last4": null}
 
 Only return amount if you are confident this is a payment receipt.
 
 Respond ONLY in JSON with no extra text:
-{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<bank name or null>"}"""},
+{"amount": <number or null>, "sender_name": "<name or null>", "ref": "<ref or null>", "bank": "<bank name or null>", "phone_last4": "<4 digits or null>", "account_last4": "<4 digits or null>"}"""},
         {"role": "user", "content": html[:4000]},
     ]
     try:
@@ -791,12 +801,16 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
     ref = parsed.get("ref")
     sms_type = parsed.get("type")
     url = parsed.get("url")
+    phone_last4 = parsed.get("phone_last4")
+    account_last4 = parsed.get("account_last4")
 
     if not amount:
         return {"success": False, "reason": "no_amount"}
 
-    if url and (not sender_name or len(sender_name.split()) < 2):
-        logger.info(f"[SMS] Sender name incomplete — fetching from URL: {url}")
+    # ✅ Fingerprint feature — ስም ወይም last4 (phone/account) ካጣ ብቻ URL fetch
+    # ይሞክር (ካለ)፣ ስም እና last4 ሁለቱም ካሉ ተጨማሪ API ጥሪ አያስፈልግም
+    if url and (not sender_name or (not phone_last4 and not account_last4)):
+        logger.info(f"[SMS] Sender name/last4 incomplete — fetching from URL: {url}")
         url_data = await fetch_payment_data_from_url(url)
         if url_data:
             if url_data.get("sender_name"):
@@ -805,6 +819,10 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
                 amount = url_data["amount"]
             if url_data.get("ref") and not ref:
                 ref = url_data["ref"]
+            if url_data.get("phone_last4") and not phone_last4:
+                phone_last4 = url_data["phone_last4"]
+            if url_data.get("account_last4") and not account_last4:
+                account_last4 = url_data["account_last4"]
 
     logger.info(f"[SMS] type={sms_type} | amount={amount} | sender={sender_name} | ref={ref} | group={group_id}")
 
@@ -819,6 +837,8 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
         raw_sms=raw_sms,
         group_id=group_id,
         game_id=game_id,
+        phone_last4=phone_last4,
+        account_last4=account_last4,
     )
 
     if result.get("matched") and bot:
@@ -1331,6 +1351,23 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
     logger.info(f"[Match] ✅ TelegramID: {telegram_id} | ETB {amount} | confirmed: {len(confirmed)}")
 
+    # ✅ Fingerprint learn — ክፍያ በተሳካ ሁኔታ ሲረጋገጥ (screenshot/SMS ማች)
+    # ይህ user's phone/account last-4 + ስም ይማራል/ይዘምናል፣ ወደፊት "ልኬያለው"
+    # ብቻ ቢል ራስ-ሰር እንዲዛመድ
+    try:
+        pay_type = match_data.get("type") or ""
+        sender_name = match_data.get("sender_name")
+        phone_last4 = match_data.get("phone_last4")
+        account_last4 = match_data.get("account_last4")
+        if _group_id and (sender_name or phone_last4 or account_last4):
+            save_user_fingerprint(
+                group_id=_group_id, telegram_id=telegram_id,
+                full_name=sender_name, phone_last4=phone_last4,
+                account_last4=account_last4, pay_type=pay_type,
+            )
+    except Exception as _fp_err:
+        logger.warning(f"[Fingerprint] learn error: {_fp_err}")
+
     target_chat = _group_id
 
     if confirmed:
@@ -1436,22 +1473,177 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
 
 # ============================================================
-# GROQ — አማርኛ ማብራሪያ
+# PAYMENT CLAIM ("ልኬያለው"/"done"/"✅" text-only claim) HANDLER
 # ============================================================
 
-async def describe_photo_in_amharic(description: str) -> str:
+async def handle_payment_claim(bot, msg, user_id: int, group_id: int, settings: dict = None):
+    """
+    User "ልኬያለው"/"done"/"✅" ወዘተ ብቻ ጽሁፍ (ምንም screenshot ሳይኖር) ሲልክ ይጠራል።
+
+    1) ይህ user ቀድሞ fingerprint (phone/account last4 + ስም) ካለው፣ unmatched
+       sms_payments pool ውስጥ fingerprint-matched SMS ካገኘ → confirm_payment()
+       ጠርቶ **"<amount> ብር"** ብቻ (ምንም ተጨማሪ ጽሁፍ) reply ያደርጋል።
+    2) fingerprint የለውም ወይም unmatched SMS ገና ካልደረሰ → ምንም ጽሁፍ አይላክም፣
+       🙏 reaction ብቻ ተደርጎ ይጠብቃል (SMS webhook ወይም admin ## paste ይመጣል)።
+    """
+    _group_id = group_id or msg.chat.id
+
+    fp_conn_ok = True
     try:
-        messages = [{
-            "role": "user",
-            "content": (
-                f'ይህ ምስል "{description}" ነው። '
-                "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
-            ),
-        }]
-        return await _call_groq_with_rotation(messages, max_tokens=100)
+        from database import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT full_name, phone_last4, account_last4
+            FROM user_payment_fingerprints
+            WHERE group_id=%s AND telegram_id=%s
+            LIMIT 1
+        """, (_group_id, user_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
     except Exception as e:
-        logger.error(f"[Describe] Error: {e}")
-        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
+        logger.warning(f"[PaymentClaim] fingerprint lookup error: {e}")
+        row = None
+
+    if not row:
+        # fingerprint የለም — ምንም አናድርግ፣ 🙏 reaction ብቻ
+        try:
+            await bot.set_message_reaction(chat_id=msg.chat.id, message_id=msg.message_id, reaction=["🙏"])
+        except Exception as e:
+            logger.warning(f"[PaymentClaim] Could not set reaction: {e}")
+        return
+
+    full_name, phone_last4, account_last4 = row
+
+    game_id = settings["id"] if settings else None
+    sms_match = find_unmatched_sms_for_user(
+        group_id=_group_id, sender_name=full_name,
+        phone_last4=phone_last4, account_last4=account_last4,
+        game_id=game_id,
+    )
+
+    if not sms_match:
+        # ገና SMS አልደረሰም — ይጠብቅ (🙏 reaction ብቻ)
+        try:
+            await bot.set_message_reaction(chat_id=msg.chat.id, message_id=msg.message_id, reaction=["🙏"])
+        except Exception as e:
+            logger.warning(f"[PaymentClaim] Could not set reaction: {e}")
+        return
+
+    amount = sms_match["amount"]
+    result = confirm_payment(user_id, amount, group_id=_group_id)
+    confirmed = result["confirmed"]
+
+    # ✅ ውጤት: amount ብቻ ("300 ብር") — ምንም ተጨማሪ ጽሁፍ/emoji
+    try:
+        await msg.reply_text(f"{int(amount) if float(amount).is_integer() else amount} ብር")
+    except Exception as e:
+        logger.warning(f"[PaymentClaim] reply error: {e}")
+
+    if confirmed and settings:
+        taken = get_taken_numbers(settings["id"])
+        paid = get_paid_numbers(settings["id"])
+        from board import build_board
+        board_text = build_board(settings, taken, paid)
+        board_msg_id = settings.get("board_message_id")
+        if board_msg_id:
+            try:
+                await bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
+            except Exception:
+                pass
+
+    try:
+        from ai_fallback import log_transaction
+        if confirmed:
+            log_transaction(
+                group_id=_group_id, game_id=game_id,
+                telegram_id=user_id, amount=amount,
+                reason="payment_confirmed_claim", done_by="user",
+                balance_after=result.get("remaining_balance"),
+            )
+    except Exception as _log_err:
+        logger.warning(f"[log_transaction] Error: {_log_err}")
+
+
+# ============================================================
+# ADMIN "##<SMS text>" PASTE HANDLER (reply-to-user)
+# ============================================================
+
+async def handle_admin_sms_paste(bot, msg, sms_text: str, target_user_id: int, group_id: int):
+    """
+    Admin የተጠቃሚውን መልእክት reply አድርጎ "##<SMS text>" ሲለጥፍ ይጠራል።
+    parse_sms() (Groq) ጽሁፉን ተንትኖ amount/sender_name/phone_last4/
+    account_last4/url ያወጣል፣ ስም ወይም last4 ሁለቱም ካጡ ብቻ (URL ካለ)
+    fetch_payment_data_from_url() ን በመጠቀም ሙሉ receipt ያመጣል። ከዛ
+    reply-to ያለው target_user_id ላይ በቀጥታ confirm_payment() ተጠርቶ
+    fingerprint ይማራል።
+
+    ውጤት (dict) ይመልሳል: {"success": bool, "amount": float|None, "reason": str}
+    """
+    _group_id = group_id or msg.chat.id
+
+    parsed = await parse_sms(sms_text)
+    if not parsed or not parsed.get("amount"):
+        return {"success": False, "amount": None, "reason": "unparseable"}
+
+    amount = parsed.get("amount")
+    sender_name = parsed.get("sender_name")
+    pay_type = parsed.get("type")
+    phone_last4 = parsed.get("phone_last4")
+    account_last4 = parsed.get("account_last4")
+    url = parsed.get("url")
+
+    # ስም ወይም last4 ካጣ ብቻ (URL ካለ) Jina+Groq ገብቶ ሙሉ receipt ያመጣል
+    if url and (not sender_name or (not phone_last4 and not account_last4)):
+        url_data = await fetch_payment_data_from_url(url)
+        if url_data:
+            if url_data.get("sender_name") and not sender_name:
+                sender_name = url_data["sender_name"]
+            if url_data.get("amount") and not amount:
+                amount = url_data["amount"]
+            if url_data.get("phone_last4") and not phone_last4:
+                phone_last4 = url_data["phone_last4"]
+            if url_data.get("account_last4") and not account_last4:
+                account_last4 = url_data["account_last4"]
+
+    result = confirm_payment(target_user_id, amount, group_id=_group_id)
+
+    try:
+        save_user_fingerprint(
+            group_id=_group_id, telegram_id=target_user_id,
+            full_name=sender_name, phone_last4=phone_last4,
+            account_last4=account_last4, pay_type=pay_type or "",
+        )
+    except Exception as e:
+        logger.warning(f"[AdminSmsPaste] fingerprint save error: {e}")
+
+    settings = get_active_settings(group_id=_group_id)
+    if result["confirmed"] and settings:
+        taken = get_taken_numbers(settings["id"])
+        paid = get_paid_numbers(settings["id"])
+        from board import build_board
+        board_text = build_board(settings, taken, paid)
+        board_msg_id = settings.get("board_message_id")
+        if board_msg_id:
+            try:
+                await bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
+            except Exception:
+                pass
+
+    try:
+        from ai_fallback import log_transaction
+        if result["confirmed"]:
+            log_transaction(
+                group_id=_group_id, game_id=settings["id"] if settings else None,
+                telegram_id=target_user_id, amount=amount,
+                reason="payment_confirmed_admin_sms", done_by="admin",
+                balance_after=result.get("remaining_balance"),
+            )
+    except Exception as _log_err:
+        logger.warning(f"[log_transaction] Error: {_log_err}")
+
+    return {"success": True, "amount": amount, "reason": "ok"}
 
 
 # ============================================================
