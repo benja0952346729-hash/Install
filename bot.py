@@ -52,6 +52,7 @@ from database import (
     get_recent_winners_for_user,
     save_registrations_snapshot,
     set_name_override, get_name_override, clear_name_override,
+    delete_user_fingerprint,
 )
 from parser import parse_numbers, format_number
 from board import (
@@ -59,7 +60,7 @@ from board import (
     count_remaining, get_group_start,
     build_warning, build_nekay
 )
-from handlers import handle_payment_photo, handle_sms_webhook, handle_winner_photo, handle_receipt_url
+from handlers import handle_payment_photo, handle_sms_webhook, handle_winner_photo, handle_receipt_url, handle_payment_claim, handle_admin_sms_paste
 from ai_fallback import get_ai_fallback, log_transaction, ensure_nvidia_text_health_task_started, clear_all_context_for_group
 
 logging.basicConfig(
@@ -1249,6 +1250,10 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         failed_attempts=user_failed_attempts,
     )
 
+    if resp.get("payment_claim"):
+        await handle_payment_claim(ctx.bot, msg, user_id, group_id, settings=settings)
+        return
+
     if resp.get("my_numbers_query"):
         from responder import _format_my_numbers, RESPONSES as RESP
         if not user_numbers:
@@ -2373,10 +2378,19 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #   "#/ NUM ..."  (ስላሽ አለው)  → Owner reassignment ብቻ, ለምሳሌ #/ 01 21 31+1
     #   "#name <ስም>"  → FIX #3: name override, ለምሳሌ #name አበበ ወይም #name አበበ ከበደ
     #                    "#name" ብቻ (ስም ሳይከተል) → override reset
+    #   "##cancel"    → payment-fingerprint feature: ያ user's fingerprint ያጠፋል
+    #   "##<SMS text>" → payment-fingerprint feature: admin ራሱ የደረሰውን SMS
+    #                    ጽሁፍ ኮፒ አድርጎ reply ያደርጋል → AI parse → confirm_payment
+    #                    + fingerprint learn (ወደፊት "ልኬያለው" ራስ-ሰር እንዲሆን)
+    is_sms_cancel_form = text.lower().startswith("##cancel")
+    is_sms_paste_form = text.startswith("##") and not is_sms_cancel_form
     is_name_form = text.lower().startswith("#name")
-    is_payment_form = text.startswith("#") and not text.startswith("#/") and not is_name_form
+    is_payment_form = (
+        text.startswith("#") and not text.startswith("#/")
+        and not is_name_form and not text.startswith("##")
+    )
     is_owner_form = text.startswith("#/")
-    if not (is_payment_form or is_owner_form or is_name_form):
+    if not (is_payment_form or is_owner_form or is_name_form or is_sms_cancel_form or is_sms_paste_form):
         return
 
     logging.info(f"[OwnerReply] Triggered: text={text!r} chat={update.effective_chat.id} user={update.effective_user.id}")
@@ -2431,6 +2445,54 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
         except Exception:
             pass
+        return
+
+    # ============================================================
+    # "##cancel" — admin የተሳሳተ fingerprint (ስም/last4) ካስቀመጠ ለዚህ user
+    # (reply-to-user) ያለውን fingerprint ሙሉ በሙሉ ያጠፋል።
+    # ============================================================
+    if is_sms_cancel_form:
+        delete_user_fingerprint(group_id, owner_id)
+        try:
+            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+        except Exception:
+            pass
+        winner_name = owner.first_name or owner.username or "Unknown"
+        await _send_temp_admin_message(ctx.bot, group_id, f"✅ {winner_name} fingerprint ጠፋ")
+        return
+
+    # ============================================================
+    # "##<SMS text>" — admin የደረሰውን ትክክለኛ SMS ጽሁፍ ኮፒ አድርጎ user's
+    # message ላይ reply ያደርጋል። AI (Groq) parse ያደርገዋል፣ ስም/last4
+    # ካጣ ብቻ (URL ካለ) Jina+Groq ሙሉ receipt ያመጣል፣ ከዛ reply-to ያለው
+    # owner_id ላይ በቀጥታ confirm_payment() ተጠርቶ fingerprint ይማራል።
+    # ============================================================
+    if is_sms_paste_form:
+        sms_text = text[2:].strip()
+        if not sms_text:
+            await msg.reply_text("❌ ምሳሌ: ##<SMS ጽሁፍ ኮፒ አድርገህ ለጥፍ>")
+            return
+
+        settings_for_sms = get_active_settings(group_id=group_id)
+        result = await handle_admin_sms_paste(ctx.bot, msg, sms_text, owner_id, group_id)
+
+        if not result.get("success"):
+            await msg.reply_text("❌ SMS ሊተነተን አልቻለም — ጽሁፉን እንደገና ኮፒ አድርገህ ላክ")
+            return
+
+        try:
+            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+        except Exception:
+            pass
+
+        winner_name = owner.first_name or owner.username or "Unknown"
+        amount = result.get("amount")
+        await _send_temp_admin_message(
+            ctx.bot, group_id, f"✅ {winner_name} → ETB {amount} ተረጋግጧል (SMS)"
+        )
+
+        if settings_for_sms:
+            await _refresh_board(ctx, settings_for_sms, group_id)
         return
 
     if is_payment_form:
