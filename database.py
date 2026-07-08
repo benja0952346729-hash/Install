@@ -399,6 +399,23 @@ def init_db():
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS amount NUMERIC;")
             cur.execute("ALTER TABLE screenshot_payments ADD COLUMN IF NOT EXISTS sender_name TEXT;")
 
+            # ✅ Fingerprint feature — SMS ላይ phone/account last-4 digit መያዝ
+            cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS phone_last4 TEXT;")
+            cur.execute("ALTER TABLE sms_payments ADD COLUMN IF NOT EXISTS account_last4 TEXT;")
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS user_payment_fingerprints (
+                    id SERIAL PRIMARY KEY,
+                    group_id BIGINT NOT NULL,
+                    telegram_id BIGINT NOT NULL,
+                    full_name TEXT,
+                    phone_last4 TEXT,
+                    account_last4 TEXT,
+                    pay_type TEXT,
+                    updated_at TIMESTAMP DEFAULT NOW(),
+                    UNIQUE(group_id, telegram_id, pay_type)
+                )
+            """)
+
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS warning_media (
                     id SERIAL PRIMARY KEY,
@@ -562,6 +579,182 @@ def clear_name_override(group_id: int, telegram_id: int):
     conn.commit()
     cur.close()
     conn.close()
+
+
+# ============================================================
+# USER PAYMENT FINGERPRINTS — "ልኬያለው" (text-only payment claims)
+# ራስ-ሰር ለማዛመድ የሚያገለግል fingerprint (phone/account last-4 + ስም)።
+# አንድ user ቀድሞ screenshot/SMS/##-admin-paste በኩል ተመዝግቦ ከሆነ፣ ቀጣይ ጊዜ
+# "ልኬያለው"/"done"/"✅" ብቻ ቢል በዚህ fingerprint ራስ-ሰር ይዛመዳል።
+# ============================================================
+
+def _ensure_fingerprint_table(cur):
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS user_payment_fingerprints (
+            id SERIAL PRIMARY KEY,
+            group_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            full_name TEXT,
+            phone_last4 TEXT,
+            account_last4 TEXT,
+            pay_type TEXT,
+            updated_at TIMESTAMP DEFAULT NOW(),
+            UNIQUE(group_id, telegram_id, pay_type)
+        )
+    """)
+
+
+def save_user_fingerprint(group_id: int, telegram_id: int, full_name: str = None,
+                           phone_last4: str = None, account_last4: str = None,
+                           pay_type: str = None):
+    """
+    ክፍያ በተሳካ ሁኔታ ሲረጋገጥ (notify_match/admin-##-paste በኩል) ይጠራል።
+    telegram_id ቀድሞ fingerprint ካለው (ተመሳሳይ pay_type) ይዘምናል፣ ካልሆነ
+    አዲስ ይፈጠራል። ባዶ/None fields ነባሩን አይደመስሱም (COALESCE)።
+    """
+    if not group_id or not telegram_id:
+        return
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_fingerprint_table(cur)
+    cur.execute("""
+        INSERT INTO user_payment_fingerprints
+            (group_id, telegram_id, full_name, phone_last4, account_last4, pay_type)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        ON CONFLICT (group_id, telegram_id, pay_type) DO UPDATE
+            SET full_name=COALESCE(EXCLUDED.full_name, user_payment_fingerprints.full_name),
+                phone_last4=COALESCE(EXCLUDED.phone_last4, user_payment_fingerprints.phone_last4),
+                account_last4=COALESCE(EXCLUDED.account_last4, user_payment_fingerprints.account_last4),
+                updated_at=NOW()
+    """, (group_id, telegram_id, full_name, phone_last4, account_last4, pay_type or ""))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def delete_user_fingerprint(group_id: int, telegram_id: int):
+    """##cancel — admin የተሳሳተ fingerprint ካስቀመጠ ያ user's fingerprint(s) ሁሉ ይጠፋሉ።"""
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_fingerprint_table(cur)
+    cur.execute("""
+        DELETE FROM user_payment_fingerprints WHERE group_id=%s AND telegram_id=%s
+    """, (group_id, telegram_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def _get_group_fingerprints(cur, group_id: int) -> list:
+    cur.execute("""
+        SELECT telegram_id, full_name, phone_last4, account_last4, pay_type
+        FROM user_payment_fingerprints WHERE group_id=%s
+    """, (group_id,))
+    return cur.fetchall()
+
+
+def find_user_by_fingerprint(group_id: int, sender_name: str = None,
+                              phone_last4: str = None, account_last4: str = None) -> int:
+    """
+    SMS ላይ ካለው ስም እና last4 (phone ወይም account) ጋር **ሁለቱም** የሚመሳሰል
+    fingerprint ካለው ብቻ ያ telegram_id ይመልሳል፣ አንዱ ብቻ (ስም ብቻ ወይም last4
+    ብቻ) በቂ አይደለም — ደህንነት ለማጠናከር። ካልተገኘ None ይመልሳል።
+    """
+    if not group_id:
+        return None
+    if not sender_name or not (phone_last4 or account_last4):
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+    _ensure_fingerprint_table(cur)
+    rows = _get_group_fingerprints(cur, group_id)
+    cur.close()
+    conn.close()
+
+    if not rows:
+        return None
+
+    for telegram_id, full_name, fp_phone, fp_account, pay_type in rows:
+        if not full_name or not _names_match(sender_name, full_name):
+            continue
+        last4_ok = (
+            (phone_last4 and fp_phone and phone_last4 == fp_phone) or
+            (account_last4 and fp_account and account_last4 == fp_account)
+        )
+        if last4_ok:
+            return telegram_id
+
+    return None
+
+
+def find_unmatched_sms_for_user(group_id: int, sender_name: str = None,
+                                 phone_last4: str = None, account_last4: str = None,
+                                 game_id: int = None):
+    """
+    payment_claim ("ልኬያለው") ሲመጣ፣ ይህ user's fingerprint ጋር የሚመሳሰል
+    unmatched sms_payments row ካለ ይመልሳል (dict) እና ያንን SMS record
+    ወዲያውኑ ያጠፋል (duplicate/re-match እንዳይፈጠር) — ልክ እንደ find_matching_sms
+    ስልት። ካልተገኘ None ይመልሳል።
+    """
+    if not group_id:
+        return None
+    conn = get_conn()
+    cur = conn.cursor()
+
+    if game_id is not None:
+        cur.execute("""
+            SELECT id, ref_no, amount, sender_name, pay_type, phone_last4, account_last4
+            FROM sms_payments
+            WHERE matched=FALSE AND group_id=%s AND (game_id=%s OR game_id IS NULL)
+            ORDER BY created_at ASC
+        """, (group_id, game_id))
+    else:
+        cur.execute("""
+            SELECT id, ref_no, amount, sender_name, pay_type, phone_last4, account_last4
+            FROM sms_payments
+            WHERE matched=FALSE AND group_id=%s AND game_id IS NULL
+            ORDER BY created_at ASC
+        """, (group_id,))
+    candidates = cur.fetchall()
+
+    if not candidates:
+        cur.close()
+        conn.close()
+        return None
+
+    # ✅ ደህንነት ማጠናከሪያ: last4 (phone ወይም account) እና ስም **ሁለቱም**
+    # መመሳሰል አለባቸው — አንዱ ብቻ በቂ አይደለም
+    chosen = None
+    if sender_name and (phone_last4 or account_last4):
+        for row in candidates:
+            sms_id, ref, amount, sms_sender, sms_type, sms_phone, sms_account = row
+            if not sms_sender or not _names_match(sender_name, sms_sender):
+                continue
+            last4_ok = (
+                (phone_last4 and sms_phone and phone_last4 == sms_phone) or
+                (account_last4 and sms_account and account_last4 == sms_account)
+            )
+            if last4_ok:
+                chosen = row
+                break
+
+    if not chosen:
+        cur.close()
+        conn.close()
+        return None
+
+    sms_id, ref, amount, sms_sender, sms_type, sms_phone, sms_account = chosen
+    cur.execute("DELETE FROM sms_payments WHERE id=%s", (sms_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+    return {
+        "id": sms_id,
+        "amount": float(amount),
+        "type": sms_type,
+        "sender_name": sms_sender,
+    }
 
 
 # ============================================================
@@ -2571,26 +2764,27 @@ def _names_match(name1: str, name2: str) -> bool:
     return False
 
 
-def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str, group_id: int = None, game_id: int = None) -> dict:
+def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms: str, group_id: int = None,
+                      game_id: int = None, phone_last4: str = None, account_last4: str = None) -> dict:
     conn = get_conn()
     cur = conn.cursor()
 
     # group_id ከሌለ insert ብቻ እናድርግ — match አንሞክር
     if not group_id:
         cur.execute("""
-            INSERT INTO sms_payments (group_id, game_id, ref_no, amount, sender_name, pay_type, raw_sms, matched)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
-        """, (group_id, game_id, ref, amount, sender_name, sms_type, raw_sms))
+            INSERT INTO sms_payments (group_id, game_id, ref_no, amount, sender_name, pay_type, raw_sms, matched, phone_last4, account_last4)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, %s, %s)
+        """, (group_id, game_id, ref, amount, sender_name, sms_type, raw_sms, phone_last4, account_last4))
         conn.commit()
         cur.close()
         conn.close()
         return {"matched": None}
 
     cur.execute("""
-        INSERT INTO sms_payments (group_id, game_id, ref_no, amount, sender_name, pay_type, raw_sms, matched)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE)
+        INSERT INTO sms_payments (group_id, game_id, ref_no, amount, sender_name, pay_type, raw_sms, matched, phone_last4, account_last4)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, %s, %s)
         RETURNING id
-    """, (group_id, game_id, ref, amount, sender_name, sms_type, raw_sms))
+    """, (group_id, game_id, ref, amount, sender_name, sms_type, raw_sms, phone_last4, account_last4))
     sms_id = cur.fetchone()[0]
     conn.commit()
 
@@ -2647,6 +2841,8 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
             "group_id": group_id,
             "receipt_chat_id": scr_chat_id,
             "receipt_message_id": scr_msg_id,
+            "phone_last4": phone_last4,
+            "account_last4": account_last4,
         }
 
     cur.close()
@@ -2665,7 +2861,7 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
     # ✅ game_id None ሲሆን IS NULL ተጠቀም
     if game_id is not None:
         cur.execute("""
-            SELECT id, ref_no, amount, sender_name, pay_type
+            SELECT id, ref_no, amount, sender_name, pay_type, phone_last4, account_last4
             FROM sms_payments
             WHERE matched=FALSE
               AND group_id=%s
@@ -2675,7 +2871,7 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
         """, (group_id, game_id, float(amount) - AMOUNT_TOLERANCE, float(amount) + AMOUNT_TOLERANCE))
     else:
         cur.execute("""
-            SELECT id, ref_no, amount, sender_name, pay_type
+            SELECT id, ref_no, amount, sender_name, pay_type, phone_last4, account_last4
             FROM sms_payments
             WHERE matched=FALSE
               AND group_id=%s
@@ -2695,16 +2891,16 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
 
     # 1️⃣ Ref match
     if ref:
-        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+        for sms_id, sms_ref, sms_amount, sms_sender, sms_type, sms_phone, sms_account in candidates:
             if sms_ref and sms_ref == ref:
-                chosen = (sms_id, sms_amount, sms_type, sms_sender)
+                chosen = (sms_id, sms_amount, sms_type, sms_sender, sms_phone, sms_account)
                 break
 
     # 2️⃣ Name match — ስም ከሌለ match አናደርግም
     if not chosen and sender_name:
-        for sms_id, sms_ref, sms_amount, sms_sender, sms_type in candidates:
+        for sms_id, sms_ref, sms_amount, sms_sender, sms_type, sms_phone, sms_account in candidates:
             if _names_match(sender_name, sms_sender):
-                chosen = (sms_id, sms_amount, sms_type, sms_sender)
+                chosen = (sms_id, sms_amount, sms_type, sms_sender, sms_phone, sms_account)
                 break
 
     if not chosen:
@@ -2712,7 +2908,7 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
         conn.close()
         return None
 
-    sms_id, sms_amount, sms_type, sms_sender = chosen
+    sms_id, sms_amount, sms_type, sms_sender, sms_phone, sms_account = chosen
 
     # ✅ Match ሆነ — sms record DELETE
     cur.execute("DELETE FROM sms_payments WHERE id=%s", (sms_id,))
@@ -2725,6 +2921,8 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
         "amount": float(sms_amount),
         "type": sms_type,
         "sender_name": sender_name or sms_sender,
+        "phone_last4": sms_phone,
+        "account_last4": sms_account,
     }
 
 
