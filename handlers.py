@@ -31,6 +31,10 @@ from database import (
     save_user_fingerprint,
     find_user_by_fingerprint,
     find_unmatched_sms_for_user,
+    save_payment_claim,
+    delete_payment_claim,
+    find_payment_claim_by_fingerprint,
+    delete_pending_screenshot_payment,
 )
 from jina_brain import get_shared_jina_key
 
@@ -404,6 +408,84 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
     raise RuntimeError(f"All Mistral keys exhausted after {max_attempts} attempts: {last_error}")
 
 
+# Mistral text-only model — used for SMS parsing / URL-receipt parsing /
+# Amharic descriptions (Mistral has noticeably better Amharic quality than
+# Groq's qwen3.6-27b). Uses the SAME rotation/rate-limit pool as the vision
+# calls above (_get_available_nvidia_client) since it's the same provider —
+# just without an image in the payload. Groq is now only a fallback here,
+# used ONLY when the Mistral pool itself is exhausted/rate-limited/erroring.
+MISTRAL_TEXT_MODEL = "mistral-small-2506"
+
+
+async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400) -> str:
+    total_keys = len(_nvidia_clients)
+    if total_keys == 0:
+        raise RuntimeError("MISTRAL_API_KEYS ያልተቀመጠ!")
+
+    max_attempts = total_keys * 3
+    last_error = None
+    last_limited_idx = None
+
+    for attempt in range(max_attempts):
+        try:
+            client, idx = await _get_available_nvidia_client()
+        except RuntimeError as e:
+            logger.warning(f"[Mistral Text] {e} — retrying once more after short wait")
+            await asyncio.sleep(2)
+            continue
+
+        try:
+            response = await asyncio.to_thread(
+                lambda c=client: c.chat.completions.create(
+                    model=MISTRAL_TEXT_MODEL,
+                    messages=messages,
+                    max_tokens=max_tokens,
+                    temperature=0.1,
+                )
+            )
+            _nvidia_clear_blocked(idx)
+            raw = response.choices[0].message.content or ""
+            text = raw.strip()
+            logger.info(f"[Mistral Text] raw response (key {idx+1}): {raw[:300]!r}")
+            if not text:
+                logger.warning(f"[Mistral Text] Key #{idx+1} returned empty content — attempt {attempt+1}/{max_attempts}")
+                last_limited_idx = idx
+                continue
+            if last_limited_idx is not None and last_limited_idx != idx:
+                logger.info(f"[Mistral Text] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
+            logger.info(f"[Mistral Text] ✅ Key #{idx+1}/{total_keys} used ({MISTRAL_TEXT_MODEL})")
+            return text
+        except Exception as e:
+            last_error = e
+            err_str = str(e).lower()
+            if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                logger.warning(f"[Mistral Text] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
+                _nvidia_mark_blocked(idx)
+                last_limited_idx = idx
+                continue
+            logger.error(f"[Mistral Text] Non-rate error: {e}")
+            raise
+
+    raise RuntimeError(f"All Mistral text keys exhausted after {max_attempts} attempts: {last_error}")
+
+
+async def _call_text_ai_mistral_then_groq(messages: list, max_tokens: int = 400) -> str:
+    """
+    Mistral primary → Groq fallback (Groq ጥቅም ላይ የሚውለው Mistral pool ራሱ
+    ሙሉ በሙሉ ሲያልቅ/rate-limit ሲመታ/error ሲሰጥ ብቻ ነው)። parse_sms(),
+    URL-receipt parsing, እና Amharic description ሁሉ ይህንኑ ይጠቀማሉ።
+    """
+    if _nvidia_clients:
+        try:
+            return await _call_mistral_text_with_rotation(messages, max_tokens=max_tokens)
+        except Exception as e:
+            logger.warning(f"[TextAI] Mistral exhausted/failed — falling back to Groq: {e}")
+    else:
+        logger.warning("[TextAI] No Mistral keys configured — using Groq directly")
+
+    return await _call_groq_with_rotation(messages, max_tokens=max_tokens)
+
+
 # ============================================================
 # GEMINI KEY ROTATION (NVIDIA-style sliding window RPM tracking)
 # ============================================================
@@ -629,7 +711,7 @@ Respond ONLY in this exact JSON format with no extra text:
             {"role": "system", "content": prompt},
             {"role": "user", "content": sms},
         ]
-        text = await _call_groq_with_rotation(messages)
+        text = await _call_text_ai_mistral_then_groq(messages)
         text = re.sub(r"^```json\s*", "", text)
         text = re.sub(r"^```\s*", "", text)
         text = re.sub(r"\s*```$", "", text)
@@ -694,18 +776,18 @@ Respond ONLY in JSON with no extra text:
     ]
     try:
         logger.info(f"[URL Fetch] HTML preview (first 600): {html[:600]!r}")
-        result_text = await _call_groq_with_rotation(messages)
-        logger.info(f"[URL Fetch] Groq raw response: {result_text!r}")
+        result_text = await _call_text_ai_mistral_then_groq(messages, max_tokens=400)
+        logger.info(f"[URL Fetch] AI raw response: {result_text!r}")
         result_text = re.sub(r"^```json\s*", "", result_text)
         result_text = re.sub(r"^```\s*", "", result_text)
         result_text = re.sub(r"\s*```$", "", result_text)
         parsed = json.loads(result_text.strip())
-        logger.info(f"[URL Fetch] Groq parsed: {parsed}")
+        logger.info(f"[URL Fetch] AI parsed: {parsed}")
         if parsed.get("amount"):
             return parsed
         return None
     except Exception as e:
-        logger.warning(f"[URL Fetch] Groq parse error: {e}")
+        logger.warning(f"[URL Fetch] AI parse error: {e}")
         return None
 
 
@@ -849,6 +931,76 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
             receipt_msg_id=matched.get("receipt_message_id"),
             receipt_chat_id=matched.get("receipt_chat_id"),
         )
+    elif not result.get("matched") and group_id:
+        # ✅ Screenshot ጋር match ካልተገኘ፣ pending "ልኬያለው" claim (ቀድሞ ጽሁፍ
+        # ብቻ የተላከ ግን SMS ገና ያልነበረው) ጋር fingerprint via ማዛመድ ይሞከራል።
+        try:
+            from database import find_payment_claim_by_fingerprint
+            claim = find_payment_claim_by_fingerprint(
+                group_id=group_id, sender_name=sender_name,
+                phone_last4=phone_last4, account_last4=account_last4,
+            )
+        except Exception as e:
+            logger.warning(f"[SMS] payment_claim fingerprint lookup error: {e}")
+            claim = None
+
+        if claim and bot:
+            claim_telegram_id = claim["telegram_id"]
+            confirm_result = confirm_payment(claim_telegram_id, amount, group_id=group_id)
+            confirmed = confirm_result["confirmed"]
+
+            try:
+                amt_display = int(amount) if float(amount).is_integer() else amount
+                await bot.send_message(
+                    chat_id=claim["claim_chat_id"], text=f"{amt_display} ብር",
+                    reply_to_message_id=claim.get("claim_message_id"),
+                )
+            except Exception as e:
+                logger.warning(f"[SMS] payment_claim reply error: {e}")
+
+            try:
+                save_user_fingerprint(
+                    group_id=group_id, telegram_id=claim_telegram_id,
+                    full_name=sender_name, phone_last4=phone_last4,
+                    account_last4=account_last4, pay_type=sms_type or "",
+                )
+            except Exception as e:
+                logger.warning(f"[SMS] payment_claim fingerprint learn error: {e}")
+
+            try:
+                delete_pending_screenshot_payment(group_id, claim_telegram_id)
+            except Exception:
+                pass
+
+            if confirmed and settings:
+                try:
+                    fresh_taken = get_taken_numbers(settings["id"])
+                    fresh_paid = get_paid_numbers(settings["id"])
+                    from board import build_board
+                    board_text = build_board(settings, fresh_taken, fresh_paid)
+                    board_msg_id = settings.get("board_message_id")
+                    if board_msg_id:
+                        await bot.edit_message_text(
+                            chat_id=group_id, message_id=board_msg_id, text=board_text
+                        )
+                except Exception:
+                    pass
+
+            try:
+                from ai_fallback import log_transaction
+                log_transaction(
+                    group_id=group_id, game_id=game_id,
+                    telegram_id=claim_telegram_id, amount=amount,
+                    reason="payment_confirmed_claim_sms", done_by="user",
+                    balance_after=confirm_result.get("remaining_balance"),
+                )
+            except Exception as _log_err:
+                logger.warning(f"[log_transaction] Error: {_log_err}")
+
+            result["matched"] = {
+                "telegram_id": claim_telegram_id, "amount": amount,
+                "type": sms_type, "sender_name": sender_name, "group_id": group_id,
+            }
 
     return {
         "success": True,
@@ -1368,6 +1520,16 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
     except Exception as _fp_err:
         logger.warning(f"[Fingerprint] learn error: {_fp_err}")
 
+    # ✅ Stale-claim cleanup — user screenshot/URL እና "ልኬያለው" ሁለቱንም
+    # (ለተመሳሳይ ክፍያ) ቢጠቀም፣ ገንዘቡ በዚህ (screenshot/URL/SMS-direct) path
+    # ከተረጋገጠ ቀድሞ "ልኬያለው" ብሎ የተቀመጠው pending payment_claim (ካለ)
+    # stale ሆኖ እንዳይቀር ወዲያውኑ ይጠፋል።
+    try:
+        if _group_id and telegram_id:
+            delete_payment_claim(_group_id, telegram_id)
+    except Exception as _claim_err:
+        logger.warning(f"[PaymentClaim] stale cleanup error: {_claim_err}")
+
     target_chat = _group_id
 
     if confirmed:
@@ -1524,7 +1686,18 @@ async def handle_payment_claim(bot, msg, user_id: int, group_id: int, settings: 
     )
 
     if not sms_match:
-        # ገና SMS አልደረሰም — ይጠብቅ (🙏 reaction ብቻ)
+        # ገና SMS አልደረሰም — pending claim አድርጎ ያስቀምጠው (ልክ screenshot style)
+        # SMS ሲደርስ handle_sms_webhook ራሱ find_payment_claim_by_fingerprint()
+        # ተጠቅሞ ይህን claim ያገኘዋል፣ ኦርጅናል "ልኬያለው" message ላይ reply
+        # ተደርጎ amount ይነገራል (ራሱ ይህ handler ዳግም አይጠራም)
+        try:
+            save_payment_claim(
+                group_id=_group_id, telegram_id=user_id,
+                claim_chat_id=msg.chat.id, claim_message_id=msg.message_id,
+                game_id=game_id,
+            )
+        except Exception as e:
+            logger.warning(f"[PaymentClaim] save_payment_claim error: {e}")
         try:
             await bot.set_message_reaction(chat_id=msg.chat.id, message_id=msg.message_id, reaction=["🙏"])
         except Exception as e:
@@ -1534,6 +1707,15 @@ async def handle_payment_claim(bot, msg, user_id: int, group_id: int, settings: 
     amount = sms_match["amount"]
     result = confirm_payment(user_id, amount, group_id=_group_id)
     confirmed = result["confirmed"]
+
+    try:
+        delete_payment_claim(_group_id, user_id)
+    except Exception:
+        pass
+    try:
+        delete_pending_screenshot_payment(_group_id, user_id)
+    except Exception:
+        pass
 
     # ✅ ውጤት: amount ብቻ ("300 ብር") — ምንም ተጨማሪ ጽሁፍ/emoji
     try:
@@ -1643,7 +1825,37 @@ async def handle_admin_sms_paste(bot, msg, sms_text: str, target_user_id: int, g
     except Exception as _log_err:
         logger.warning(f"[log_transaction] Error: {_log_err}")
 
+    # ✅ ይህ user pending "ልኬያለው" claim ካለው (SMS ገና ስላልደረሰ pending ሆኖ
+    # የቆየ) ያጸዳል — admin በቀጥታ በ##paste አረጋግጦታልና ድጋሚ ላዳግም አያስፈልግም
+    try:
+        delete_payment_claim(_group_id, target_user_id)
+    except Exception:
+        pass
+    try:
+        delete_pending_screenshot_payment(_group_id, target_user_id)
+    except Exception:
+        pass
+
     return {"success": True, "amount": amount, "reason": "ok"}
+
+
+# ============================================================
+# አማርኛ ማብራሪያ (screenshot ክፍያ ካልሆነ አጭር መግለጫ)
+# ============================================================
+
+async def describe_photo_in_amharic(description: str) -> str:
+    try:
+        messages = [{
+            "role": "user",
+            "content": (
+                f'ይህ ምስል "{description}" ነው። '
+                "በአማርኛ በ2-3 emoji ተጠቅሞ ምስሉ ምን እንደሆነ ብቻ አስረዳ። አጭር ሁን።"
+            ),
+        }]
+        return await _call_text_ai_mistral_then_groq(messages, max_tokens=100)
+    except Exception as e:
+        logger.error(f"[Describe] Error: {e}")
+        return "ℹ️ ይህ ምስል የክፍያ ደረሰኝ አይደለም።"
 
 
 # ============================================================
