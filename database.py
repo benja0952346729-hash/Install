@@ -2891,6 +2891,38 @@ def get_user_balance(group_id: int, telegram_id: int) -> float:
 AMOUNT_TOLERANCE = 20
 
 
+def _normalize_ref_for_match(ref: str) -> str:
+    """
+    ✅ Ref numbers ላይ ቅድሚያ የሚሰጠው exact match ነው (ደህንነት ስለሆነ ሰፊ fuzzy
+    አልተደረገም) — ግን screenshot (vision AI) ላይ በተለምዶ የሚፈጠሩ OCR ስህተቶች
+    (0↔O, 1↔I, 5↔S) ብቻ በጣም ጠባብ በሆነ መንገድ normalize ይደረጋሉ ከዚያ ንፅፅር
+    ይደረጋል። stored ref_no ራሱ (DB ውስጥ) ምንም አይነካም — ንፅፅር ጊዜ ብቻ ጥቅም ላይ
+    ይውላል።
+    """
+    if not ref:
+        return ref
+    r = ref.strip().upper()
+    r = r.replace("O", "0").replace("I", "1").replace("S", "5")
+    return r
+
+
+def _refs_match(ref1: str, ref2: str) -> bool:
+    """
+    Normalize አድርጎ ካነጻጸረ በኋላ እንኳ 1 character ብቻ ልዩነት ካለ (Levenshtein
+    distance ≤ 1) — ለምሳሌ AI/OCR አንድ digit ብቻ ቢሳሳት — still match ተብሎ
+    ይቆጠራል። ከ1 በላይ ልዩነት ካለ ግን ፈጽሞ አይመሳሰልም (ደህንነት ለማስጠበቅ — 2 የተለያዩ
+    እውነተኛ ግብይቶች በአጋጣሚ እንዳይምታቱ)።
+    """
+    if not ref1 or not ref2:
+        return False
+    n1, n2 = _normalize_ref_for_match(ref1), _normalize_ref_for_match(ref2)
+    if n1 == n2:
+        return True
+    if abs(len(n1) - len(n2)) > 1:
+        return False
+    return _levenshtein(n1, n2) <= 1
+
+
 def _normalize_name(name: str) -> set:
     if not name:
         return set()
@@ -2977,7 +3009,7 @@ def save_sms_payment(amount, sender_name: str, ref: str, sms_type: str, raw_sms:
     # 1️⃣ Ref match
     if ref:
         for scr_id, telegram_id, scr_ref, scr_amount, scr_sender, scr_chat_id, scr_msg_id in candidates:
-            if scr_ref and scr_ref == ref:
+            if scr_ref and _refs_match(scr_ref, ref):
                 chosen = (scr_id, telegram_id, scr_sender, scr_chat_id, scr_msg_id)
                 break
 
@@ -3055,7 +3087,7 @@ def find_matching_sms(telegram_id: int, amount, sender_name: str, ref: str, pay_
     # 1️⃣ Ref match
     if ref:
         for sms_id, sms_ref, sms_amount, sms_sender, sms_type, sms_phone, sms_account in candidates:
-            if sms_ref and sms_ref == ref:
+            if sms_ref and _refs_match(sms_ref, ref):
                 chosen = (sms_id, sms_amount, sms_type, sms_sender, sms_phone, sms_account)
                 break
 
