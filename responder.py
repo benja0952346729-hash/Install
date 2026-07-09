@@ -345,11 +345,20 @@ INTENT_EXAMPLES = {
         "yize neberku", "yene new", "qitre teqedeme",
     ],
     "payment_claim": [
-        "ልኬያለው", "ልኪያለው", "ላክያለው", "ልኬልሃለው",
-        "ተልኳል", "ልኩአለው", "ደርሷል", "ላክሁ", "ላከው",
-        "ገቢ አርጌያለው", "ገቢ አድርጌያለው", "ከፍያለው", "ተከፍያለው",
-        "done", "sent", "send አረግኩ", "paid", "✅",
-        "lkiyalew", "lkyalew", "derso", "gebi argeyalew",
+        "ልኬያለው", "ልኪያለው", "ላክያለው", "ልኬልሃለው", "ልኬዋለሁ", "ልኬያለሁ",
+        "ተልኳል", "ልኩአለው", "ደርሷል", "ላክሁ", "ላከው", "ላኩልሃለው",
+        "ገንዘብ ልኬያለሁ", "ብር ልኬያለሁ", "ገንዘብ ልኬልሃለው", "ብሬን ልኬያለሁ",
+        "ገንዘቤን ልኬያለሁ", "ብሬ ተልኳል", "ገንዘቤ ተልኳል", "ገንዘብ ተልኳል",
+        "ገቢ አርጌያለው", "ገቢ አድርጌያለው", "ገቢ አርጌዋለሁ", "ገቢ አርጌያለሁ",
+        "ከፍያለው", "ተከፍያለው", "ከፍያለሁ", "ክፍያ ፈጽሜያለሁ", "ክፍያ አድርጌያለሁ",
+        "ትራንስፈር አድርጌያለሁ", "ትራንስፈር አረግኩ", "ገንዘብ አስተላልፌያለሁ",
+        "አሁን ላክሁ", "ወዲያውኑ ላክሁ", "ገና ላክሁ", "ልኬ ጨርሻለሁ",
+        "ገባ አይደል", "ገብቷል", "ደረሰ አይደል", "ገንዘቡ ደርሷል",
+        "done", "sent", "send አረግኩ", "paid", "just sent", "sent it",
+        "already sent", "money sent", "payment done", "✅", "💸", "💰",
+        "lkiyalew", "lkyalew", "derso", "gebi argeyalew", "lkeyalew",
+        "genzeb lkiyalew", "br lkiyalew", "keflew", "tekefyalew",
+        "wediaw lekhu", "ahun lekhu", "gebito", "derso ayidel",
     ],
 }
 
@@ -502,15 +511,25 @@ def detect_intent(text: str) -> tuple:
     PAYMENT_CLAIM_KW = [
         normalize_to_latin("ልኬያለው"), normalize_to_latin("ልኪያለው"),
         normalize_to_latin("ላክያለው"), normalize_to_latin("ልኬልሃለው"),
+        normalize_to_latin("ልኬዋለሁ"), normalize_to_latin("ልኬያለሁ"),
         normalize_to_latin("ተልኳል"), normalize_to_latin("ልኩአለው"),
         normalize_to_latin("ደርሷል"), normalize_to_latin("ላክሁ"),
-        normalize_to_latin("ላከው"), normalize_to_latin("ገቢ አርጌያለው"),
-        normalize_to_latin("ገቢ አድርጌያለው"), normalize_to_latin("ከፍያለው"),
-        normalize_to_latin("ተከፍያለው"),
-        "done", "sent", "paid", "lkiyalew", "lkyalew", "derso",
+        normalize_to_latin("ላከው"), normalize_to_latin("ላኩልሃለው"),
+        normalize_to_latin("ገንዘብ ልኬያለሁ"), normalize_to_latin("ብር ልኬያለሁ"),
+        normalize_to_latin("ብሬ ተልኳል"), normalize_to_latin("ገንዘቤ ተልኳል"),
+        normalize_to_latin("ገቢ አርጌያለው"), normalize_to_latin("ገቢ አድርጌያለው"),
+        normalize_to_latin("ገቢ አርጌያለሁ"),
+        normalize_to_latin("ከፍያለው"), normalize_to_latin("ተከፍያለው"),
+        normalize_to_latin("ከፍያለሁ"), normalize_to_latin("ክፍያ ፈጽሜያለሁ"),
+        normalize_to_latin("ትራንስፈር አድርጌያለሁ"), normalize_to_latin("ገንዘብ አስተላልፌያለሁ"),
+        normalize_to_latin("አሁን ላክሁ"), normalize_to_latin("ወዲያውኑ ላክሁ"),
+        normalize_to_latin("ልኬ ጨርሻለሁ"), normalize_to_latin("ገንዘቡ ደርሷል"),
+        "done", "sent", "paid", "just sent", "sent it", "already sent",
+        "money sent", "payment done",
+        "lkiyalew", "lkyalew", "derso", "lkeyalew", "keflew", "tekefyalew",
     ]
     text_stripped = text.strip()
-    if text_stripped in ("✅",) or any(kw in latin for kw in PAYMENT_CLAIM_KW):
+    if text_stripped in ("✅", "💸", "💰") or any(kw in latin for kw in PAYMENT_CLAIM_KW):
         if not numbers_in_text:
             return "payment_claim", 1.0
 
