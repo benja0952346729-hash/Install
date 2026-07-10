@@ -4466,7 +4466,10 @@ def main():
     loop.create_task(_daily_report_scheduler())
 
     print("🤖 Bot started!")
-    app.run_polling()
+    # NEW: allowed_updates ግልጽ ተብሎ ካልተሰጠ Telegram የድሮውን cached setting
+    # ብቻ ይጠቀማል (message_reaction ላይካተት ይችላል) — ስለዚህ winner-🔥-reaction
+    # feature እንዲሰራ Update.ALL_TYPES ግልጽ ተብሎ ተሰጥቷል።
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
 if __name__ == "__main__":
