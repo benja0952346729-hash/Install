@@ -948,6 +948,41 @@ def admin_set_owner(game_id: int, number: int, new_user_id: int, slot: int = Non
 
 
 # ============================================================
+# NEW — ADMIN REPLY-TO-USER "እሺ/eshi NUM[+SLOT][✅] ..." REPLACEMENT
+# (reply-to-user's own "ተይዞብሃል" attempt message — reassigns BOTH
+# owner AND displayed name, optionally marks paid). Kept as its own
+# function (separate from admin_set_owner above) so the existing
+# "#/ NUM" ownership-only reassignment behavior is left untouched.
+# ============================================================
+
+def admin_replace_owner(game_id: int, number: int, new_user_id: int, new_user_name: str,
+                         slot: int = None, mark_paid: bool = False) -> bool:
+    """
+    ነባር registration ላይ user_id እና user_name ሁለቱንም ይቀይራል (board ላይ አዲሱ
+    ስም እንዲታይ)። mark_paid=True ከሆነ is_paid=TRUE ተብሎ ይመዘገባል፣ ካልሆነ
+    is_paid=FALSE ይሆናል (አዲሱ ባለቤት ገና ስላልከፈለ)። slot ካልተሰጠ ያ ቁጥር ላይ
+    ያሉትን ሁሉንም slots ይቀይራል። ቁጥር ካልተገኘ False ይመልሳል።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    if slot is not None:
+        cur.execute("""
+            UPDATE registrations SET user_id=%s, user_name=%s, is_paid=%s, is_nekay=FALSE
+            WHERE game_id=%s AND number=%s AND slot=%s
+        """, (new_user_id, new_user_name, mark_paid, game_id, number, slot))
+    else:
+        cur.execute("""
+            UPDATE registrations SET user_id=%s, user_name=%s, is_paid=%s, is_nekay=FALSE
+            WHERE game_id=%s AND number=%s
+        """, (new_user_id, new_user_name, mark_paid, game_id, number))
+    found = cur.rowcount > 0
+    conn.commit()
+    cur.close()
+    conn.close()
+    return found
+
+
+# ============================================================
 # COMPLETE STICKERS
 # ============================================================
 
@@ -1716,6 +1751,18 @@ def confirm_payment(telegram_id: int, amount: float, group_id: int = None) -> di
     remaining_prize = prize_balance
     remaining_carry = carry_balance
     confirmed = []
+
+    # FIX: user_id=0 (admin bulk "/register <name>" placeholder — ገና ለ real
+    # telegram account ያልተያያዘ) ብዙ የተለያዩ ስሞች ተመሳሳይ telegram_id=0 ስር ስለሚወድቁ፣
+    # ማንኛውም user_id=0 registration ከዚህ ራስ-ሰር balance-drain (FIFO) ውጪ ይቀራል —
+    # ልክ እንደ handle_newgame/handle_setgame ውስጥ ያለው ነባር "user_id != 0" ንድፍ
+    # (ስለዚህ የተለያዩ ስሞች እርስ በርስ ክፍያ አይደራረቡም)። Admin "#/ NUM" ተጠቅሞ ትክክለኛውን
+    # real telegram_id ካያያዘ በኋላ ብቻ ነው ራስ-ሰር confirm_payment ለዚያ registration
+    # የሚሰራው። ይህ ለ real (non-zero) telegram_id ምንም ለውጥ አያመጣም።
+    if telegram_id == 0:
+        cur.close()
+        conn.close()
+        return {"confirmed": [], "remaining_balance": carry_balance + prize_balance}
 
     cur.execute("""
         SELECT id, number, is_half, slot
@@ -3362,6 +3409,26 @@ def clear_balance_all(group_id: int):
     conn.commit()
     cur.close()
     conn.close()
+
+
+def clear_balance_by_telegram_id(group_id: int, telegram_id: int) -> bool:
+    """
+    NEW: winner-🔥-reaction feature — ልክ እንደ /clearbalance @username ግን
+    በቀጥታ telegram_id ተጠቅሞ (ስም lookup ሳያስፈልግ) የአንድ ሰው ብቻ balance ያጸዳል።
+    Board/registrations/paid status ላይ ምንም ተጽዕኖ የለውም — user_balance ብቻ ነው
+    የሚነካው (ልክ እንደ clear_balance_by_username/clear_balance_all)።
+    """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        UPDATE user_balance SET balance=0, carry_balance=0, prize_balance=0, updated_at=NOW()
+        WHERE telegram_id=%s AND group_id=%s
+    """, (telegram_id, group_id))
+    updated = cur.rowcount > 0
+    conn.commit()
+    cur.close()
+    conn.close()
+    return updated
 
 
 def clear_balance_by_username(group_id: int, username: str) -> bool:
