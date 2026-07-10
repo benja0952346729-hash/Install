@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from aiohttp import web
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
+    ApplicationBuilder, CommandHandler, MessageHandler, MessageReactionHandler,
     ConversationHandler, ContextTypes, filters
 )
 from config import BOT_TOKEN, ADMIN_IDS, GROUP_ID
@@ -47,6 +47,8 @@ from database import (
     get_user_balance,
     is_winner_photo_used, save_winner_photo,
     admin_set_owner,
+    admin_replace_owner,
+    clear_balance_by_telegram_id,
     clear_carry_balance,
     get_recent_winner_for_user,
     get_recent_winners_for_user,
@@ -456,6 +458,55 @@ async def _send_temp_admin_message(bot, chat_id: int, text: str, delay: float = 
 
     asyncio.create_task(_delete_later())
     return sent
+
+
+# ============================================================
+# NEW — winner "🔥 reaction" balance-clear feature: admin puts a native
+# 🔥 reaction on any message previously sent BY a recent winner (in the
+# group) → that winner's balance ONLY gets cleared (exactly like
+# /clearbalance @username, but by telegram_id directly). Board/paid
+# status is untouched — this only zeroes user_balance.
+#
+# Telegram's message_reaction_updated update does not include who wrote
+# the original (reacted-to) message — only who reacted and which
+# chat/message_id. So we keep a small bounded in-memory cache mapping
+# (chat_id, message_id) -> (telegram_id, user_name) for recent group
+# text messages, populated (read-only/additive) inside
+# handle_group_message. This does not alter any existing behavior.
+# ============================================================
+_recent_group_messages = {}  # (chat_id, message_id) -> (telegram_id, user_name)
+_RECENT_MSG_CACHE_MAX = 2000
+
+
+def _record_group_message(chat_id: int, message_id: int, telegram_id: int, user_name: str):
+    key = (chat_id, message_id)
+    _recent_group_messages[key] = (telegram_id, user_name)
+    if len(_recent_group_messages) > _RECENT_MSG_CACHE_MAX:
+        oldest_key = next(iter(_recent_group_messages))
+        _recent_group_messages.pop(oldest_key, None)
+
+
+# ============================================================
+# NEW — "እሺ/eshi NUM[+SLOT][✅] ..." admin replacement feature: bot's
+# earlier "ተይዞብሃል"/booking_taken rejection reply message_id ተመዝግቦ
+# ይቀመጣል፣ ስለዚህ admin ተጠቃሚው ኦርጅናል message ላይ reply አድርጎ "እሺ ..." ሲል
+# ያንን ነባር rejection message ማጥፋት ይቻላል።
+# key: (group_id, user_message_id) -> bot_reply_message_id
+# ============================================================
+_taken_rejection_msgs = {}
+_TAKEN_REJECTION_CACHE_MAX = 500
+
+
+async def _safe_reply_text_and_track(msg, text: str, group_id: int):
+    try:
+        sent = await msg.reply_text(text)
+        key = (group_id, msg.message_id)
+        _taken_rejection_msgs[key] = sent.message_id
+        if len(_taken_rejection_msgs) > _TAKEN_REJECTION_CACHE_MAX:
+            oldest_key = next(iter(_taken_rejection_msgs))
+            _taken_rejection_msgs.pop(oldest_key, None)
+    except Exception as e:
+        logging.warning(f"[SafeReplyTrack] Error: {e}")
 
 
 def _build_nekay_from_snap(snap: dict) -> list:
@@ -1154,6 +1205,13 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_name = user.first_name or "Unknown"
     text = msg.text.strip()
     group_id = update.effective_chat.id
+
+    # NEW: winner-🔥-reaction feature — this message's sender ተመዝግቦ ይቀመጣል
+    # (read-only cache፣ ምንም ነባር ሎጂክ አይነካም)
+    try:
+        _record_group_message(group_id, msg.message_id, user_id, user_name)
+    except Exception:
+        pass
 
     if not is_group_enabled(group_id):
         return
@@ -1857,7 +1915,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     if reg_result == "registered" and (group_id in prebooking_groups or group_id in winner_pending_groups):
         asyncio.create_task(_safe_set_reaction(ctx.bot, group_id, msg.message_id))
     elif resp["reply"]:
-        asyncio.create_task(_safe_reply_text(msg, resp["reply"]))
+        if reg_result == "taken":
+            # NEW: "እሺ/eshi" replacement feature ይህን rejection reply message_id
+            # እንዲያገኘው (ወደፊት admin ቢተካው እንዲጠፋ) ተመዝግቦ ይቀመጣል
+            asyncio.create_task(_safe_reply_text_and_track(msg, resp["reply"], group_id))
+        else:
+            asyncio.create_task(_safe_reply_text(msg, resp["reply"]))
 
     if not registered:
         return
@@ -2092,6 +2155,81 @@ def _parse_board_text(text: str, symbol: str = "#") -> dict:
         changes[number] = data
 
     return changes
+
+
+# ============================================================
+# NEW — WINNER "🔥 REACTION" BALANCE-CLEAR FEATURE
+# Admin puts a native 🔥 reaction on any message previously sent BY a
+# recent winner (1ኛ/2ኛ/3ኛ) in the group → that winner's balance ONLY
+# gets cleared (exactly like /clearbalance @username, by telegram_id).
+# Board/registrations/paid status ናቸው untouched — user_balance ብቻ ነው
+# የሚጸዳው። Confirmation message ("✅ ... ጸድቷል") ይላካል እና 1.5 ሰከንድ ቆይቶ
+# ራሱ ይጠፋል (_send_temp_admin_message helper ተጠቅሞ)።
+# ============================================================
+
+async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    reaction = update.message_reaction
+    if not reaction:
+        return
+
+    new_emojis = set()
+    for r in (reaction.new_reaction or []):
+        emoji = getattr(r, "emoji", None)
+        if emoji:
+            new_emojis.add(emoji)
+
+    if "🔥" not in new_emojis:
+        return
+
+    old_emojis = set()
+    for r in (reaction.old_reaction or []):
+        emoji = getattr(r, "emoji", None)
+        if emoji:
+            old_emojis.add(emoji)
+
+    if "🔥" in old_emojis:
+        # ቀድሞውኑ 🔥 ነበረው (አዲስ addition አይደለም) — ድጋሚ balance ማጽዳት አያስፈልግም
+        return
+
+    group_id = reaction.chat.id
+    actor = reaction.user
+    if not actor:
+        return
+
+    if not is_admin(actor.id, group_id):
+        return
+
+    if not is_group_enabled(group_id):
+        return
+
+    cached = _recent_group_messages.get((group_id, reaction.message_id))
+    if not cached:
+        return
+
+    target_telegram_id, target_name = cached
+
+    try:
+        recent_wins = get_recent_winners_for_user(group_id, target_telegram_id)
+    except Exception as e:
+        logging.warning(f"[WinnerFireReaction] get_recent_winners_for_user error: {e}")
+        return
+
+    if not recent_wins:
+        return
+
+    try:
+        cleared = clear_balance_by_telegram_id(group_id, target_telegram_id)
+    except Exception as e:
+        logging.warning(f"[WinnerFireReaction] clear_balance error: {e}")
+        return
+
+    if not cleared:
+        return
+
+    # ✅ "cleared" ማረጋገጫ message ይላካል፣ ልክ እንደ nekay 1.5 ሰከንድ ቆይቶ ራሱ ይጠፋል
+    await _send_temp_admin_message(
+        ctx.bot, group_id, f"✅ {target_name} ባላንስ ጸድቷል", delay=1.5,
+    )
 
 
 async def handle_winner_correction_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2382,6 +2520,10 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #   "##<SMS text>" → payment-fingerprint feature: admin ራሱ የደረሰውን SMS
     #                    ጽሁፍ ኮፒ አድርጎ reply ያደርጋል → AI parse → confirm_payment
     #                    + fingerprint learn (ወደፊት "ልኬያለው" ራስ-ሰር እንዲሆን)
+    #   "እሺ/eshi NUM[+SLOT][✅] ..." → NEW: reply-to-user (ተይዞብሃል ያለበት
+    #                    ኦርጅናል message ላይ reply) ባለቤት+ስም ይተካል፣ ✅ ካለ paid
+    #                    ተብሎ ይመዘገባል፣ ቀደም ያለው bot rejection message ይጠፋል፣
+    #                    "NUM ተይዞልሃል 🙏" አዲስ message ይላካል
     is_sms_cancel_form = text.lower().startswith("##cancel")
     is_sms_paste_form = text.startswith("##") and not is_sms_cancel_form
     is_name_form = text.lower().startswith("#name")
@@ -2390,7 +2532,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         and not is_name_form and not text.startswith("##")
     )
     is_owner_form = text.startswith("#/")
-    if not (is_payment_form or is_owner_form or is_name_form or is_sms_cancel_form or is_sms_paste_form):
+    is_eshi_form = text.startswith("እሺ") or text.lower().startswith("eshi")
+    if not (is_payment_form or is_owner_form or is_name_form or is_sms_cancel_form or is_sms_paste_form or is_eshi_form):
         return
 
     logging.info(f"[OwnerReply] Triggered: text={text!r} chat={update.effective_chat.id} user={update.effective_user.id}")
@@ -2569,6 +2712,97 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
         await _send_temp_admin_message(ctx.bot, group_id, out_text)
+
+        fresh = get_active_settings(group_id=group_id)
+        if fresh:
+            await _refresh_board(ctx, fresh, group_id)
+        return
+
+    # ============================================================
+    # NEW — "እሺ/eshi NUM[+SLOT][✅] ..." REPLACEMENT (reply-to-user's own
+    # "01" attempt message, ልክ ካለፈው ወይም ገና ካለው rejection ("ተይዞብሃል") ጋር)።
+    # ባለቤት+ስም ይተካል፣ ✅ ካለ ያ ቁጥር paid ተብሎ ይመዘገባል (ካልሆነ unpaid ይሆናል)፣
+    # ቀደም ያለው bot rejection message ይጠፋል፣ "NUM ተይዞልሃል 🙏" አዲስ message
+    # ለ user ይላካል፣ board ላይ ስም ይቀየራል።
+    # ============================================================
+    if is_eshi_form:
+        settings_eshi = get_active_settings(group_id=group_id)
+        if not settings_eshi:
+            return
+        game_id_eshi = settings_eshi["id"]
+
+        if text.startswith("እሺ"):
+            eshi_body = text[len("እሺ"):].strip()
+        else:
+            eshi_body = text[len("eshi"):].strip()
+
+        eshi_parts = eshi_body.split()
+        if not eshi_parts:
+            await msg.reply_text("❌ ምሳሌ: እሺ 01 ወይም እሺ 01+2 06✅")
+            return
+
+        target_name = owner.first_name or owner.username or "Unknown"
+
+        assigned = []
+        errors = []
+        for part in eshi_parts:
+            mark_paid = "✅" in part
+            clean_part = part.replace("✅", "")
+            slot_match = _re_owner.match(r'^(\d+)\+(\d+)$', clean_part)
+            if slot_match:
+                number = int(slot_match.group(1))
+                slot = int(slot_match.group(2))
+            else:
+                try:
+                    number = int(clean_part.rstrip("+"))
+                except ValueError:
+                    errors.append(part)
+                    continue
+                slot = None
+
+            if number < 1 or number > settings_eshi["total_numbers"]:
+                errors.append(part)
+                continue
+
+            found = admin_replace_owner(
+                game_id_eshi, number, owner_id, target_name,
+                slot=slot, mark_paid=mark_paid,
+            )
+            if found:
+                label = f"{number:02d}" + (f"+{slot}" if slot else "")
+                assigned.append(label)
+            else:
+                errors.append(part)
+
+        if not assigned:
+            if errors:
+                await msg.reply_text(f"❌ ያልተገኘ: {', '.join(errors)}")
+            return
+
+        # ቀደም ያለው bot "ተይዞብሃል" rejection message ካለ ይጠፋ
+        rejection_key = (group_id, msg.reply_to_message.message_id)
+        old_rejection_msg_id = _taken_rejection_msgs.pop(rejection_key, None)
+        if old_rejection_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=old_rejection_msg_id)
+            except Exception:
+                pass
+
+        # admin's own "እሺ ..." command message ይጠፋ
+        try:
+            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+        except Exception:
+            pass
+
+        # አዲስ "NUM ተይዞልሃል 🙏" confirmation ለ user (reply-to ኦርጅናል message)
+        numbers_label = " ".join(assigned)
+        try:
+            await msg.reply_to_message.reply_text(f"{numbers_label} ተይዞልሃል 🙏")
+        except Exception as e:
+            logging.warning(f"[Eshi] confirmation reply error: {e}")
+
+        if errors:
+            await _send_temp_admin_message(ctx.bot, group_id, f"❌ ያልተገኘ: {', '.join(errors)}")
 
         fresh = get_active_settings(group_id=group_id)
         if fresh:
@@ -4098,6 +4332,8 @@ def main():
     app.add_handler(CommandHandler("on", handle_on))
     app.add_handler(CommandHandler("off", handle_off))
     app.add_handler(CommandHandler("clearbalance", handle_clearbalance))
+    # NEW: winner "🔥 reaction" balance-clear feature
+    app.add_handler(MessageReactionHandler(handle_winner_fire_reaction))
     app.add_handler(CommandHandler("report", handle_report))
     app.add_handler(CommandHandler("setwarnmedia", handle_setwarnmedia))
     app.add_handler(CommandHandler("listwarnmedia", handle_listwarnmedia))
