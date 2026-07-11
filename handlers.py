@@ -1081,6 +1081,12 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
         )
 
         if not match:
+            match = await _fingerprint_fallback_match(
+                group_id=_group_id, telegram_id=telegram_id, game_id=game_id,
+                context_label="Payment Photo",
+            )
+
+        if not match:
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount, sender_name=sender_name,
                 ref=ref, pay_type=photo_type,
@@ -1109,6 +1115,58 @@ async def handle_payment_photo(bot, msg, nekay_cb=None, group_id: int = None):
     except Exception as e:
         logger.error(f"[Payment] Photo handler error: {e}", exc_info=True)
         await msg.reply_text("❌ Error ተፈጥሯል። እንደገና ይምከሩ።")
+
+
+# ============================================================
+# NEW — FINGERPRINT FALLBACK MATCHING (screenshot/URL analysis ውጤት
+# ስም/ref ጎድሎ ወይም ref ኖሮ ግን match ካላገኘ ወይም ጨርሶ bank type ብቻ ታውቆ
+# ምንም ካልተገኘ (amount ካለ በስተቀር ግድ የለም) ጥቅም ላይ ይውላል)።
+#
+# telegram_id (ፎቶ/URL የላከው ሰው) already ይታወቃል፣ ስለዚህ ያ ሰው ቀድሞ
+# የተማረውን fingerprint (full_name/phone_last4/account_last4 —
+# save_user_fingerprint() ካለፈ የተረጋገጠ ክፍያ የተማረው) ተጠቅመን unmatched
+# SMS ፈልገን በዚያ ስም/ last4 እንዲዛመድ እናደርጋለን። find_matching_sms() ራሱ
+# ምንም አልተነካም — ይህ ተጨማሪ ደረጃ (second-chance) ብቻ ነው።
+# ============================================================
+
+async def _fingerprint_fallback_match(group_id: int, telegram_id: int, game_id, context_label: str = ""):
+    try:
+        from database import get_conn
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT full_name, phone_last4, account_last4
+            FROM user_payment_fingerprints
+            WHERE group_id=%s AND telegram_id=%s
+            LIMIT 1
+        """, (group_id, telegram_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception as e:
+        logger.warning(f"[{context_label}] fingerprint lookup error: {e}")
+        row = None
+
+    if not row:
+        return None
+
+    fp_name, fp_phone, fp_account = row
+    if not fp_name and not fp_phone and not fp_account:
+        return None
+
+    try:
+        fp_match = find_unmatched_sms_for_user(
+            group_id=group_id, sender_name=fp_name,
+            phone_last4=fp_phone, account_last4=fp_account,
+            game_id=game_id,
+        )
+    except Exception as e:
+        logger.warning(f"[{context_label}] fingerprint SMS match error: {e}")
+        return None
+
+    if fp_match:
+        logger.info(f"[{context_label}] ✅ Fallback matched via fingerprint | telegram_id={telegram_id} | amount={fp_match.get('amount')}")
+    return fp_match
 
 
 # ============================================================
@@ -1149,6 +1207,14 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
             game_id=game_id,
         )
 
+        fallback_used = False
+        if not match:
+            match = await _fingerprint_fallback_match(
+                group_id=_group_id, telegram_id=telegram_id, game_id=game_id,
+                context_label="Receipt URL",
+            )
+            fallback_used = match is not None
+
         if not match:
             save_screenshot_payment(
                 telegram_id=telegram_id, amount=amount,
@@ -1164,12 +1230,25 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
                 pass
             return
 
+        # NEW: fingerprint fallback ካገኘ (URL ራሱ ስም/ref ባይኖረውም) ውጤቱን
+        # "<amount> ብር" ብቻ (ልክ እንደ payment_claim ዘይቤ) ማድረግ — normal
+        # ref/name-matched URL ግን እንደ ነባሩ "መልካም ዕድል" ይቀጥላል
+        if fallback_used:
+            match_amount = match.get("amount", amount)
+            try:
+                amt_display = int(match_amount) if float(match_amount).is_integer() else match_amount
+            except (TypeError, ValueError):
+                amt_display = match_amount
+            success_text = f"{amt_display} ብር"
+        else:
+            success_text = random.choice(PAYMENT_SUCCESS_MESSAGES)
+
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
             msg.message_id, _group_id,
             nekay_cb=nekay_cb,
-            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
+            success_msg=success_text,
             receipt_msg_id=receipt_msg.message_id,
             receipt_chat_id=chat_id,
         )
@@ -1628,10 +1707,11 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
                         message_id=board_msg_id,
                         text=board_text
                     )
-                except Exception:
-                    new_msg = await bot.send_message(chat_id=target_chat, text=board_text)
-                    from database import update_board_message_id
-                    update_board_message_id(game_id, new_msg.message_id)
+                except Exception as e:
+                    if "not modified" not in str(e).lower():
+                        new_msg = await bot.send_message(chat_id=target_chat, text=board_text)
+                        from database import update_board_message_id
+                        update_board_message_id(game_id, new_msg.message_id)
 
 
 # ============================================================
