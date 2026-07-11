@@ -1,4 +1,6 @@
 import psycopg2
+from psycopg2 import pool as _pg_pool
+import threading
 import json as _json
 import re
 from datetime import datetime, timedelta
@@ -24,10 +26,86 @@ def set_current_db_index(index: int):
     _current_db_index = index % len(DATABASE_URLS)
 
 
+# ============================================================
+# NEW — CONNECTION POOLING (transparent)
+# get_conn() ከዚህ በፊት በእያንዳንዱ ጥሪ አዲስ database connection (TCP+SSL
+# handshake) ይከፍት ነበር — ይሄ ለ100,000+ users ልኬት እጅግ ውድ ነው፣ በተለይ ብዙ
+# ተከታታይ DB ጥሪዎች ባሉባቸው admin flows (ለምሳሌ board-reply-edit) ውስጥ
+# ደቂቃዎች ድረስ ያዘገየው ነበር። ይህ ፕሮክሲ pooling ን "ግልጽ" (transparent)
+# ያደርገዋል፦ ነባሩ ኮድ navigate.close() ብቻ ነው የሚጠራው (በመቶዎች ቦታዎች) —
+# እሱ ራሱ ወደ ገንዳው (pool) ብቻ ይመልሰዋል፣ እውነተኛ disconnect አያደርግም። ሌላ
+# caller ምንም መቀየር አላስፈለገውም። Autocommit=True ስለሚደረግ ነባሮቹ
+# conn.commit() ጥሪዎች ምንም ጉዳት የሌላቸው no-op ይሆናሉ (ስራ ላይ አይውሉም ግን
+# አይሰብሩም)፣ እና borrowed connections "idle in transaction" ሆነው ወደ
+# ገንዳው እንዳይመለሱ ይከላከላል።
+# ============================================================
+
+_connection_pools = {}
+_pool_lock = threading.Lock()
+
+
+class _PooledConnProxy:
+    __slots__ = ("_conn", "_pool", "_returned")
+
+    def __init__(self, conn, pool):
+        object.__setattr__(self, "_conn", conn)
+        object.__setattr__(self, "_pool", pool)
+        object.__setattr__(self, "_returned", False)
+
+    def close(self):
+        if object.__getattribute__(self, "_returned"):
+            return
+        conn = object.__getattribute__(self, "_conn")
+        pool = object.__getattribute__(self, "_pool")
+        try:
+            pool.putconn(conn)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        object.__setattr__(self, "_returned", True)
+
+    def __getattr__(self, name):
+        return getattr(object.__getattribute__(self, "_conn"), name)
+
+
+def _get_pool(idx: int):
+    if idx not in _connection_pools:
+        with _pool_lock:
+            if idx not in _connection_pools:
+                url = DATABASE_URLS[idx]
+                _connection_pools[idx] = _pg_pool.ThreadedConnectionPool(
+                    1, 20, url, sslmode='require'
+                )
+    return _connection_pools[idx]
+
+
 def get_conn(db_index: int = None):
     idx = db_index if db_index is not None else _current_db_index
-    url = DATABASE_URLS[idx]
-    return psycopg2.connect(url, sslmode='require')
+    pool = _get_pool(idx)
+
+    for _ in range(2):
+        raw_conn = pool.getconn()
+        if raw_conn.closed:
+            try:
+                pool.putconn(raw_conn, close=True)
+            except Exception:
+                pass
+            continue
+        try:
+            raw_conn.autocommit = True
+        except Exception:
+            pass
+        return _PooledConnProxy(raw_conn, pool)
+
+    # ገንዳው ጨርሶ ጤናማ connection መስጠት ካልቻለ ብቻ (ያልተለመደ) ቀጥተኛ fallback
+    fallback_conn = psycopg2.connect(DATABASE_URLS[idx], sslmode='require')
+    try:
+        fallback_conn.autocommit = True
+    except Exception:
+        pass
+    return _PooledConnProxy(fallback_conn, pool)
 
 
 def get_db_row_count(db_index: int) -> int:
@@ -2592,8 +2670,84 @@ def clear_game(game_id: int):
             DELETE FROM payment_claims
             WHERE group_id=%s
         """, (group_id,))
+        # NEW: winner-🔥-reaction feature — አዲስ game ሲጀመር ያለፈው game's
+        # message_id→telegram_id mapping DB እንዳይጨናነቅ ይጸዳል (100,000+
+        # users/many groups ልኬት ግምት ውስጥ ያስገባ)
+        try:
+            cur.execute("""
+                DELETE FROM message_senders WHERE group_id=%s
+            """, (group_id,))
+        except Exception:
+            pass
 
     conn.commit()
+    cur.close()
+    conn.close()
+
+
+# ============================================================
+# NEW — WINNER "🔥 REACTION" MESSAGE→SENDER MAPPING (persistent, DB-based)
+# cache-based (in-memory) አልነበረም ትክክለኛ ምክንያቱ፦ bot restart ቢደረግ ወይም
+# ስፍራው (100,000+ users, ብዙ groups) ትልቅ ቢሆን cache ውስን መጠን ስላለው/
+# ስለሚጠፋ ስህተት ይፈጥር ነበር። ይህ ይልቁንም DB ላይ ይቀመጣል (ቋሚ)፣ እና
+# cleanup_old_message_senders() + clear_game() (አዲስ game ሲጀመር) ጠፍቶ
+# DB እንዳይጨናነቅ ይጠብቀዋል።
+# ============================================================
+
+def record_message_sender(group_id: int, message_id: int, telegram_id: int, user_name: str):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS message_senders (
+                group_id BIGINT NOT NULL,
+                message_id BIGINT NOT NULL,
+                telegram_id BIGINT NOT NULL,
+                user_name TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                PRIMARY KEY (group_id, message_id)
+            )
+        """)
+        cur.execute("""
+            INSERT INTO message_senders (group_id, message_id, telegram_id, user_name)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT (group_id, message_id) DO UPDATE
+            SET telegram_id=EXCLUDED.telegram_id, user_name=EXCLUDED.user_name
+        """, (group_id, message_id, telegram_id, user_name))
+        conn.commit()
+        cur.close()
+        conn.close()
+    except Exception:
+        pass
+
+
+def get_message_sender(group_id: int, message_id: int):
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("""
+            SELECT telegram_id, user_name FROM message_senders
+            WHERE group_id=%s AND message_id=%s
+        """, (group_id, message_id))
+        row = cur.fetchone()
+        cur.close()
+        conn.close()
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {"telegram_id": row[0], "user_name": row[1]}
+
+
+def cleanup_old_message_senders(days: int = 3):
+    conn = get_conn()
+    cur = conn.cursor()
+    cutoff = datetime.now() - timedelta(days=days)
+    try:
+        cur.execute("DELETE FROM message_senders WHERE created_at < %s", (cutoff,))
+        conn.commit()
+    except Exception:
+        pass
     cur.close()
     conn.close()
 
