@@ -1,6 +1,4 @@
 import psycopg2
-from psycopg2 import pool as _pg_pool
-import threading
 import json as _json
 import re
 from datetime import datetime, timedelta
@@ -26,86 +24,10 @@ def set_current_db_index(index: int):
     _current_db_index = index % len(DATABASE_URLS)
 
 
-# ============================================================
-# NEW — CONNECTION POOLING (transparent)
-# get_conn() ከዚህ በፊት በእያንዳንዱ ጥሪ አዲስ database connection (TCP+SSL
-# handshake) ይከፍት ነበር — ይሄ ለ100,000+ users ልኬት እጅግ ውድ ነው፣ በተለይ ብዙ
-# ተከታታይ DB ጥሪዎች ባሉባቸው admin flows (ለምሳሌ board-reply-edit) ውስጥ
-# ደቂቃዎች ድረስ ያዘገየው ነበር። ይህ ፕሮክሲ pooling ን "ግልጽ" (transparent)
-# ያደርገዋል፦ ነባሩ ኮድ navigate.close() ብቻ ነው የሚጠራው (በመቶዎች ቦታዎች) —
-# እሱ ራሱ ወደ ገንዳው (pool) ብቻ ይመልሰዋል፣ እውነተኛ disconnect አያደርግም። ሌላ
-# caller ምንም መቀየር አላስፈለገውም። Autocommit=True ስለሚደረግ ነባሮቹ
-# conn.commit() ጥሪዎች ምንም ጉዳት የሌላቸው no-op ይሆናሉ (ስራ ላይ አይውሉም ግን
-# አይሰብሩም)፣ እና borrowed connections "idle in transaction" ሆነው ወደ
-# ገንዳው እንዳይመለሱ ይከላከላል።
-# ============================================================
-
-_connection_pools = {}
-_pool_lock = threading.Lock()
-
-
-class _PooledConnProxy:
-    __slots__ = ("_conn", "_pool", "_returned")
-
-    def __init__(self, conn, pool):
-        object.__setattr__(self, "_conn", conn)
-        object.__setattr__(self, "_pool", pool)
-        object.__setattr__(self, "_returned", False)
-
-    def close(self):
-        if object.__getattribute__(self, "_returned"):
-            return
-        conn = object.__getattribute__(self, "_conn")
-        pool = object.__getattribute__(self, "_pool")
-        try:
-            pool.putconn(conn)
-        except Exception:
-            try:
-                conn.close()
-            except Exception:
-                pass
-        object.__setattr__(self, "_returned", True)
-
-    def __getattr__(self, name):
-        return getattr(object.__getattribute__(self, "_conn"), name)
-
-
-def _get_pool(idx: int):
-    if idx not in _connection_pools:
-        with _pool_lock:
-            if idx not in _connection_pools:
-                url = DATABASE_URLS[idx]
-                _connection_pools[idx] = _pg_pool.ThreadedConnectionPool(
-                    1, 20, url, sslmode='require'
-                )
-    return _connection_pools[idx]
-
-
 def get_conn(db_index: int = None):
     idx = db_index if db_index is not None else _current_db_index
-    pool = _get_pool(idx)
-
-    for _ in range(2):
-        raw_conn = pool.getconn()
-        if raw_conn.closed:
-            try:
-                pool.putconn(raw_conn, close=True)
-            except Exception:
-                pass
-            continue
-        try:
-            raw_conn.autocommit = True
-        except Exception:
-            pass
-        return _PooledConnProxy(raw_conn, pool)
-
-    # ገንዳው ጨርሶ ጤናማ connection መስጠት ካልቻለ ብቻ (ያልተለመደ) ቀጥተኛ fallback
-    fallback_conn = psycopg2.connect(DATABASE_URLS[idx], sslmode='require')
-    try:
-        fallback_conn.autocommit = True
-    except Exception:
-        pass
-    return _PooledConnProxy(fallback_conn, pool)
+    url = DATABASE_URLS[idx]
+    return psycopg2.connect(url, sslmode='require')
 
 
 def get_db_row_count(db_index: int) -> int:
@@ -205,6 +127,26 @@ def _migrate_active_game(from_idx: int, to_idx: int):
                 VALUES (%s,%s,%s,%s,%s,%s,%s)
                 ON CONFLICT DO NOTHING
             """, (new_game_id, w[2], w[3], w[4], w[5], w[6], w[7]))
+
+        # NEW: winner-🔥-reaction feature — message_senders (group_id-scoped,
+        # ልክ እንደ user_balance) ደግሞ ወደ አዲሱ DB አብሮ ይዛወራል፣ ካልሆነ rotation
+        # ከተደረገ በኋላ ቀድሞ በተላኩ messages ላይ 🔥 reaction ቢደረግ (ያለፈው DB
+        # ላይ ብቻ ስለሚቀር) ምንም አይሰራም ነበር
+        try:
+            from_cur.execute("""
+                SELECT message_id, telegram_id, user_name, created_at
+                FROM message_senders WHERE group_id=%s
+            """, (settings_dict.get("group_id"),))
+            msg_senders = from_cur.fetchall()
+            for ms in msg_senders:
+                to_cur.execute("""
+                    INSERT INTO message_senders (group_id, message_id, telegram_id, user_name, created_at)
+                    VALUES (%s,%s,%s,%s,%s)
+                    ON CONFLICT (group_id, message_id) DO NOTHING
+                """, (settings_dict.get("group_id"), ms[0], ms[1], ms[2], ms[3]))
+        except Exception as _ms_err:
+            import logging
+            logging.warning(f"[DB Migration] message_senders migrate error: {_ms_err}")
 
         to_conn.commit()
         from_cur.close()
@@ -360,6 +302,15 @@ def _init_db_conn(conn, cur):
             id SERIAL PRIMARY KEY,
             file_id TEXT NOT NULL,
             added_at TIMESTAMP DEFAULT NOW()
+        );
+
+        CREATE TABLE IF NOT EXISTS message_senders (
+            group_id BIGINT NOT NULL,
+            message_id BIGINT NOT NULL,
+            telegram_id BIGINT NOT NULL,
+            user_name TEXT,
+            created_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (group_id, message_id)
         );
     """)
     conn.commit()
