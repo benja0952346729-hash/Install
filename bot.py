@@ -49,6 +49,9 @@ from database import (
     admin_set_owner,
     admin_replace_owner,
     clear_balance_by_telegram_id,
+    record_message_sender,
+    get_message_sender,
+    cleanup_old_message_senders,
     clear_carry_balance,
     get_recent_winner_for_user,
     get_recent_winners_for_user,
@@ -325,12 +328,94 @@ def get_admin_group_id(user_id: int):
 
 
 # ============================================================
+# NEW — DEBOUNCED REMAINING/NEKAY RESEND (payment confirm → 5-second
+# debounce → resend ቀሪ/ነቃይ list ከታች, no duplicates ever)
+# ============================================================
+_remaining_debounce_tasks = {}  # key: _gk(group_id, game_id) -> asyncio.Task
+
+
+def _schedule_remaining_resend(bot, group_id: int, game_id: int):
+    key = _gk(group_id, game_id)
+    old_task = _remaining_debounce_tasks.get(key)
+    if old_task and not old_task.done():
+        old_task.cancel()
+    _remaining_debounce_tasks[key] = asyncio.create_task(
+        _debounced_resend_remaining_or_nekay(bot, group_id, game_id)
+    )
+
+
+async def _debounced_resend_remaining_or_nekay(bot, group_id: int, game_id: int):
+    """
+    Payment (photo/SMS) confirm → "መልካም ዕድል" ካለ በኋላ 5 ሰከንድ ምንም ተጨማሪ
+    ክፍያ/እንቅስቃሴ ከሌለ ቀሪ (ወይም ነቃይ mode ገባሪ ከሆነ ነቃይ) ዝርዝር ከታች resend
+    ይሁን — ነባሩን አጥፍቶ አዲስ ብቻ (duplicate በፍጹም እንዳይፈጠር)። 5 ሰከንድ ውስጥ
+    ሌላ ክፍያ ቢመጣ (_schedule_remaining_resend ተጠርቶ) ይህ task ይሰረዛል
+    (cancel) አዲስ 5 ሰከንድ ይጀምራል።
+    """
+    try:
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        return
+
+    try:
+        settings = get_active_settings(group_id=group_id)
+        if not settings or settings["id"] != game_id:
+            return
+        _group_id = group_id or settings.get("group_id") or GROUP_ID
+        key = _gk(group_id, game_id)
+
+        if key in nekay_active:
+            fresh_nekay = get_nekay_numbers(game_id)
+            snap = {}
+            for number, slots in fresh_nekay:
+                snap[number] = 2 if slots == {2} else 0
+            nekay_numbers[key] = snap
+
+            rem_msg_id = settings.get("remaining_message_id")
+            if rem_msg_id:
+                try:
+                    await bot.delete_message(chat_id=_group_id, message_id=rem_msg_id)
+                except Exception:
+                    pass
+
+            if snap:
+                nekay_list = _build_nekay_from_snap(snap)
+                nekay_text = build_nekay(nekay_list)
+                new_nekay = await bot.send_message(chat_id=_group_id, text=nekay_text)
+                update_remaining_message_id(game_id, new_nekay.message_id)
+            else:
+                update_remaining_message_id(game_id, None)
+                nekay_active.discard(key)
+                nekay_numbers.pop(key, None)
+        else:
+            taken = get_taken_numbers(game_id)
+            remaining_text = build_remaining(settings, taken)
+            rem_msg_id = settings.get("remaining_message_id")
+            if rem_msg_id:
+                try:
+                    await bot.delete_message(chat_id=_group_id, message_id=rem_msg_id)
+                except Exception:
+                    pass
+            if remaining_text:
+                rem_msg = await bot.send_message(chat_id=_group_id, text=remaining_text)
+                update_remaining_message_id(game_id, rem_msg.message_id)
+            else:
+                update_remaining_message_id(game_id, None)
+    except Exception as e:
+        logging.warning(f"[DebouncedResend] Error: {e}")
+
+
+# ============================================================
 # NEKAY PAYMENT CALLBACK
 # ============================================================
 
 async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list, group_id: int = None):
     key = _gk(group_id, game_id)
     if key not in nekay_active:
+        # NEW: ነቃይ mode ባይሆንም እንኳ (ተራ ጨዋታ)፣ ክፍያ ከተረጋገጠ በኋላ ቀሪ ዝርዝር
+        # 5 ሰከንድ debounce ቆይቶ resend ይሁን (ከዚህ በፊት ምንም አልነበረም — ይሄ
+        # ክፍተት ነበር)
+        _schedule_remaining_resend(bot, group_id, game_id)
         return
 
     fresh_nekay = get_nekay_numbers(game_id)
@@ -353,9 +438,10 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list,
             if board_msg_id:
                 try:
                     await bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
-                except Exception:
-                    new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
-                    update_board_message_id(game_id, new_msg.message_id)
+                except Exception as e:
+                    if "not modified" not in str(e).lower():
+                        new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
+                        update_board_message_id(game_id, new_msg.message_id)
 
             rem_msg_id = settings.get("remaining_message_id")
             if rem_msg_id:
@@ -381,21 +467,14 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list,
     if board_msg_id:
         try:
             await bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
-        except Exception:
-            new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
-            update_board_message_id(game_id, new_msg.message_id)
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
+                update_board_message_id(game_id, new_msg.message_id)
 
-    rem_msg_id = settings.get("remaining_message_id")
-    if rem_msg_id:
-        try:
-            await bot.delete_message(chat_id=_group_id, message_id=rem_msg_id)
-        except Exception:
-            pass
-
-    nekay_list = _build_nekay_from_snap(snap)
-    nekay_text = build_nekay(nekay_list)
-    new_nekay = await bot.send_message(chat_id=_group_id, text=nekay_text)
-    update_remaining_message_id(game_id, new_nekay.message_id)
+    # NEW: ነቃይ ዝርዝር ወዲያውኑ ሳይሆን 5 ሰከንድ debounce ቆይቶ resend ይሁን (ሌላ
+    # ክፍያ/እንቅስቃሴ በዚያ 5 ሰከንድ ውስጥ ቢመጣ timer ይታደሳል)
+    _schedule_remaining_resend(bot, group_id, game_id)
 
     fresh = get_active_settings(group_id=_group_id)
     if fresh:
@@ -474,16 +553,29 @@ async def _send_temp_admin_message(bot, chat_id: int, text: str, delay: float = 
 # text messages, populated (read-only/additive) inside
 # handle_group_message. This does not alter any existing behavior.
 # ============================================================
-_recent_group_messages = {}  # (chat_id, message_id) -> (telegram_id, user_name)
-_RECENT_MSG_CACHE_MAX = 2000
-
+# ============================================================
+# NEW — winner "🔥 reaction" balance-clear feature: admin puts a native
+# 🔥 reaction on any message previously sent BY a recent winner (in the
+# group) → that winner's balance ONLY gets cleared (exactly like
+# /clearbalance @username, but by telegram_id directly). Board/paid
+# status is untouched — this only zeroes user_balance.
+#
+# Telegram's message_reaction_updated update does not include who wrote
+# the original (reacted-to) message — only who reacted and which
+# chat/message_id. This mapping (chat_id, message_id) -> telegram_id is
+# stored in the DB (message_senders table, via database.py) rather than
+# an in-memory cache, so it survives bot restarts and scales correctly
+# across 100,000+ users / many groups. Recording (inside
+# handle_group_message) is additive and does not alter any existing
+# behavior; cleanup happens on new-game start (clear_game) and via the
+# periodic cleanup_old_message_senders() safety net.
+# ============================================================
 
 def _record_group_message(chat_id: int, message_id: int, telegram_id: int, user_name: str):
-    key = (chat_id, message_id)
-    _recent_group_messages[key] = (telegram_id, user_name)
-    if len(_recent_group_messages) > _RECENT_MSG_CACHE_MAX:
-        oldest_key = next(iter(_recent_group_messages))
-        _recent_group_messages.pop(oldest_key, None)
+    try:
+        record_message_sender(chat_id, message_id, telegram_id, user_name)
+    except Exception as e:
+        logging.warning(f"[RecordMsgSender] Error: {e}")
 
 
 # ============================================================
@@ -899,9 +991,10 @@ async def handle_showslots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 await ctx.bot.edit_message_text(
                     chat_id=group_id, message_id=board_msg_id, text=board_text
                 )
-            except Exception:
-                new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                update_board_message_id(fresh["id"], new_msg.message_id)
+            except Exception as e:
+                if "not modified" not in str(e).lower():
+                    new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    update_board_message_id(fresh["id"], new_msg.message_id)
         else:
             new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(fresh["id"], new_msg.message_id)
@@ -1207,11 +1300,9 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
 
     # NEW: winner-🔥-reaction feature — this message's sender ተመዝግቦ ይቀመጣል
-    # (read-only cache፣ ምንም ነባር ሎጂክ አይነካም)
-    try:
-        _record_group_message(group_id, msg.message_id, user_id, user_name)
-    except Exception:
-        pass
+    # (DB write ነው፣ event loop እንዳይዘገይ background thread ላይ fire-and-forget
+    # ሆኖ ይሰራል፣ ምንም ነባር ሎጂክ አይነካም)
+    asyncio.create_task(asyncio.to_thread(_record_group_message, group_id, msg.message_id, user_id, user_name))
 
     if not is_group_enabled(group_id):
         return
@@ -1452,13 +1543,16 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                             await ctx.bot.edit_message_text(
                                 chat_id=group_id, message_id=fresh_board_msg_id, text=fresh_board
                             )
-                        except Exception:
-                            try:
-                                await ctx.bot.delete_message(chat_id=group_id, message_id=fresh_board_msg_id)
-                            except Exception:
+                        except Exception as e:
+                            if "not modified" in str(e).lower():
                                 pass
-                            new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
-                            update_board_message_id(game_id, new_msg.message_id)
+                            else:
+                                try:
+                                    await ctx.bot.delete_message(chat_id=group_id, message_id=fresh_board_msg_id)
+                                except Exception:
+                                    pass
+                                new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
+                                update_board_message_id(game_id, new_msg.message_id)
                     else:
                         new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                         update_board_message_id(game_id, new_msg.message_id)
@@ -1504,9 +1598,10 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                         await ctx.bot.edit_message_text(
                             chat_id=group_id, message_id=fresh_board_msg_id, text=fresh_board
                         )
-                    except Exception:
-                        new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
-                        update_board_message_id(game_id, new_msg.message_id)
+                    except Exception as e:
+                        if "not modified" not in str(e).lower():
+                            new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
+                            update_board_message_id(game_id, new_msg.message_id)
                 else:
                     new_msg = await ctx.bot.send_message(chat_id=group_id, text=fresh_board)
                     update_board_message_id(game_id, new_msg.message_id)
@@ -1958,13 +2053,16 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             if board_msg_id:
                 try:
                     await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
-                except Exception:
-                    try:
-                        await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
-                    except Exception:
+                except Exception as e:
+                    if "not modified" in str(e).lower():
                         pass
-                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                    await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
+                    else:
+                        try:
+                            await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id)
+                        except Exception:
+                            pass
+                        new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                        await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
             else:
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
@@ -2009,9 +2107,10 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             if board_msg_id:
                 try:
                     await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
-                except Exception:
-                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                    await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
+                except Exception as e:
+                    if "not modified" not in str(e).lower():
+                        new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                        await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
         await _send_remaining(ctx, settings, group_id)
         _reset_inactivity_tracker(ctx.bot, game_id, group_id)
 
@@ -2019,9 +2118,10 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         if board_msg_id:
             try:
                 await ctx.bot.edit_message_text(chat_id=group_id, message_id=board_msg_id, text=board_text)
-            except Exception:
-                new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
-                await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
+            except Exception as e:
+                if "not modified" not in str(e).lower():
+                    new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
+                    await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
 
     if remaining_count == 0 and _gk(group_id, game_id) not in active_countdowns and _gk(group_id, game_id) not in countdown_done and _gk(group_id, game_id) not in admin_nekay_games:
         _stop_inactivity_tracker(game_id, group_id)
@@ -2092,9 +2192,10 @@ async def _refresh_board(ctx, settings, group_id=None):
     if board_msg_id:
         try:
             await ctx.bot.edit_message_text(chat_id=_group_id, message_id=board_msg_id, text=board_text)
-        except Exception:
-            new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
-            update_board_message_id(game_id, new_msg.message_id)
+        except Exception as e:
+            if "not modified" not in str(e).lower():
+                new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
+                update_board_message_id(game_id, new_msg.message_id)
     else:
         new_msg = await ctx.bot.send_message(chat_id=_group_id, text=board_text)
         update_board_message_id(game_id, new_msg.message_id)
@@ -2202,11 +2303,16 @@ async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_
     if not is_group_enabled(group_id):
         return
 
-    cached = _recent_group_messages.get((group_id, reaction.message_id))
-    if not cached:
+    try:
+        sender = await asyncio.to_thread(get_message_sender, group_id, reaction.message_id)
+    except Exception as e:
+        logging.warning(f"[WinnerFireReaction] get_message_sender error: {e}")
+        return
+    if not sender:
         return
 
-    target_telegram_id, target_name = cached
+    target_telegram_id = sender["telegram_id"]
+    target_name = sender["user_name"]
 
     try:
         recent_wins = get_recent_winners_for_user(group_id, target_telegram_id)
@@ -2385,15 +2491,31 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             conn_check = get_conn()
             cur_check = conn_check.cursor()
             cur_check.execute("""
-                SELECT slot, user_id, is_paid FROM registrations
+                SELECT slot, user_id, user_name, is_paid FROM registrations
                 WHERE game_id=%s AND number=%s
             """, (game_id, number))
             existing_rows = cur_check.fetchall()
             cur_check.close()
             conn_check.close()
             uid_map = {row[0]: row[1] for row in existing_rows}
-            paid_map = {row[0]: row[2] for row in existing_rows}
+            name_map = {row[0]: row[2] for row in existing_rows}
+            paid_map = {row[0]: row[3] for row in existing_rows}
             was_paid1 = bool(paid_map.get(1, False))
+
+            # FIX: admin ብዙ ጊዜ ሙሉውን board ጽሁፍ ኮፒ አድርጎ (የፈለገውን 1 መስመር
+            # ብቻ ቀይሮ) reply ያደርጋል — ስለዚህ _parse_board_text() ያልተነኩትንም
+            # መስመሮች (ሁሉንም ቁጥሮች) ጭምር ይመልሳል። ይህ line ከ DB ውስጥ ካለው ጋር
+            # ፍጹም ተመሳሳይ (ምንም ያልተቀየረ) ከሆነ ጨርሶ አንንካውም — አለበለዚያ
+            # admin_remove_player+register_number (is_nekay ሁልጊዜ FALSE
+            # አድርጎ ስለሚያስገባ) ያልተነኩ ቁጥሮች ላይ ያለውን is_nekay ሁኔታ ያጠፋዋል
+            # (ይህ ነው ነቃይ list ሙሉ ለሙሉ ድንገት ይጠፋ የነበረው ትክክለኛ ምክንያት)።
+            current_name1 = name_map.get(1)
+            current_paid1 = bool(paid_map.get(1, False))
+            current_name2 = name_map.get(2)
+            current_paid2 = bool(paid_map.get(2, False))
+            if (name1 == current_name1 and paid1 == current_paid1
+                    and name2 == current_name2 and paid2 == current_paid2):
+                continue
 
             admin_remove_player(game_id, number, slot=None)
 
@@ -2450,13 +2572,16 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 await ctx.bot.edit_message_text(
                     chat_id=group_id, message_id=board_msg_id_now, text=board_text_fresh
                 )
-            except Exception:
-                try:
-                    await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id_now)
-                except Exception:
+            except Exception as e:
+                if "not modified" in str(e).lower():
                     pass
-                new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
-                update_board_message_id(game_id, new_board_msg.message_id)
+                else:
+                    try:
+                        await ctx.bot.delete_message(chat_id=group_id, message_id=board_msg_id_now)
+                    except Exception:
+                        pass
+                    new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
+                    update_board_message_id(game_id, new_board_msg.message_id)
         else:
             new_board_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text_fresh)
             update_board_message_id(game_id, new_board_msg.message_id)
@@ -2520,19 +2645,21 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     #   "##<SMS text>" → payment-fingerprint feature: admin ራሱ የደረሰውን SMS
     #                    ጽሁፍ ኮፒ አድርጎ reply ያደርጋል → AI parse → confirm_payment
     #                    + fingerprint learn (ወደፊት "ልኬያለው" ራስ-ሰር እንዲሆን)
-    #   "እሺ/eshi NUM[+SLOT][✅] ..." → NEW: reply-to-user (ተይዞብሃል ያለበት
+    #   "#እሺ/#eshi NUM[+SLOT][✅] ..." → NEW: reply-to-user (ተይዞብሃል ያለበት
     #                    ኦርጅናል message ላይ reply) ባለቤት+ስም ይተካል፣ ✅ ካለ paid
     #                    ተብሎ ይመዘገባል፣ ቀደም ያለው bot rejection message ይጠፋል፣
-    #                    "NUM ተይዞልሃል 🙏" አዲስ message ይላካል
+    #                    "NUM ተይዞልሃል 🙏" አዲስ message ይላካል። "#" prefix ግድ
+    #                    ነው (ያለ # ብቻውን "እሺ" ተራ ወሬ/reply ጋር እንዳይምታታ)
     is_sms_cancel_form = text.lower().startswith("##cancel")
     is_sms_paste_form = text.startswith("##") and not is_sms_cancel_form
     is_name_form = text.lower().startswith("#name")
+    is_eshi_form = text.startswith("#እሺ") or text.lower().startswith("#eshi")
     is_payment_form = (
         text.startswith("#") and not text.startswith("#/")
         and not is_name_form and not text.startswith("##")
+        and not is_eshi_form
     )
     is_owner_form = text.startswith("#/")
-    is_eshi_form = text.startswith("እሺ") or text.lower().startswith("eshi")
     if not (is_payment_form or is_owner_form or is_name_form or is_sms_cancel_form or is_sms_paste_form or is_eshi_form):
         return
 
@@ -2731,14 +2858,14 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         game_id_eshi = settings_eshi["id"]
 
-        if text.startswith("እሺ"):
-            eshi_body = text[len("እሺ"):].strip()
+        if text.startswith("#እሺ"):
+            eshi_body = text[len("#እሺ"):].strip()
         else:
-            eshi_body = text[len("eshi"):].strip()
+            eshi_body = text[len("#eshi"):].strip()
 
         eshi_parts = eshi_body.split()
         if not eshi_parts:
-            await msg.reply_text("❌ ምሳሌ: እሺ 01 ወይም እሺ 01+2 06✅")
+            await msg.reply_text("❌ ምሳሌ: #እሺ 01 ወይም #እሺ 01+2 06✅")
             return
 
         target_name = owner.first_name or owner.username or "Unknown"
@@ -4460,6 +4587,13 @@ def main():
                     except Exception:
                         pass
                 cleanup_old_reports()
+                # NEW: winner-🔥-reaction feature — message_senders ላይ ደግሞ
+                # ደህንነት (safety-net) periodic cleanup (clear_game ራሱ አዲስ
+                # game ሲጀመር ያ group's records ቢያጸዳም፣ ይሄ ተጨማሪ ጥንቃቄ ነው)
+                try:
+                    cleanup_old_message_senders()
+                except Exception:
+                    pass
             except Exception as e:
                 logging.warning(f"[Daily Report] Error: {e}")
 
