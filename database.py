@@ -1911,6 +1911,7 @@ def get_unpaid_numbers(game_id: int) -> list:
     cur.close()
     conn.close()
     result = {}
+    half_flag = {}
     for number, slot, is_half, pending_upgrade in rows:
         if number not in result:
             result[number] = set()
@@ -1918,7 +1919,9 @@ def get_unpaid_numbers(game_id: int) -> list:
             result[number].add(2)
         else:
             result[number].add(slot)
-    return [(n, slots) for n, slots in sorted(result.items())]
+        if is_half:
+            half_flag[number] = True
+    return [(n, slots, half_flag.get(n, False)) for n, slots in sorted(result.items())]
 
 
 # ============================================================
@@ -1958,11 +1961,14 @@ def get_nekay_numbers(game_id: int) -> list:
     cur.close()
     conn.close()
     result = {}
+    half_flag = {}
     for number, slot, is_half in rows:
         if number not in result:
             result[number] = set()
         result[number].add(slot)
-    return [(n, slots) for n, slots in sorted(result.items())]
+        if is_half:
+            half_flag[number] = True
+    return [(n, slots, half_flag.get(n, False)) for n, slots in sorted(result.items())]
 
 
 def admin_set_nekay(game_id: int, numbers: list) -> dict:
