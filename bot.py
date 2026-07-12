@@ -367,8 +367,8 @@ async def _debounced_resend_remaining_or_nekay(bot, group_id: int, game_id: int)
         if key in nekay_active:
             fresh_nekay = get_nekay_numbers(game_id)
             snap = {}
-            for number, slots in fresh_nekay:
-                snap[number] = 2 if slots == {2} else 0
+            for number, slots, is_half in fresh_nekay:
+                snap[number] = 2 if is_half else 0
             nekay_numbers[key] = snap
 
             rem_msg_id = settings.get("remaining_message_id")
@@ -420,11 +420,8 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list,
 
     fresh_nekay = get_nekay_numbers(game_id)
     snap = {}
-    for number, slots in fresh_nekay:
-        if slots == {2}:
-            snap[number] = 2
-        else:
-            snap[number] = 0
+    for number, slots, is_half in fresh_nekay:
+        snap[number] = 2 if is_half else 0
     nekay_numbers[key] = snap
 
     if not snap:
@@ -646,14 +643,11 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
             return
 
         snap = {}
-        for number, slots in unpaid:
-            if slots == {2}:
-                snap[number] = 2
-            else:
-                snap[number] = 0
+        for number, slots, is_half in unpaid:
+            snap[number] = 2 if is_half else 0
         nekay_numbers[_gk(group_id, game_id)] = snap
 
-        for number, slots in unpaid:
+        for number, slots, is_half in unpaid:
             mark_nekay(game_id, number)
 
         nekay_list = _build_nekay_from_snap(snap)
@@ -1442,8 +1436,8 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             if _gk(group_id, game_id) in nekay_active:
                 fresh_nekay = get_nekay_numbers(game_id)
                 rebuilt_snap = {}
-                for n, slots in fresh_nekay:
-                    rebuilt_snap[n] = 2 if slots == {2} else 0
+                for n, slots, is_half in fresh_nekay:
+                    rebuilt_snap[n] = 2 if is_half else 0
                 nekay_numbers[_gk(group_id, game_id)] = rebuilt_snap
             fresh = get_active_settings(group_id=group_id)
             if fresh:
@@ -2067,6 +2061,13 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
 
+        # FIX: intermittent nekay-list corruption — ከላይ snap ከተነበበ ጀምሮ
+        # (መስመር ~1968) እስከዚህ ድረስ ብዙ awaits (board/nekay message edits)
+        # ስላሉ፣ 2 ሰዎች በተመሳሳይ ሰዓት የተለያየ ቁጥር ቢይዙ (interleaved coroutines)
+        # በአንድ shared dict ላይ ተደራርበው ሊጣረሱ ይችላሉ (ሌላውን entry ሊያጠፉ
+        # ይችላሉ)። ስለዚህ ልክ ከመንካቱ በፊት የቅርብ ጊዜውን nekay_numbers ደግሞ
+        # እናነብበዋለን (race window ለመቀነስ)።
+        snap = nekay_numbers.get(_gk(group_id, game_id), snap)
         for num, is_half, _slot in registered:
             if num in snap:
                 if is_half and snap[num] == 0:
@@ -2589,11 +2590,8 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
         if _gk(group_id, game_id) in nekay_active:
             nekay_fresh = get_nekay_numbers(game_id)
             snap = {}
-            for number, slots in nekay_fresh:
-                if slots == {2}:
-                    snap[number] = 2
-                else:
-                    snap[number] = 0
+            for number, slots, is_half in nekay_fresh:
+                snap[number] = 2 if is_half else 0
             nekay_numbers[_gk(group_id, game_id)] = snap
 
             rem_msg_id = fresh.get("remaining_message_id")
@@ -2863,7 +2861,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             eshi_body = text[len("#eshi"):].strip()
 
-        eshi_parts = eshi_body.split()
+        eshi_parts = [p for p in re.split(r'[,\s]+', eshi_body.strip()) if p]
         if not eshi_parts:
             await msg.reply_text("❌ ምሳሌ: #እሺ 01 ወይም #እሺ 01+2 06✅")
             return
@@ -2879,13 +2877,23 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if slot_match:
                 number = int(slot_match.group(1))
                 slot = int(slot_match.group(2))
-            else:
+                is_half = True
+            elif clean_part.endswith("+"):
                 try:
                     number = int(clean_part.rstrip("+"))
                 except ValueError:
                     errors.append(part)
                     continue
                 slot = None
+                is_half = True
+            else:
+                try:
+                    number = int(clean_part)
+                except ValueError:
+                    errors.append(part)
+                    continue
+                slot = None
+                is_half = False
 
             if number < 1 or number > settings_eshi["total_numbers"]:
                 errors.append(part)
@@ -2895,6 +2903,28 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 game_id_eshi, number, owner_id, target_name,
                 slot=slot, mark_paid=mark_paid,
             )
+
+            if not found:
+                # NEW: ቁጥሩ ባዶ (ምንም registration ስላልነበረ replace ያልተሳካ)
+                # ከሆነ — replace ብቻ ሳይሆን አዲስ registration ደግሞ ይፍጠር
+                reg_slot = slot if slot is not None else 1
+                try:
+                    reg_result = register_number(
+                        game_id_eshi, owner_id, target_name, number, is_half,
+                        force=True, force_slot=(reg_slot if is_half else None),
+                    )
+                except Exception as e:
+                    logging.warning(f"[Eshi] register_number fallback error: {e}")
+                    reg_result = None
+
+                if reg_result in ("registered", "registered_half"):
+                    found = True
+                    if mark_paid:
+                        try:
+                            admin_mark_paid(game_id_eshi, number, reg_slot, True)
+                        except Exception as e:
+                            logging.warning(f"[Eshi] admin_mark_paid after register error: {e}")
+
             if found:
                 label = f"{number:02d}" + (f"+{slot}" if slot else "")
                 assigned.append(label)
