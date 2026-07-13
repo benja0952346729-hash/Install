@@ -854,6 +854,33 @@ async def ask_profit_per_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def _finish_setgame(update, ctx):
     setup_group_id = ctx.user_data.get("setup_group_id")
+
+    # NEW: /newgame ራሱ ከዚህ በፊት game switch ሲያደርግ (clear_game + in-memory
+    # nekay/countdown state ማጽዳት) የሚያደርገውን ተመሳሳይ cleanup — /setgame ግን
+    # ከዚህ በፊት ይህን አያደርግም ነበር (ወጥነት ማጣት፣ stale winners/nekay state
+    # እንዲቀጥል ምክንያት ሆኖ ነበር)። አዲሱን game_id ከመፍጠሩ በፊት የቆየውን ያጸዳል።
+    old_settings = get_active_settings(group_id=setup_group_id)
+    if old_settings:
+        old_group_id = setup_group_id or old_settings.get("group_id") or GROUP_ID
+        try:
+            clear_prize_balance(old_group_id)
+            clear_carry_balance(old_group_id)
+            clear_game(old_settings["id"])
+        except Exception as e:
+            logging.warning(f"[SetGame] old-game cleanup error: {e}")
+        old_key = _gk(old_group_id, old_settings["id"])
+        nekay_active.discard(old_key)
+        admin_nekay_games.discard(old_key)
+        active_countdowns.pop(old_key, None)
+        nekay_numbers.pop(old_key, None)
+        countdown_done.discard(old_key)
+        handled_video_boards.discard(old_key)
+        _stop_inactivity_tracker(old_settings["id"], old_group_id)
+        try:
+            clear_all_context_for_group(old_group_id)
+        except Exception:
+            pass
+
     game_id = save_settings(ctx.user_data, group_id=setup_group_id)
 
     settings = get_active_settings(group_id=setup_group_id)
@@ -2206,6 +2233,21 @@ async def _refresh_board(ctx, settings, group_id=None):
 # BOARD REPLY PARSE
 # ============================================================
 
+def _parse_name_and_pending(raw: str):
+    """
+    ✅/? marker parsing — ተጠቃሚው እውነተኛ ስም ራሱ "?" ቢይዝ (ለምሳሌ ስሙ በትክክል
+    "??" ቢሆን) stripping ስሙን ሙሉ ለሙሉ ባዶ እንዳያደርገው ይጠብቃል፦ stripping "?"
+    ስሙን ባዶ የሚያደርገው ከሆነ (እና stripping ከመደረጉ በፊት ይዘት ነበረ) ያ "?" እንደ
+    pending marker ሳይሆን የስሙ አካል ተደርጎ ይያዛል።
+    """
+    paid = "✅" in raw
+    no_check = raw.replace("✅", "").strip()
+    stripped = no_check.replace("?", "").strip()
+    if not stripped and no_check:
+        return no_check, False, paid
+    return stripped, ("?" in no_check), paid
+
+
 def _parse_board_text(text: str, symbol: str = "#") -> dict:
     import re
     changes = {}
@@ -2232,21 +2274,17 @@ def _parse_board_text(text: str, symbol: str = "#") -> dict:
             slot1_raw = parts[0].strip()
             slot2_raw = parts[1].strip()
 
-            paid1 = "✅" in slot1_raw
-            name1 = slot1_raw.replace("✅", "").replace("?", "").strip()
+            name1, _pending1_unused, paid1 = _parse_name_and_pending(slot1_raw)
             data["name1"] = name1 if name1 else None
             data["paid1"] = paid1
             data["is_half1"] = True
             data["pending1"] = False
 
-            paid2 = "✅" in slot2_raw
-            name2 = slot2_raw.replace("✅", "").replace("?", "").strip()
+            name2, _pending2_unused, paid2 = _parse_name_and_pending(slot2_raw)
             data["name2"] = name2 if name2 else None
             data["paid2"] = paid2
         else:
-            paid1 = "✅" in rest
-            pending1 = "?" in rest
-            name1 = rest.replace("✅", "").replace("?", "").strip()
+            name1, pending1, paid1 = _parse_name_and_pending(rest)
             data["name1"] = name1 if name1 else None
             data["paid1"] = paid1
             data["is_half1"] = False
@@ -2314,15 +2352,6 @@ async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_
 
     target_telegram_id = sender["telegram_id"]
     target_name = sender["user_name"]
-
-    try:
-        recent_wins = get_recent_winners_for_user(group_id, target_telegram_id)
-    except Exception as e:
-        logging.warning(f"[WinnerFireReaction] get_recent_winners_for_user error: {e}")
-        return
-
-    if not recent_wins:
-        return
 
     try:
         cleared = clear_balance_by_telegram_id(group_id, target_telegram_id)
@@ -2518,37 +2547,48 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     and name2 == current_name2 and paid2 == current_paid2):
                 continue
 
-            admin_remove_player(game_id, number, slot=None)
+            # FIX: slot1/slot2 ን ተነጣጥሎ ማነጻጸር (ከዚህ በፊት ሁለቱም slots
+            # ላይ ትንሽ ለውጥ እንኳ ቢኖር ሁለቱም ይሰረዙ ነበር — ስለዚህ ያልተነካው slot
+            # (ለምሳሌ nekay/unpaid የሆነ) ጭምር ይጠፋ ነበር)
+            slot1_changed = not (name1 == current_name1 and paid1 == current_paid1)
+            slot2_changed = not (name2 == current_name2 and paid2 == current_paid2)
 
-            if name1:
-                orig_uid1 = uid_map.get(1, 0)
-                register_number(game_id, orig_uid1, name1, number, is_half1, force=True)
-                admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
-                if pending1:
-                    conn_p = get_conn()
-                    cur_p = conn_p.cursor()
-                    cur_p.execute("""
-                        UPDATE registrations SET pending_upgrade=TRUE
-                        WHERE game_id=%s AND number=%s AND slot=1
-                    """, (game_id, number))
-                    conn_p.commit()
-                    cur_p.close()
-                    conn_p.close()
+            if not slot1_changed and not slot2_changed:
+                continue
 
-            if name2:
-                orig_uid2 = uid_map.get(2, 0)
-                conn2 = get_conn()
-                cur2 = conn2.cursor()
-                cur2.execute("""
-                    INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
-                    VALUES (%s, %s, %s, %s, FALSE, 2, %s, FALSE, FALSE)
-                    ON CONFLICT DO NOTHING
-                """, (game_id, orig_uid2, name2, number, paid2))
-                conn2.commit()
-                cur2.close()
-                conn2.close()
+            if slot1_changed:
+                admin_remove_player(game_id, number, slot=1)
+                if name1:
+                    orig_uid1 = uid_map.get(1, 0)
+                    register_number(game_id, orig_uid1, name1, number, is_half1, force=True, force_slot=1)
+                    admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
+                    if pending1:
+                        conn_p = get_conn()
+                        cur_p = conn_p.cursor()
+                        cur_p.execute("""
+                            UPDATE registrations SET pending_upgrade=TRUE
+                            WHERE game_id=%s AND number=%s AND slot=1
+                        """, (game_id, number))
+                        conn_p.commit()
+                        cur_p.close()
+                        conn_p.close()
 
-            if _gk(group_id, game_id) in nekay_numbers:
+            if slot2_changed:
+                admin_remove_player(game_id, number, slot=2)
+                if name2:
+                    orig_uid2 = uid_map.get(2, 0)
+                    conn2 = get_conn()
+                    cur2 = conn2.cursor()
+                    cur2.execute("""
+                        INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                        VALUES (%s, %s, %s, %s, TRUE, 2, %s, FALSE, FALSE)
+                        ON CONFLICT DO NOTHING
+                    """, (game_id, orig_uid2, name2, number, paid2))
+                    conn2.commit()
+                    cur2.close()
+                    conn2.close()
+
+            if _gk(group_id, game_id) in nekay_numbers and slot1_changed:
                 snap = nekay_numbers.get(_gk(group_id, game_id), {})
                 if number in snap:
                     if paid1 and not was_paid1:
