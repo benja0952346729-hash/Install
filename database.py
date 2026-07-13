@@ -3488,13 +3488,29 @@ def get_ungreeted_winner(game_id: int, telegram_id: int) -> bool:
     cur = conn.cursor()
     cur.execute("""
         SELECT id FROM winners
-        WHERE telegram_id=%s AND place=1 AND greeted=FALSE AND game_id != %s
+        WHERE telegram_id=%s AND place=1 AND greeted=FALSE
         ORDER BY game_id DESC LIMIT 1
-    """, (telegram_id, game_id))
+    """, (telegram_id,))
     row = cur.fetchone()
+    if not row:
+        cur.close()
+        conn.close()
+        return False
+
+    # FIX: ከዚህ በፊት "game_id != %s" ይጠቀም ነበር (አዲስ game መጀመሩን ለመለየት) —
+    # ግን /newgame ተመሳሳይ game_id ይቀጥላል (አዲስ game_settings row አይፈጥርም፣
+    # /setgame ብቻ ነው አዲስ game_id የሚፈጥረው)፣ ስለዚህ /newgame በኩል ይህ ፍጹም
+    # አሸናፊውን ለዘላለም ያገልላል ነበር (ፈጽሞ አይከበርም)። ይልቁንስ "በአሁኑ ጨዋታ ላይ
+    # እስካሁን ተመዝግቦ አያውቅም" የሚለውን እንደ "አዲስ ዙር ጀምሯል" ምልክት እንጠቀማለን —
+    # ይሄ /newgame እና /setgame ሁለቱም ላይ በትክክል ይሰራል (clear_game ራሱ
+    # registrations ስለሚያጸዳ)።
+    cur.execute("""
+        SELECT 1 FROM registrations WHERE game_id=%s AND user_id=%s LIMIT 1
+    """, (game_id, telegram_id))
+    already_registered = cur.fetchone() is not None
     cur.close()
     conn.close()
-    return row is not None
+    return not already_registered
 
 
 def mark_winner_greeted(telegram_id: int):
