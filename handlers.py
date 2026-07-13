@@ -47,6 +47,46 @@ PAYMENT_SUCCESS_MESSAGES = [
     "እሺ ቤተሰብ 🙏 መልካም ዕድል",
 ]
 
+
+def _build_claim_reply(amount, confirmed: list, remaining_balance: float, settings: dict = None) -> str:
+    """
+    NEW: "ልኬያለው" text-claim / URL fingerprint-fallback ክፍያ ማረጋገጫ ጽሁፍ —
+    ቀድሞ "<amount> ብር" ብቻ (bare) ይላክ ነበር፣ አሁን ግን screenshot flow's
+    ዘይቤ ይከተላል፦
+      - ሙሉ ለሙሉ ከተከፈለ (confirmed non-empty): "<amount> ብር ደርሶኛል
+        [ቤተሰብ] መልካም ዕድል🙏"
+      - ገና ካልበቃ (shortfall አለ): "<amount> ብር ደርሶኛል፣ ለሙሉ/ለግማሽ
+        <shortfall> ብር ይጎላል 🙏"
+    """
+    try:
+        amt_display = int(amount) if float(amount).is_integer() else amount
+    except (TypeError, ValueError):
+        amt_display = amount
+
+    if confirmed:
+        variants = [
+            f"{amt_display} ብር ደርሶኛል መልካም ዕድል🙏",
+            f"{amt_display} ብር ደርሶኛል ቤተሰብ መልካም ዕድል🙏",
+        ]
+        return random.choice(variants)
+
+    shortfall_msg = ""
+    if settings:
+        try:
+            price_full = float(settings.get("price_full") or 0)
+            price_half = float(settings.get("price_half") or 0)
+            if remaining_balance is not None:
+                if price_half > 0 and remaining_balance < price_half:
+                    short = price_half - remaining_balance
+                    shortfall_msg = f" ለግማሽ {short:.0f} ይጎላል"
+                elif remaining_balance < price_full:
+                    short = price_full - remaining_balance
+                    shortfall_msg = f" ለሙሉ {short:.0f} ይጎላል"
+        except (TypeError, ValueError):
+            pass
+
+    return f"{amt_display} ብር ደርሶኛል{shortfall_msg} 🙏"
+
 # Winner-photo digit confidence (0-100). If the primary vision provider's
 # self-reported confidence is below this, a second provider is asked to
 # confirm before the result is trusted. Tune this based on real logs —
@@ -950,9 +990,11 @@ async def handle_sms_webhook(raw_sms: str, bot=None, nekay_cb=None, group_id: in
             confirmed = confirm_result["confirmed"]
 
             try:
-                amt_display = int(amount) if float(amount).is_integer() else amount
+                claim_reply_text = _build_claim_reply(
+                    amount, confirmed, confirm_result.get("remaining_balance"), settings,
+                )
                 await bot.send_message(
-                    chat_id=claim["claim_chat_id"], text=f"{amt_display} ብር",
+                    chat_id=claim["claim_chat_id"], text=claim_reply_text,
                     reply_to_message_id=claim.get("claim_message_id"),
                 )
             except Exception as e:
@@ -1231,26 +1273,25 @@ async def handle_receipt_url(bot, msg, url: str, telegram_id: int, group_id: int
             return
 
         # NEW: fingerprint fallback ካገኘ (URL ራሱ ስም/ref ባይኖረውም) ውጤቱን
-        # "<amount> ብር" ብቻ (ልክ እንደ payment_claim ዘይቤ) ማድረግ — normal
-        # ref/name-matched URL ግን እንደ ነባሩ "መልካም ዕድል" ይቀጥላል
+        # screenshot flow ዘይቤ እንዲከተል (confirmed → "<amount> ብር ደርሶኛል
+        # መልካም ዕድል🙏"፣ shortfall ካለ → "<amount> ብር ደርሶኛል ለሙሉ <X> ይጎላል 🙏")
+        # — normal ref/name-matched URL ግን እንደ ነባሩ "መልካም ዕድል" ይቀጥላል
+        custom_reply_fn = None
         if fallback_used:
-            match_amount = match.get("amount", amount)
-            try:
-                amt_display = int(match_amount) if float(match_amount).is_integer() else match_amount
-            except (TypeError, ValueError):
-                amt_display = match_amount
-            success_text = f"{amt_display} ብር"
-        else:
-            success_text = random.choice(PAYMENT_SUCCESS_MESSAGES)
+            claim_settings = settings
+            custom_reply_fn = lambda conf, rem_bal: _build_claim_reply(
+                amount, conf, rem_bal, claim_settings,
+            )
 
         await notify_match(
             bot,
             {**match, "telegram_id": telegram_id, "group_id": _group_id},
             msg.message_id, _group_id,
             nekay_cb=nekay_cb,
-            success_msg=success_text,
+            success_msg=random.choice(PAYMENT_SUCCESS_MESSAGES),
             receipt_msg_id=receipt_msg.message_id,
             receipt_chat_id=chat_id,
+            custom_reply_fn=custom_reply_fn,
         )
 
         try:
@@ -1569,7 +1610,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
 # MATCH NOTIFICATION
 # ============================================================
 
-async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None, success_msg: str = None, receipt_msg_id: int = None, receipt_chat_id: int = None):
+async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, nekay_cb=None, success_msg: str = None, receipt_msg_id: int = None, receipt_chat_id: int = None, custom_reply_fn=None):
     from board import build_board
 
     telegram_id = match_data["telegram_id"]
@@ -1613,6 +1654,11 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
 
     if confirmed:
         final_msg = success_msg or random.choice(PAYMENT_SUCCESS_MESSAGES)
+        if custom_reply_fn:
+            try:
+                final_msg = custom_reply_fn(confirmed, remaining_balance)
+            except Exception as _cr_err:
+                logger.warning(f"[NotifyMatch] custom_reply_fn error (confirmed): {_cr_err}")
         if receipt_msg_id and receipt_chat_id:
             try:
                 await bot.delete_message(chat_id=receipt_chat_id, message_id=receipt_msg_id)
@@ -1641,6 +1687,11 @@ async def notify_match(bot, match_data: dict, reply_msg_id=None, chat_id=None, n
             f"💳 ባላንስ: ETB {remaining_balance}"
             + needed_msg
         )
+        if custom_reply_fn:
+            try:
+                message = custom_reply_fn(confirmed, remaining_balance)
+            except Exception as _cr_err:
+                logger.warning(f"[NotifyMatch] custom_reply_fn error (not confirmed): {_cr_err}")
         if receipt_msg_id and receipt_chat_id:
             try:
                 await bot.edit_message_text(
@@ -1797,9 +1848,13 @@ async def handle_payment_claim(bot, msg, user_id: int, group_id: int, settings: 
     except Exception:
         pass
 
-    # ✅ ውጤት: amount ብቻ ("300 ብር") — ምንም ተጨማሪ ጽሁፍ/emoji
+    # ✅ ውጤት: screenshot flow style ("<amount> ብር ደርሶኛል መልካም ዕድል🙏"
+    # ወይም shortfall ካለ "<amount> ብር ደርሶኛል ለሙሉ/ለግማሽ <X> ይጎላል 🙏")
     try:
-        await msg.reply_text(f"{int(amount) if float(amount).is_integer() else amount} ብር")
+        claim_reply_text = _build_claim_reply(
+            amount, confirmed, result.get("remaining_balance"), settings,
+        )
+        await msg.reply_text(claim_reply_text)
     except Exception as e:
         logger.warning(f"[PaymentClaim] reply error: {e}")
 
