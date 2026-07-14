@@ -2560,18 +2560,16 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                 admin_remove_player(game_id, number, slot=1)
                 if name1:
                     orig_uid1 = uid_map.get(1, 0)
-                    register_number(game_id, orig_uid1, name1, number, is_half1, force=True, force_slot=1)
-                    admin_mark_paid(game_id, number, slot=1, is_paid=paid1)
-                    if pending1:
-                        conn_p = get_conn()
-                        cur_p = conn_p.cursor()
-                        cur_p.execute("""
-                            UPDATE registrations SET pending_upgrade=TRUE
-                            WHERE game_id=%s AND number=%s AND slot=1
-                        """, (game_id, number))
-                        conn_p.commit()
-                        cur_p.close()
-                        conn_p.close()
+                    conn1 = get_conn()
+                    cur1 = conn1.cursor()
+                    cur1.execute("""
+                        INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                        VALUES (%s, %s, %s, %s, %s, 1, %s, FALSE, %s)
+                        ON CONFLICT DO NOTHING
+                    """, (game_id, orig_uid1, name1, number, is_half1, paid1, pending1))
+                    conn1.commit()
+                    cur1.close()
+                    conn1.close()
 
             if slot2_changed:
                 admin_remove_player(game_id, number, slot=2)
@@ -2947,23 +2945,28 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if not found:
                 # NEW: ቁጥሩ ባዶ (ምንም registration ስላልነበረ replace ያልተሳካ)
                 # ከሆነ — replace ብቻ ሳይሆን አዲስ registration ደግሞ ይፍጠር
+                # (register_number()'s force_slot path is_nekay=TRUE የሚጠይቅ
+                # ስለሆነ እና ሌላኛው slot ነባር ቢሆን ትክክል ስለማይሰራ፣ በቀጥታ INSERT
+                # እንጠቀማለን — admin override ስለሆነ balance አይነካም)
                 reg_slot = slot if slot is not None else 1
+                inserted = False
                 try:
-                    reg_result = register_number(
-                        game_id_eshi, owner_id, target_name, number, is_half,
-                        force=True, force_slot=(reg_slot if is_half else None),
-                    )
+                    conn_reg = get_conn()
+                    cur_reg = conn_reg.cursor()
+                    cur_reg.execute("""
+                        INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, FALSE, FALSE)
+                        ON CONFLICT DO NOTHING
+                    """, (game_id_eshi, owner_id, target_name, number, is_half, reg_slot, mark_paid))
+                    inserted = cur_reg.rowcount > 0
+                    conn_reg.commit()
+                    cur_reg.close()
+                    conn_reg.close()
                 except Exception as e:
-                    logging.warning(f"[Eshi] register_number fallback error: {e}")
-                    reg_result = None
+                    logging.warning(f"[Eshi] direct insert fallback error: {e}")
 
-                if reg_result in ("registered", "registered_half"):
+                if inserted:
                     found = True
-                    if mark_paid:
-                        try:
-                            admin_mark_paid(game_id_eshi, number, reg_slot, True)
-                        except Exception as e:
-                            logging.warning(f"[Eshi] admin_mark_paid after register error: {e}")
 
             if found:
                 label = f"{number:02d}" + (f"+{slot}" if slot else "")
