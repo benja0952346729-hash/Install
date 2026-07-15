@@ -2521,7 +2521,7 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             conn_check = get_conn()
             cur_check = conn_check.cursor()
             cur_check.execute("""
-                SELECT slot, user_id, user_name, is_paid FROM registrations
+                SELECT slot, user_id, user_name, is_paid, is_half FROM registrations
                 WHERE game_id=%s AND number=%s
             """, (game_id, number))
             existing_rows = cur_check.fetchall()
@@ -2530,6 +2530,7 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             uid_map = {row[0]: row[1] for row in existing_rows}
             name_map = {row[0]: row[2] for row in existing_rows}
             paid_map = {row[0]: row[3] for row in existing_rows}
+            half_map = {row[0]: row[4] for row in existing_rows}
             was_paid1 = bool(paid_map.get(1, False))
 
             # FIX: admin ብዙ ጊዜ ሙሉውን board ጽሁፍ ኮፒ አድርጎ (የፈለገውን 1 መስመር
@@ -2539,18 +2540,27 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             # admin_remove_player+register_number (is_nekay ሁልጊዜ FALSE
             # አድርጎ ስለሚያስገባ) ያልተነኩ ቁጥሮች ላይ ያለውን is_nekay ሁኔታ ያጠፋዋል
             # (ይህ ነው ነቃይ list ሙሉ ለሙሉ ድንገት ይጠፋ የነበረው ትክክለኛ ምክንያት)።
+            #
+            # FIX #2: is_half ደግሞ ማነጻጸር አለበት — ከዚህ በፊት ስም/paid ብቻ ነበር
+            # የሚነጻጸረው፣ ስለዚህ "በሙሉ የነበረ ቁጥር ወደ ግማሽ መቀየር" (ስም/paid
+            # ተመሳሳይ ሆኖ is_half ብቻ ሲቀየር) ጨርሶ "ምንም አልተቀየረም" ተብሎ ይታለፍ
+            # ነበር — admin መጀመሪያ ባዶ አድርጎ ከዚያ እንደገና ሲጽፍ ብቻ ይሰራ የነበረው
+            # ለዚህ ነው።
             current_name1 = name_map.get(1)
             current_paid1 = bool(paid_map.get(1, False))
+            current_is_half1 = bool(half_map.get(1, False))
             current_name2 = name_map.get(2)
             current_paid2 = bool(paid_map.get(2, False))
             if (name1 == current_name1 and paid1 == current_paid1
+                    and is_half1 == current_is_half1
                     and name2 == current_name2 and paid2 == current_paid2):
                 continue
 
             # FIX: slot1/slot2 ን ተነጣጥሎ ማነጻጸር (ከዚህ በፊት ሁለቱም slots
             # ላይ ትንሽ ለውጥ እንኳ ቢኖር ሁለቱም ይሰረዙ ነበር — ስለዚህ ያልተነካው slot
             # (ለምሳሌ nekay/unpaid የሆነ) ጭምር ይጠፋ ነበር)
-            slot1_changed = not (name1 == current_name1 and paid1 == current_paid1)
+            slot1_changed = not (name1 == current_name1 and paid1 == current_paid1
+                                 and is_half1 == current_is_half1)
             slot2_changed = not (name2 == current_name2 and paid2 == current_paid2)
 
             if not slot1_changed and not slot2_changed:
@@ -2714,6 +2724,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not is_group_active(group_id):
         logging.info(f"[OwnerReply] Rejected: group {group_id} not active")
+        if is_eshi_form:
+            await msg.reply_text("❌ ንቁ ጨዋታ የለም (active game required)")
         return
 
     # winner-correction replies (reply to the BOT's Winners announcement)
@@ -2721,12 +2733,18 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     # for replies to a REAL USER's message (ownership fix / payment).
     if not msg.reply_to_message:
         logging.info("[OwnerReply] Rejected: not a reply to any message")
+        if is_eshi_form:
+            await msg.reply_text("❌ #እሺ የተጠቃሚውን message ላይ reply ተደርጎ መጻፍ አለበት")
         return
     if not msg.reply_to_message.from_user:
         logging.info("[OwnerReply] Rejected: reply_to_message has no from_user")
+        if is_eshi_form:
+            await msg.reply_text("❌ ይህ message ላይ reply ማድረግ አይቻልም")
         return
     if msg.reply_to_message.from_user.is_bot:
         logging.info("[OwnerReply] Rejected: replied-to message is from the bot (handled elsewhere)")
+        if is_eshi_form:
+            await msg.reply_text("❌ #እሺ የ bot message ላይ ሳይሆን የተጠቃሚውን ኦርጅናል message ላይ reply መደረግ አለበት")
         return
 
     owner = msg.reply_to_message.from_user
