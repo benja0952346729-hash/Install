@@ -1125,8 +1125,21 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
             await asyncio.to_thread(db_release_claim, user_id, target_group_id)
         except Exception as e:
-            logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
-            await asyncio.to_thread(db_release_claim, user_id, target_group_id)
+            err_text = str(e).lower()
+            if "too many channels" in err_text or "too many communities" in err_text or "too many groups" in err_text:
+                # PERMANENT, user-side limit — this specific user has
+                # already joined the maximum number of groups/channels
+                # Telegram allows, so NO account will ever succeed in
+                # adding them. Do NOT release the claim here: releasing
+                # it would make this user get retried on every future
+                # message they send, burning add-attempts forever on
+                # something that can never succeed. Leaving the claim in
+                # place makes future checks see them as "already added"
+                # and skip silently instead.
+                logger.warning(f"[Add] 🛑 [{account['label']}] user={user_id} is already in too many groups (Telegram-side, permanent) — marking as permanently skipped, will NOT retry")
+            else:
+                logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
+                await asyncio.to_thread(db_release_claim, user_id, target_group_id)
     finally:
         if own_client:
             await client.disconnect()
@@ -1346,6 +1359,24 @@ async def _reload_listeners(owner_id: int = None):
                         logger.info(f"[AutoAdd-DEBUG] ✅ [{account['label']}] resolved entity for {sid}: {getattr(entity, 'title', entity)}")
                     except Exception as e:
                         logger.warning(f"[AutoAdd-DEBUG] ❌ [{account['label']}] CANNOT resolve entity for {sid} — this account may not be a member yet: {e}")
+                        continue
+
+                    # Pre-warm the participant cache for this group. Just
+                    # resolving the group entity does NOT cache the
+                    # access_hash of every member — only of users this
+                    # client has already directly interacted with. By
+                    # iterating participants once here, every member's
+                    # entity (including access_hash) gets cached, so a
+                    # later get_entity(user_id)/InviteToChannelRequest for
+                    # any sender in this group is far less likely to hit
+                    # 'Could not find the input entity'.
+                    try:
+                        member_count = 0
+                        async for _participant in client.iter_participants(entity):
+                            member_count += 1
+                        logger.info(f"[AutoAdd-DEBUG] ✅ [{account['label']}] pre-warmed {member_count} member entities for {sid}")
+                    except Exception as e:
+                        logger.warning(f"[AutoAdd-DEBUG] ⚠️ [{account['label']}] participant pre-warm failed for {sid}: {e}")
 
                 @client.on(events.NewMessage(chats=source_ids))
                 async def handler(event, acc=account, o=oid, my_client_holder=[None]):
