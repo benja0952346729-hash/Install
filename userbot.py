@@ -1167,6 +1167,14 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 # place makes future checks see them as "already added"
                 # and skip silently instead.
                 logger.warning(f"[Add] 🛑 [{account['label']}] user={user_id} is already in too many groups (Telegram-side, permanent) — marking as permanently skipped, will NOT retry")
+            elif "could not find the input entity" in err_text or "could not find the input" in err_text:
+                # Per owner's instruction: try once, and if Telegram can't
+                # give us this user's entity at all (they likely left the
+                # source group already, or the account was deleted), stop
+                # — do NOT retry on their next message. Same mechanism as
+                # the "too many groups" case: leave the claim in place so
+                # future checks silently treat them as already handled.
+                logger.warning(f"[Add] 🛑 [{account['label']}] user={user_id} unresolvable by Telegram (left group / deleted account) — marking as permanently skipped, will NOT retry")
             else:
                 logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
                 await asyncio.to_thread(db_release_claim, user_id, target_group_id)
