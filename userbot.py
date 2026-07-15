@@ -17,6 +17,16 @@ screenshot/winner-photo AI analysis). Admin-only command handlers
 (cmd_addaccount, cmd_listgroups, etc.) were left untouched since they only
 run when an admin explicitly issues a command — negligible impact, and
 touching them adds risk with no real benefit.
+
+⚠️ CHANGE (per owner request, July 2026): removed the listener/worker role
+split entirely. Every account now listens to its OWN assigned source
+group(s) and adds users to the target group itself — no handoff to a
+separate "worker" account. This avoids the pattern where an account with
+no shared group with the target user tries to add them (which Telegram
+was flagging as spam and killing sessions for). Source groups are now
+assigned to specific accounts (round-robin by default, or manually via
+the per-account view in /listgroups), and duplicate adds across accounts
+are prevented with an atomic DB-level claim.
 """
 
 import os
@@ -98,9 +108,6 @@ def init_userbot_db():
         )
     """, "create userbot_accounts")
 
-    # --- FIX: older deployments created userbot_accounts before owner_id
-    # existed (single-tenant era). Backfill it here too, same reason as
-    # userbot_settings below. ---
     run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
@@ -115,10 +122,6 @@ def init_userbot_db():
         )
     """, "create userbot_settings")
 
-    # --- FIX: older deployments created userbot_settings before owner_id
-    # existed (single-tenant era). CREATE TABLE IF NOT EXISTS above is a
-    # no-op on those, so owner_id column (and the composite PK) never gets
-    # added. This backfills it safely for both old and new DBs. ---
     run("""
         ALTER TABLE userbot_settings
         ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
@@ -153,8 +156,6 @@ def init_userbot_db():
         )
     """, "create userbot_groups")
 
-    # --- FIX: same owner_id backfill for userbot_groups (older deployments
-    # created this table before multi-tenant owner_id was introduced). ---
     run("""
         ALTER TABLE userbot_groups
         ADD COLUMN IF NOT EXISTS owner_id BIGINT NOT NULL DEFAULT 0
@@ -216,7 +217,7 @@ def init_userbot_db():
     run("""
         ALTER TABLE userbot_accounts
         ADD COLUMN IF NOT EXISTS is_listener BOOLEAN DEFAULT FALSE
-    """, "userbot_accounts.is_listener backfill")
+    """, "userbot_accounts.is_listener backfill (column kept for backward compat, no longer used)")
 
     run("""
         DO $$
@@ -249,23 +250,30 @@ def init_userbot_db():
         WHERE is_source = TRUE
     """, "idx_groups_source index")
 
-    # --- FIX: db_add_group() / _auto_detect_groups() use
-    # ON CONFLICT (owner_id, group_id), which needs an actual unique
-    # index on that exact column pair. Older deployments may only have
-    # had a single-column UNIQUE on group_id (or none matching this
-    # pair), so create it explicitly here. ---
     run("""
         CREATE UNIQUE INDEX IF NOT EXISTS userbot_groups_owner_group_uidx
         ON userbot_groups (owner_id, group_id)
     """, "userbot_groups (owner_id, group_id) unique index")
 
-    # Same class of issue for userbot_accounts — db_add_account() relies
-    # on ON CONFLICT (phone) only, but keep this in place preventively
-    # in case future code conflicts on (owner_id, label) too.
     run("""
         CREATE UNIQUE INDEX IF NOT EXISTS userbot_accounts_owner_label_uidx
         ON userbot_accounts (owner_id, label)
     """, "userbot_accounts (owner_id, label) unique index")
+
+    # --- NEW: per-account group assignment. A group can be assigned to
+    # one or more accounts (usually one, via round-robin, but an admin
+    # can manually assign several accounts to the same group from the
+    # per-account view in /listgroups). Each assigned account listens
+    # to that group independently and adds users itself. ---
+    run("""
+        CREATE TABLE IF NOT EXISTS userbot_group_accounts (
+            owner_id BIGINT NOT NULL DEFAULT 0,
+            group_id BIGINT NOT NULL,
+            label CHAR(1) NOT NULL,
+            assigned_at TIMESTAMP DEFAULT NOW(),
+            PRIMARY KEY (owner_id, group_id, label)
+        )
+    """, "create userbot_group_accounts")
 
     cur.close()
     conn.close()
@@ -336,7 +344,7 @@ def _is_admin(user_id: int) -> bool:
 
 
 # ============================================================
-# DB HELPERS
+# DB HELPERS — ACCOUNTS
 # ============================================================
 
 def db_add_account(owner_id: int, label: str, api_id: int, api_hash: str, phone: str):
@@ -355,7 +363,7 @@ def db_add_account(owner_id: int, label: str, api_id: int, api_hash: str, phone:
 def db_list_accounts(owner_id: int):
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT id, label, phone, is_active, session, flood_until, spam_until, is_listener FROM userbot_accounts WHERE owner_id=%s ORDER BY label", (owner_id,))
+    cur.execute("SELECT id, label, phone, is_active, session, flood_until, spam_until FROM userbot_accounts WHERE owner_id=%s ORDER BY label", (owner_id,))
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -366,7 +374,7 @@ def db_get_account_by_label(owner_id: int, label: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE owner_id=%s AND label=%s",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until FROM userbot_accounts WHERE owner_id=%s AND label=%s",
         (owner_id, label)
     )
     row = cur.fetchone()
@@ -377,7 +385,7 @@ def db_get_account_by_label(owner_id: int, label: str):
     return {
         "id": row[0], "label": row[1], "api_id": row[2], "api_hash": row[3],
         "phone": row[4], "session": row[5], "is_active": row[6],
-        "flood_until": row[7], "spam_until": row[8], "is_listener": row[9]
+        "flood_until": row[7], "spam_until": row[8]
     }
 
 
@@ -385,7 +393,7 @@ def db_get_account_by_phone(phone: str):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE phone=%s",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until FROM userbot_accounts WHERE phone=%s",
         (phone,)
     )
     row = cur.fetchone()
@@ -396,15 +404,18 @@ def db_get_account_by_phone(phone: str):
     return {
         "id": row[0], "label": row[1], "api_id": row[2], "api_hash": row[3],
         "phone": row[4], "session": row[5], "is_active": row[6],
-        "flood_until": row[7], "spam_until": row[8], "is_listener": row[9]
+        "flood_until": row[7], "spam_until": row[8]
     }
 
 
 def db_get_all_accounts(owner_id: int):
+    """All active accounts with a session. There is no more listener/worker
+    role split — every account listens to its own assigned groups (see
+    userbot_group_accounts) and adds users itself."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE owner_id=%s AND is_active=TRUE ORDER BY label",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until FROM userbot_accounts WHERE owner_id=%s AND is_active=TRUE ORDER BY label",
         (owner_id,)
     )
     rows = cur.fetchall()
@@ -413,36 +424,9 @@ def db_get_all_accounts(owner_id: int):
     return [
         {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
          "phone": r[4], "session": r[5], "is_active": r[6],
-         "flood_until": r[7], "spam_until": r[8], "is_listener": r[9]}
+         "flood_until": r[7], "spam_until": r[8]}
         for r in rows
     ]
-
-
-def db_get_all_listeners(owner_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener FROM userbot_accounts WHERE owner_id=%s AND is_active=TRUE AND is_listener=TRUE ORDER BY label",
-        (owner_id,)
-    )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [
-        {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
-         "phone": r[4], "session": r[5], "is_active": r[6],
-         "flood_until": r[7], "spam_until": r[8], "is_listener": r[9]}
-        for r in rows
-    ]
-
-
-def db_set_listener(phone: str, is_listener: bool):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE userbot_accounts SET is_listener=%s WHERE phone=%s", (is_listener, phone))
-    conn.commit()
-    cur.close()
-    conn.close()
 
 
 def db_save_session(phone: str, session: str):
@@ -487,8 +471,8 @@ def db_get_spam_accounts(owner_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute(
-        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until, is_listener "
-        "FROM userbot_accounts WHERE owner_id=%s AND spam_until IS NOT NULL AND is_listener=FALSE ORDER BY label",
+        "SELECT id, label, api_id, api_hash, phone, session, is_active, flood_until, spam_until "
+        "FROM userbot_accounts WHERE owner_id=%s AND spam_until IS NOT NULL ORDER BY label",
         (owner_id,)
     )
     rows = cur.fetchall()
@@ -497,7 +481,7 @@ def db_get_spam_accounts(owner_id: int):
     return [
         {"id": r[0], "label": r[1], "api_id": r[2], "api_hash": r[3],
          "phone": r[4], "session": r[5], "is_active": r[6],
-         "flood_until": r[7], "spam_until": r[8], "is_listener": r[9]}
+         "flood_until": r[7], "spam_until": r[8]}
         for r in rows
     ]
 
@@ -571,10 +555,106 @@ def db_delete_group(owner_id: int, group_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM userbot_groups WHERE owner_id=%s AND group_id=%s", (owner_id, group_id))
+    cur.execute("DELETE FROM userbot_group_accounts WHERE owner_id=%s AND group_id=%s", (owner_id, group_id))
     conn.commit()
     cur.close()
     conn.close()
 
+
+# ============================================================
+# DB HELPERS — PER-ACCOUNT GROUP ASSIGNMENT (NEW)
+# ============================================================
+
+def db_assign_group_to_account(owner_id: int, group_id: int, label: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO userbot_group_accounts (owner_id, group_id, label)
+        VALUES (%s, %s, %s)
+        ON CONFLICT DO NOTHING
+    """, (owner_id, group_id, label))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_unassign_group_from_account(owner_id: int, group_id: int, label: str):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM userbot_group_accounts WHERE owner_id=%s AND group_id=%s AND label=%s",
+        (owner_id, group_id, label)
+    )
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_get_labels_for_group(owner_id: int, group_id: int) -> list:
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT label FROM userbot_group_accounts WHERE owner_id=%s AND group_id=%s ORDER BY label",
+        (owner_id, group_id)
+    )
+    rows = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def db_get_groups_for_account(owner_id: int, label: str) -> list:
+    """Group IDs this specific account is assigned to listen on."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT g.group_id FROM userbot_groups g
+        JOIN userbot_group_accounts ga
+          ON ga.owner_id = g.owner_id AND ga.group_id = g.group_id
+        WHERE g.owner_id=%s AND g.is_source=TRUE AND ga.label=%s
+    """, (owner_id, label))
+    rows = [r[0] for r in cur.fetchall()]
+    cur.close()
+    conn.close()
+    return rows
+
+
+def db_get_group_assignment_map(owner_id: int) -> dict:
+    """group_id -> [labels] for display purposes (e.g. /listgroups)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT group_id, label FROM userbot_group_accounts WHERE owner_id=%s", (owner_id,))
+    rows = cur.fetchall()
+    cur.close()
+    conn.close()
+    mapping = {}
+    for gid, label in rows:
+        mapping.setdefault(gid, []).append(label)
+    for gid in mapping:
+        mapping[gid].sort()
+    return mapping
+
+
+_group_assign_rr_index = 0
+
+
+def db_auto_assign_group(owner_id: int, group_id: int):
+    """Round-robin: pick the next account (a → b → c → a...) among
+    accounts that currently have a session, and assign this group to it.
+    Returns the assigned label, or None if no accounts are available."""
+    global _group_assign_rr_index
+    accounts = [a for a in db_get_all_accounts(owner_id) if a.get("session")]
+    if not accounts:
+        return None
+    account = accounts[_group_assign_rr_index % len(accounts)]
+    _group_assign_rr_index += 1
+    db_assign_group_to_account(owner_id, group_id, account["label"])
+    return account["label"]
+
+
+# ============================================================
+# DB HELPERS — MISC
+# ============================================================
 
 def db_is_user_added(user_id: int, group_id: int) -> bool:
     conn = get_conn()
@@ -589,13 +669,36 @@ def db_is_user_added(user_id: int, group_id: int) -> bool:
     return exists
 
 
-def db_mark_user_added(user_id: int, group_id: int):
+def db_try_claim_user(user_id: int, target_group_id: int) -> bool:
+    """Atomically claim a user for adding to target_group_id. Returns True
+    if THIS call won the claim (no other account has claimed/added this
+    user for this target yet), False if it was already claimed. This
+    reuses userbot_added_users as both the "claim" and the final "added"
+    marker — a row existing means "someone is handling this or already
+    added them". Call db_release_claim() if the add attempt then fails,
+    so the user can be retried later."""
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
         INSERT INTO userbot_added_users (user_id, group_id) VALUES (%s, %s)
         ON CONFLICT DO NOTHING
-    """, (user_id, group_id))
+    """, (user_id, target_group_id))
+    won = cur.rowcount > 0
+    conn.commit()
+    cur.close()
+    conn.close()
+    return won
+
+
+def db_release_claim(user_id: int, target_group_id: int):
+    """Release a claim after a failed add attempt, so the user isn't
+    permanently (and incorrectly) marked as 'added'."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute(
+        "DELETE FROM userbot_added_users WHERE user_id=%s AND group_id=%s",
+        (user_id, target_group_id)
+    )
     conn.commit()
     cur.close()
     conn.close()
@@ -647,17 +750,6 @@ def db_get_recent_users(hours: int = 2):
         "SELECT DISTINCT user_id FROM userbot_recent_messages WHERE sent_at >= %s",
         (since,)
     )
-    rows = cur.fetchall()
-    cur.close()
-    conn.close()
-    return [r[0] for r in rows]
-
-
-def db_get_source_users():
-    """Source group ውስጥ ያሉ recent users ሁሉ"""
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT DISTINCT user_id FROM userbot_recent_messages")
     rows = cur.fetchall()
     cur.close()
     conn.close()
@@ -726,28 +818,26 @@ def db_increment_daily_add(label: str):
 
 # ============================================================
 # RAW-SQL HELPERS (used only from hot-path async functions, so their
-# whole body runs inside asyncio.to_thread at the call site — see
-# _spam_recovery_loop / _auto_detect_groups / _sync_all_account_groups /
-# _reload_listeners below).
+# whole body runs inside asyncio.to_thread at the call site)
 # ============================================================
 
 def _sql_distinct_owner_ids_with_spam():
     conn = get_conn()
     cur = conn.cursor()
-    cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE spam_until IS NOT NULL AND is_listener=FALSE")
+    cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE spam_until IS NOT NULL")
     owner_ids = [r[0] for r in cur.fetchall()]
     cur.close()
     conn.close()
     return owner_ids
 
 
-def _sql_distinct_owner_ids_with_listeners(owner_id: int = None):
+def _sql_distinct_owner_ids_with_accounts(owner_id: int = None):
     conn = get_conn()
     cur = conn.cursor()
     if owner_id:
-        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE AND owner_id=%s", (owner_id,))
+        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND owner_id=%s", (owner_id,))
     else:
-        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE AND is_listener=TRUE")
+        cur.execute("SELECT DISTINCT owner_id FROM userbot_accounts WHERE is_active=TRUE")
     owner_ids = [r[0] for r in cur.fetchall()]
     cur.close()
     conn.close()
@@ -769,16 +859,15 @@ def _sql_upsert_detected_group(owner_id: int, normalized_id: int, name: str):
 
 
 # ============================================================
-# ROUND ROBIN
+# ROUND ROBIN (DM broadcast only — unrelated to source-group assignment)
 # ============================================================
 
-_rr_index = 0
 _dm_rr_index = 0
 
 
 def get_dm_accounts(owner_id: int) -> list:
     """DM ለመላክ የሚጠቀሙ accounts — formula based"""
-    accounts = [a for a in db_get_all_accounts(owner_id) if a.get("session") and not a.get("is_listener")]
+    accounts = [a for a in db_get_all_accounts(owner_id) if a.get("session")]
     total = len(accounts)
     if total <= 5:
         return []
@@ -799,32 +888,12 @@ def get_next_dm_account(owner_id: int):
     return account
 
 
-def get_next_account(owner_id: int):
-    global _rr_index
-    accounts = db_get_all_accounts(owner_id)
-    now = datetime.now()
-    daily_limit_str = db_get_setting(owner_id, "daily_limit")
-    daily_limit = int(daily_limit_str) if daily_limit_str else None
-
-    available = []
-    for a in accounts:
-        if not a["session"]:
-            continue
-        if a.get("is_listener"):
-            continue
-        if a["flood_until"] and a["flood_until"] > now:
-            continue
-        if a["spam_until"] and a["spam_until"] > now:
-            continue
-        if daily_limit is not None and db_get_daily_add_count(a["label"]) >= daily_limit:
-            continue
-        available.append(a)
-
-    if not available:
-        return None
-    account = available[_rr_index % len(available)]
-    _rr_index += 1
-    return account
+def get_any_account(owner_id: int):
+    """Used only by admin commands that need *some* account with a
+    session to look up group info (e.g. /addgroup, /syncgroups) — not
+    part of the add pipeline any more."""
+    accounts = [a for a in db_get_all_accounts(owner_id) if a.get("session")]
+    return accounts[0] if accounts else None
 
 
 # ============================================================
@@ -856,18 +925,45 @@ async def _notify_admins(text: str):
 _admin_cache: dict = {}
 
 
-async def _is_admin_or_owner(client, user_id: int, group_id: int) -> bool:
+async def _is_admin_or_owner(client, user, group_id: int) -> bool:
+    """Checks whether `user` (a resolved Telethon User entity, or a bare
+    user_id as a fallback) is an admin/creator of group_id. IMPORTANT:
+    pass the already-resolved `sender` object from the event that
+    triggered this check — not a bare id looked up on a fresh/different
+    client — since a brand-new client instance has no cached access_hash
+    for that user and get_permissions() will fail with 'Could not find
+    the input entity'. `client` should be the SAME client that received
+    the message (already a member of the group, already saw the sender)."""
+    user_id = user.id if hasattr(user, "id") else user
     cache_key = (user_id, group_id)
     if cache_key in _admin_cache:
         return _admin_cache[cache_key]
     try:
-        participant = await client.get_permissions(group_id, user_id)
+        participant = await client.get_permissions(group_id, user)
         result = participant.is_admin or participant.is_creator
     except Exception as e:
         logger.warning(f"[AutoAdd-DEBUG] get_permissions failed for user={user_id} group={group_id}: {e}")
         result = False
     _admin_cache[cache_key] = result
     return result
+
+
+# ============================================================
+# PER-ACCOUNT LOCKS — serialize add attempts made by the SAME account
+# so two messages arriving at nearly the same moment (in this account's
+# assigned group, or in two of its assigned groups) can never race each
+# other into simultaneously trying to add/contact/invite. Combined with
+# the atomic DB claim (db_try_claim_user) this also protects against two
+# DIFFERENT accounts racing on the same user.
+# ============================================================
+
+_account_locks: dict = {}
+
+
+def _get_account_lock(label: str) -> asyncio.Lock:
+    if label not in _account_locks:
+        _account_locks[label] = asyncio.Lock()
+    return _account_locks[label]
 
 
 # ============================================================
@@ -897,17 +993,16 @@ async def _get_client(account: dict, owner_id: int = 0) -> TelegramClient:
         logger.warning(f"[_get_client] ❌ [{account.get('label')}] target group cache failed: {e}")
 
     try:
-        groups = await asyncio.to_thread(db_list_groups, owner_id)
-        source_ids = [g[1] for g in groups if g[3]]
-        if source_ids:
-            for sid in source_ids:
+        my_group_ids = await asyncio.to_thread(db_get_groups_for_account, owner_id, account.get("label"))
+        if my_group_ids:
+            for gid in my_group_ids:
                 try:
-                    await client.get_input_entity(sid)
-                    logger.info(f"[_get_client] ✅ [{account.get('label')}] source group cached: {sid}")
+                    await client.get_input_entity(gid)
+                    logger.info(f"[_get_client] ✅ [{account.get('label')}] source group cached: {gid}")
                 except Exception as e:
-                    logger.warning(f"[_get_client] ❌ [{account.get('label')}] source {sid} cache failed: {e}")
+                    logger.warning(f"[_get_client] ❌ [{account.get('label')}] source {gid} cache failed: {e}")
         else:
-            logger.warning(f"[_get_client] ⚠️ [{account.get('label')}] source group የለም")
+            logger.info(f"[_get_client] ℹ️ [{account.get('label')}] this account has no assigned source groups")
     except Exception as e:
         logger.warning(f"[_get_client] ❌ [{account.get('label')}] source groups error: {e}")
 
@@ -938,8 +1033,20 @@ def _normalize_source_id(gid) -> int:
 # CORE ACTIONS  (hot path — wrapped in to_thread)
 # ============================================================
 
-async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int, owner_id: int = 0):
-    client = await _get_client(account, owner_id)
+async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int, owner_id: int = 0, client=None):
+    """Adds `sender` to the target group using `account`.
+
+    If `client` is passed in, it is the SAME already-connected client that
+    is actively listening for messages on this account's assigned
+    group(s) — it is reused here and is NEVER disconnected by this
+    function, since disconnecting it would kill that account's listener.
+    A client only gets disconnected here if this function created its
+    own (client=None), e.g. when called from a context with no live
+    listener client at hand.
+    """
+    own_client = client is None
+    if own_client:
+        client = await _get_client(account, owner_id)
     try:
         user_id = sender.id
         first_name = sender.first_name or "User"
@@ -953,7 +1060,12 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             resolved_user = await client.get_entity(user_id)
             logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved from own cache")
         except Exception as e:
-            logger.info(f"[Resolve] [{account['label']}] {user_id} not in cache: {e}")
+            # The sender object itself came from this same client's event,
+            # so it's already a valid resolved entity even if a fresh
+            # get_entity() lookup can't re-derive it — use it directly
+            # instead of failing here.
+            logger.info(f"[Resolve] [{account['label']}] {user_id} not resolvable via get_entity, using event's sender object directly: {e}")
+            resolved_user = sender
 
         if not resolved_user:
             already_contacted = await asyncio.to_thread(db_is_user_contacted, user_id, account["label"])
@@ -971,11 +1083,13 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 except FloodWaitError as e:
                     await asyncio.to_thread(db_set_flood, account["phone"], e.seconds)
                     logger.warning(f"[Contact] 🚫 Flood [{account['label']}]: {e.seconds}s")
+                    await asyncio.to_thread(db_release_claim, user_id, target_group_id)
                     return
                 except PeerFloodError:
                     await asyncio.to_thread(db_set_spam, account["phone"])
                     logger.warning(f"[Contact] 🚫 SPAM BAN [{account['label']}]")
                     await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
+                    await asyncio.to_thread(db_release_claim, user_id, target_group_id)
                     return
                 except Exception as e:
                     logger.warning(f"[Contact] ❌ [{account['label']}] {user_id}: {e}")
@@ -984,38 +1098,39 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 resolved_user = await client.get_entity(user_id)
                 logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved after contact")
             except Exception as e:
-                logger.warning(f"[Resolve] ❌ [{account['label']}] still cannot resolve {user_id}: {e}")
+                logger.warning(f"[Resolve] ⚠️ [{account['label']}] still cannot re-resolve {user_id}, falling back to sender object: {e}")
+                resolved_user = sender
 
         if not resolved_user:
             logger.warning(f"[Add] ⏭ [{account['label']}] user {user_id} unresolvable — skip")
+            await asyncio.to_thread(db_release_claim, user_id, target_group_id)
             return
 
-        already_added = await asyncio.to_thread(db_is_user_added, user_id, target_group_id)
-        if not already_added:
-            try:
-                target_link = await asyncio.to_thread(db_get_setting, owner_id, "target_group_link")
-                target = target_link if target_link else target_group_id
-                group = await client.get_entity(target)
-                logger.info(f"[Add] ✅ [{account['label']}] target group resolved: {target}")
+        try:
+            target_link = await asyncio.to_thread(db_get_setting, owner_id, "target_group_link")
+            target = target_link if target_link else target_group_id
+            group = await client.get_entity(target)
+            logger.info(f"[Add] ✅ [{account['label']}] target group resolved: {target}")
 
-                await client(InviteToChannelRequest(channel=group, users=[resolved_user]))
-                await asyncio.to_thread(db_mark_user_added, user_id, target_group_id)
-                await asyncio.to_thread(db_increment_daily_add, account["label"])
-                logger.info(f"[Add] ✅✅ [{account['label']}] user {user_id} → {target_group_id} SUCCESS!")
-            except FloodWaitError as e:
-                await asyncio.to_thread(db_set_flood, account["phone"], e.seconds)
-                logger.warning(f"[Add] 🚫 Flood [{account['label']}]: {e.seconds}s")
-            except PeerFloodError:
-                await asyncio.to_thread(db_set_spam, account["phone"])
-                logger.warning(f"[Add] 🚫 SPAM BAN [{account['label']}]")
-                await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
-            except Exception as e:
-                logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
-        else:
-            logger.info(f"[Add] ⏭ [{account['label']}] user={user_id} already added — skip")
+            await client(InviteToChannelRequest(channel=group, users=[resolved_user]))
+            await asyncio.to_thread(db_increment_daily_add, account["label"])
+            logger.info(f"[Add] ✅✅ [{account['label']}] user {user_id} → {target_group_id} SUCCESS!")
+        except FloodWaitError as e:
+            await asyncio.to_thread(db_set_flood, account["phone"], e.seconds)
+            logger.warning(f"[Add] 🚫 Flood [{account['label']}]: {e.seconds}s")
+            await asyncio.to_thread(db_release_claim, user_id, target_group_id)
+        except PeerFloodError:
+            await asyncio.to_thread(db_set_spam, account["phone"])
+            logger.warning(f"[Add] 🚫 SPAM BAN [{account['label']}]")
+            await _notify_admins(f"⚠️ Account [{account['label']}] {account['phone']} spam ban ሆነ!\n24 ሰዓት በኋላ auto-check ይጀምራል።")
+            await asyncio.to_thread(db_release_claim, user_id, target_group_id)
+        except Exception as e:
+            logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
+            await asyncio.to_thread(db_release_claim, user_id, target_group_id)
     finally:
-        await client.disconnect()
-        logger.info(f"[_get_client] 🔌 [{account.get('label')}] disconnected")
+        if own_client:
+            await client.disconnect()
+            logger.info(f"[_get_client] 🔌 [{account.get('label')}] disconnected")
 
 
 # ============================================================
@@ -1041,7 +1156,6 @@ async def _spam_recovery_loop():
                     logger.info(f"[SpamCheck] ⏳ [{account['label']}] still waiting {remaining}hr")
                     continue
 
-                # 24hr አልፏል — test ያደርጋል
                 logger.info(f"[SpamCheck] 🔍 [{account['label']}] testing...")
                 try:
                     client = TelegramClient(
@@ -1051,15 +1165,12 @@ async def _spam_recovery_loop():
                     )
                     await client.connect()
                     try:
-                        # @SpamBot ን message ይልካል — test
                         await client.send_message("@SpamBot", "/start")
                         await asyncio.sleep(2)
-                        # Error ካልመጣ → spam ተነሳ
                         await asyncio.to_thread(db_clear_spam, account["phone"])
                         logger.info(f"[SpamCheck] ✅ [{account['label']}] spam ban ተነሳ!")
                         await _notify_admins(f"✅ Account [{account['label']}] {account['phone']} spam ban ተነሳ! እንደገና active ሆነ።")
                     except PeerFloodError:
-                        # ገና spam ነው — 5hr ተጨማሪ
                         logger.info(f"[SpamCheck] ❌ [{account['label']}] still spam banned")
                     except Exception as e:
                         logger.warning(f"[SpamCheck] [{account['label']}] test error: {e}")
@@ -1072,80 +1183,84 @@ async def _spam_recovery_loop():
 
 
 # ============================================================
-# WORKER AUTO-JOIN TO SOURCE GROUP  (hot path — wrapped in to_thread)
+# ADD ACCOUNTS TO SOURCE GROUP  (hot path — wrapped in to_thread)
+# Only invites the accounts that are ASSIGNED to this group (via
+# userbot_group_accounts) — not every account. An account must be a
+# member of a group to receive its messages or resolve its senders, so
+# whichever account(s) are assigned to a group must physically join it.
 # ============================================================
 
-async def _add_workers_to_source_group(group_id: int, owner_id: int = 0):
-    listeners = await asyncio.to_thread(db_get_all_listeners, owner_id)
-    if not listeners:
-        logger.warning("[WorkerAutoJoin] ⚠️ listener account የለም")
+async def _add_assigned_accounts_to_source_group(group_id: int, owner_id: int, labels: list):
+    if not labels:
+        logger.info(f"[AutoJoin] ⏭ group={group_id} has no assigned accounts yet")
         return
 
-    accounts = await asyncio.to_thread(db_get_all_accounts, owner_id)
-    workers = [a for a in accounts if not a.get("is_listener") and a.get("session")]
-
-    if not workers:
-        logger.info("[WorkerAutoJoin] ⏭ worker accounts የለም")
+    all_accounts = {a["label"]: a for a in await asyncio.to_thread(db_get_all_accounts, owner_id) if a.get("session")}
+    assigned = [all_accounts[l] for l in labels if l in all_accounts]
+    if not assigned:
+        logger.warning(f"[AutoJoin] ⚠️ none of the assigned labels {labels} have a live session")
         return
 
-    logger.info(f"[WorkerAutoJoin] 🚀 starting — group={group_id}, workers={[w['label'] for w in workers]}")
-
-    listener_account = listeners[0]
-    listener_client = await _get_client(listener_account)
+    # Use the first assigned account (or any account that can already
+    # resolve the group) as the "inviter" that performs the invites.
+    inviter = assigned[0]
+    inviter_client = await _get_client(inviter, owner_id)
     try:
         try:
-            group_entity = await listener_client.get_entity(group_id)
+            group_entity = await inviter_client.get_entity(group_id)
         except Exception as e:
-            logger.warning(f"[WorkerAutoJoin] ❌ listener cannot resolve group {group_id}: {e}")
+            logger.warning(f"[AutoJoin] ❌ [{inviter['label']}] cannot resolve group {group_id} — it must already be a member for the invite flow to work: {e}")
             return
 
         existing_member_ids = set()
         try:
-            async for participant in listener_client.iter_participants(group_entity):
+            async for participant in inviter_client.iter_participants(group_entity):
                 existing_member_ids.add(participant.id)
         except Exception as e:
-            logger.warning(f"[WorkerAutoJoin] ⚠️ cannot list participants: {e}")
+            logger.warning(f"[AutoJoin] ⚠️ cannot list participants: {e}")
 
-        added_count = skipped_count = failed_count = 0
-
-        for worker in workers:
+        added = skipped = failed = 0
+        for acc in assigned:
+            if acc["label"] == inviter["label"]:
+                skipped += 1
+                continue
             try:
-                worker_client = await _get_client(worker)
+                acc_client = await _get_client(acc, owner_id)
                 try:
-                    worker_me = await worker_client.get_me()
-                    worker_user_id = worker_me.id
+                    me = await acc_client.get_me()
+                    acc_user_id = me.id
                 finally:
-                    await worker_client.disconnect()
+                    await acc_client.disconnect()
 
-                if worker_user_id in existing_member_ids:
-                    skipped_count += 1
+                if acc_user_id in existing_member_ids:
+                    skipped += 1
                     continue
 
                 try:
-                    worker_input = await listener_client.get_entity(worker_user_id)
+                    acc_input = await inviter_client.get_entity(acc_user_id)
                 except Exception as e:
-                    logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] cannot resolve: {e}")
-                    failed_count += 1
+                    logger.warning(f"[AutoJoin] ❌ [{acc['label']}] cannot resolve: {e}")
+                    failed += 1
                     continue
 
-                await listener_client(InviteToChannelRequest(channel=group_entity, users=[worker_input]))
-                added_count += 1
-                logger.info(f"[WorkerAutoJoin] ✅✅ [{worker['label']}] added to source group")
+                await inviter_client(InviteToChannelRequest(channel=group_entity, users=[acc_input]))
+                added += 1
+                logger.info(f"[AutoJoin] ✅✅ [{acc['label']}] added to source group {group_id}")
 
             except FloodWaitError as e:
-                await asyncio.to_thread(db_set_flood, listener_account["phone"], e.seconds)
-                logger.warning(f"[WorkerAutoJoin] 🚫 Flood: {e.seconds}s")
+                await asyncio.to_thread(db_set_flood, inviter["phone"], e.seconds)
+                logger.warning(f"[AutoJoin] 🚫 Flood: {e.seconds}s")
                 break
             except Exception as e:
-                failed_count += 1
-                logger.warning(f"[WorkerAutoJoin] ❌ [{worker['label']}] failed: {e}")
+                failed += 1
+                logger.warning(f"[AutoJoin] ❌ [{acc['label']}] failed: {e}")
 
             await asyncio.sleep(random.uniform(15, 25))
 
-        logger.info(f"[WorkerAutoJoin] 🏁 added:{added_count} skipped:{skipped_count} failed:{failed_count}")
+        logger.info(f"[AutoJoin] 🏁 group={group_id} added:{added} skipped:{skipped} failed:{failed}")
 
     finally:
-        await listener_client.disconnect()
+        await inviter_client.disconnect()
 
 
 # ============================================================
@@ -1169,16 +1284,21 @@ async def _auto_detect_groups(account: dict, owner_id: int = 0):
 
 
 async def _sync_all_account_groups(owner_id: int = None):
-    owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_listeners, owner_id)
+    owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_accounts, owner_id)
     for oid in owner_ids:
-        listeners = await asyncio.to_thread(db_get_all_listeners, oid)
-        for account in listeners:
+        accounts = await asyncio.to_thread(db_get_all_accounts, oid)
+        for account in accounts:
             if account.get("session"):
                 await _auto_detect_groups(account, oid)
 
 
 # ============================================================
 # TELETHON EVENT LISTENERS  (hot path — wrapped in to_thread)
+# Every account attaches a listener ONLY for the group(s) assigned to
+# IT (db_get_groups_for_account) — not for every source group. When a
+# message arrives, the SAME client/account resolves the sender, checks
+# admin status, and — if eligible — adds the sender to the target group
+# ITSELF (no handoff to another account).
 # ============================================================
 
 _telethon_clients = []
@@ -1195,22 +1315,23 @@ async def _reload_listeners(owner_id: int = None):
 
     await _sync_all_account_groups(owner_id)
 
-    owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_listeners, owner_id)
+    owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_accounts, owner_id)
 
     for oid in owner_ids:
-        groups = await asyncio.to_thread(db_list_groups, oid)
-        source_ids = [_normalize_source_id(g[1]) for g in groups if g[3]]
+        accounts = await asyncio.to_thread(db_get_all_accounts, oid)
 
-        if not source_ids:
-            logger.warning(f"[Reload] ⚠️ owner={oid} source group የለም")
-            continue
-
-        logger.info(f"[Reload] ✅ owner={oid} source groups: {source_ids}")
-
-        listeners = await asyncio.to_thread(db_get_all_listeners, oid)
-        for account in listeners:
+        for account in accounts:
             if not account.get("session"):
                 continue
+
+            my_group_ids = await asyncio.to_thread(db_get_groups_for_account, oid, account["label"])
+            if not my_group_ids:
+                logger.info(f"[Reload] ℹ️ [{account['label']}] owner={oid} — no assigned source groups, skipping listener")
+                continue
+
+            source_ids = [_normalize_source_id(g) for g in my_group_ids]
+            logger.info(f"[Reload] ✅ [{account['label']}] owner={oid} assigned source groups: {source_ids}")
+
             try:
                 client = TelegramClient(
                     StringSession(account["session"]),
@@ -1224,47 +1345,38 @@ async def _reload_listeners(owner_id: int = None):
                         entity = await client.get_entity(sid)
                         logger.info(f"[AutoAdd-DEBUG] ✅ [{account['label']}] resolved entity for {sid}: {getattr(entity, 'title', entity)}")
                     except Exception as e:
-                        logger.warning(f"[AutoAdd-DEBUG] ❌ [{account['label']}] CANNOT resolve entity for {sid}: {e}")
+                        logger.warning(f"[AutoAdd-DEBUG] ❌ [{account['label']}] CANNOT resolve entity for {sid} — this account may not be a member yet: {e}")
 
                 @client.on(events.NewMessage(chats=source_ids))
-                async def debug_any_handler(event, acc=account, o=oid):
-                    try:
-                        raw_chat_id = event.chat_id
-                        normalized = _normalize_chat_id(event)
-                        logger.info(
-                            f"[AutoAdd-DEBUG] 🟡 [{acc['label']}] source message seen | "
-                            f"raw_chat_id={raw_chat_id} | normalized={normalized}"
-                        )
-                    except Exception as e:
-                        logger.warning(f"[AutoAdd-DEBUG] debug_any_handler error: {e}")
-
-                @client.on(events.NewMessage(chats=source_ids))
-                async def handler(event, acc=account, o=oid, sids=source_ids):
+                async def handler(event, acc=account, o=oid, my_client_holder=[None]):
+                    # my_client_holder trick avoids a stale-closure issue —
+                    # 'client' below refers to the client this handler is
+                    # bound to via the decorator, which is correct as-is
+                    # since each account gets its own client/handler pair
+                    # inside this loop iteration.
                     try:
                         chat_id = _normalize_chat_id(event)
-                        logger.info(f"[AutoAdd] 📨 msg from chat {chat_id}")
+                        logger.info(f"[AutoAdd] 📨 [{acc['label']}] msg from chat {chat_id}")
 
                         sender = await event.get_sender()
                         if not sender or sender.bot or sender.is_self:
                             return
 
                         user_id = sender.id
-                        logger.info(f"[AutoAdd] 👤 user {user_id} ({sender.first_name})")
+                        logger.info(f"[AutoAdd] 👤 [{acc['label']}] user {user_id} ({sender.first_name})")
 
-                        check_client = await _get_client(acc, o)
-                        try:
-                            is_adm = await _is_admin_or_owner(check_client, user_id, chat_id)
-                            if is_adm:
-                                return
-                        finally:
-                            await check_client.disconnect()
+                        # Use the SAME client (already a member of this
+                        # group, already has the sender resolved via the
+                        # event) — never spin up a second client for this.
+                        is_adm = await _is_admin_or_owner(client, sender, chat_id)
+                        if is_adm:
+                            return
 
                         await asyncio.to_thread(db_record_message, user_id, chat_id)
 
                         target_str = await asyncio.to_thread(db_get_setting, o, "target_group_id")
                         if not target_str:
                             return
-
                         target_group_id = int(target_str)
 
                         already_added = await asyncio.to_thread(db_is_user_added, user_id, target_group_id)
@@ -1279,18 +1391,54 @@ async def _reload_listeners(owner_id: int = None):
                         if not daily_limit_str:
                             logger.info("[AutoAdd] ⏭ daily_limit አልተቀመጠም — auto add skip")
                             return
+                        daily_limit = int(daily_limit_str)
 
-                        chosen = await asyncio.to_thread(get_next_account, o)
-                        if not chosen:
-                            logger.warning("[AutoAdd] ⚠️ available worker account የለም!")
-                            return
+                        # Everything from here on is serialized per-account:
+                        # if two messages land for THIS account at nearly
+                        # the same instant (same group or two of its
+                        # assigned groups), only one runs the add logic at
+                        # a time — the second waits for the lock, then
+                        # re-checks fresh state (daily count, already_added)
+                        # before proceeding, so it can't double-fire.
+                        lock = _get_account_lock(acc["label"])
+                        async with lock:
+                            # Re-check under the lock — state may have
+                            # changed while we were waiting for it.
+                            already_added_2 = await asyncio.to_thread(db_is_user_added, user_id, target_group_id)
+                            if already_added_2:
+                                return
 
-                        logger.info(f"[AutoAdd] ⚙️ using [{chosen['label']}] to add {user_id}")
-                        await asyncio.sleep(random.uniform(2, 5))
-                        await _contact_and_add_by_sender(chosen, sender, target_group_id, o)
+                            fresh_acc = await asyncio.to_thread(db_get_account_by_label, o, acc["label"])
+                            if not fresh_acc or not fresh_acc.get("session"):
+                                return
+
+                            now = datetime.now()
+                            if fresh_acc.get("flood_until") and fresh_acc["flood_until"] > now:
+                                logger.info(f"[AutoAdd] ⏭ [{acc['label']}] in flood-wait — skip")
+                                return
+                            if fresh_acc.get("spam_until") and fresh_acc["spam_until"] > now:
+                                logger.info(f"[AutoAdd] ⏭ [{acc['label']}] spam-banned — skip")
+                                return
+
+                            current_count = await asyncio.to_thread(db_get_daily_add_count, acc["label"])
+                            if current_count >= daily_limit:
+                                logger.info(f"[AutoAdd] ⏭ [{acc['label']}] hit daily limit ({current_count}/{daily_limit}) — skip")
+                                return
+
+                            # Atomic cross-account claim — protects
+                            # against a DIFFERENT account (assigned to a
+                            # different group) racing on the same user.
+                            claimed = await asyncio.to_thread(db_try_claim_user, user_id, target_group_id)
+                            if not claimed:
+                                logger.info(f"[AutoAdd] ⏭ user={user_id} already claimed by another account — skip")
+                                return
+
+                            logger.info(f"[AutoAdd] ⚙️ [{acc['label']}] adding {user_id} (self — no handoff)")
+                            await asyncio.sleep(random.uniform(2, 5))
+                            await _contact_and_add_by_sender(fresh_acc, sender, target_group_id, o, client=client)
 
                     except Exception as e:
-                        logger.warning(f"[AutoAdd] ❌ Error: {e}", exc_info=True)
+                        logger.warning(f"[AutoAdd] ❌ [{acc.get('label')}] Error: {e}", exc_info=True)
 
                 _telethon_clients.append(client)
                 logger.info(f"✅ Listener reloaded: [{account['label']}] {account['phone']} owner={oid}")
@@ -1384,35 +1532,14 @@ async def cmd_setuserapi(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         api_hash = args[2]
         db_set_setting(owner_id, "userbot_api_id", str(api_id))
         db_set_setting(owner_id, "userbot_api_hash", api_hash)
-        await update.message.reply_text(f"✅ Worker API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
+        await update.message.reply_text(f"✅ API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
     except ValueError:
         await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
 
 
-async def cmd_setuserapi2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update.effective_user.id):
-        return
-    owner_id = update.effective_user.id
-    args = update.message.text.split(maxsplit=2)
-    if len(args) < 3:
-        await update.message.reply_text("❌ Format: /setuserapi2 api_id api_hash")
-        return
-    try:
-        api_id = int(args[1])
-        api_hash = args[2]
-        db_set_setting(owner_id, "userbot_api_id2", str(api_id))
-        db_set_setting(owner_id, "userbot_api_hash2", api_hash)
-        await update.message.reply_text(f"✅ Listener API ተቀምጧል!\n🆔 {api_id}\n🔑 {api_hash}")
-    except ValueError:
-        await update.message.reply_text("❌ api_id ቁጥር መሆን አለበት!")
-
-
-def _get_api_for_account(owner_id: int, is_listener: bool) -> tuple:
-    if is_listener:
-        api_id2 = db_get_setting(owner_id, "userbot_api_id2")
-        api_hash2 = db_get_setting(owner_id, "userbot_api_hash2")
-        if api_id2 and api_hash2:
-            return int(api_id2), api_hash2
+def _get_api(owner_id: int) -> tuple:
+    """Single shared API config for all accounts — there's no more
+    listener/worker role split, so there's no need for a second API set."""
     api_id = db_get_setting(owner_id, "userbot_api_id")
     api_hash = db_get_setting(owner_id, "userbot_api_hash")
     if api_id and api_hash:
@@ -1431,9 +1558,9 @@ async def cmd_addaccount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         label = args[1].lower()
         phone = args[2]
-        api_id, api_hash = _get_api_for_account(owner_id, is_listener=False)
+        api_id, api_hash = _get_api(owner_id)
         if not api_id or not api_hash:
-            await update.message.reply_text("❌ API አልተቀመጠም!")
+            await update.message.reply_text("❌ API አልተቀመጠም! /setuserapi api_id api_hash")
             return
         db_add_account(owner_id, label, api_id, api_hash, phone)
         await update.message.reply_text(f"✅ Account [{label}] {phone} ተጨመረ!\n\n/startsession {phone}")
@@ -1522,55 +1649,6 @@ async def cmd_verify2fa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {e}")
 
 
-async def cmd_setlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update.effective_user.id):
-        return
-    owner_id = update.effective_user.id
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("❌ Format: /setlistener +phone")
-        return
-    phone = args[1]
-    account = db_get_account_by_phone(phone)
-    if not account:
-        await update.message.reply_text(f"❌ {phone} አልተገኘም!")
-        return
-    db_set_listener(phone, True)
-
-    api_id2, api_hash2 = _get_api_for_account(owner_id, is_listener=True)
-    if api_id2 and api_hash2:
-        conn = get_conn()
-        cur = conn.cursor()
-        cur.execute("UPDATE userbot_accounts SET api_id=%s, api_hash=%s WHERE phone=%s", (api_id2, api_hash2, phone))
-        conn.commit()
-        cur.close()
-        conn.close()
-        api_note = "\n🔑 Listener API ተቀምጧል"
-    else:
-        api_note = "\n⚠️ Listener API የለም"
-
-    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Listener ሆነ!{api_note}\n🔄 Reloading...")
-    asyncio.create_task(_reload_listeners(owner_id))
-
-
-async def cmd_unsetlistener(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not _is_admin(update.effective_user.id):
-        return
-    owner_id = update.effective_user.id
-    args = update.message.text.split(maxsplit=1)
-    if len(args) < 2:
-        await update.message.reply_text("❌ Format: /unsetlistener +phone")
-        return
-    phone = args[1]
-    account = db_get_account_by_phone(phone)
-    if not account:
-        await update.message.reply_text(f"❌ {phone} አልተገኘም!")
-        return
-    db_set_listener(phone, False)
-    await update.message.reply_text(f"✅ [{account['label']}] {phone} → Worker ሆነ!\n🔄 Reloading...")
-    asyncio.create_task(_reload_listeners(owner_id))
-
-
 async def cmd_setlimit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
@@ -1582,7 +1660,7 @@ async def cmd_setlimit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         limit = int(args[1])
         db_set_setting(owner_id, "daily_limit", str(limit))
-        await update.message.reply_text(f"✅ Daily limit set: {limit} per worker")
+        await update.message.reply_text(f"✅ Daily limit set: {limit} per account")
     except ValueError:
         await update.message.reply_text("❌ ቁጥር መሆን አለበት!")
 
@@ -1596,11 +1674,11 @@ async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("📭 Account የለም")
         return
     now = datetime.now()
+    assignment_map = db_get_group_assignment_map(owner_id)
     lines = ["📋 Accounts:\n"]
-    for aid, label, phone, is_active, session, flood_until, spam_until, is_listener in rows:
+    for aid, label, phone, is_active, session, flood_until, spam_until in rows:
         status = "✅" if is_active else "❌"
         has_session = "🔑" if session else "⚠️ no session"
-        role = "👂 Listener" if is_listener else "⚙️ Worker"
         flood = ""
         spam = ""
         if flood_until and flood_until > now:
@@ -1612,10 +1690,10 @@ async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 spam = f" 🚫 spam {remaining_hr}hr"
             else:
                 spam = " 🔍 spam check pending"
-        daily = db_get_daily_add_count(label) if not is_listener else 0
+        daily = db_get_daily_add_count(label)
         daily_limit_str = db_get_setting(owner_id, "daily_limit") or "?"
-        daily_str = f" [{daily}/{daily_limit_str}]" if not is_listener else ""
-        lines.append(f"{status} [{label}] {phone} {has_session} {role}{daily_str}{flood}{spam}")
+        my_groups = sum(1 for gid, labels in assignment_map.items() if label in labels)
+        lines.append(f"{status} [{label}] {phone} {has_session} 🏠{my_groups} groups [{daily}/{daily_limit_str}]{flood}{spam}")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1686,7 +1764,7 @@ async def cmd_addgroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         group_id = int(args[1])
         group_name = None
-        account = get_next_account(owner_id)
+        account = get_any_account(owner_id)
         if account:
             try:
                 client = await _get_client(account, owner_id)
@@ -1718,7 +1796,14 @@ async def cmd_syncgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# LISTGROUPS — PAGINATED
+# LISTGROUPS — PAGINATED, WITH PER-ACCOUNT VIEW
+#
+# Default view: shows every group with the labels of whichever
+# account(s) are currently assigned to it, e.g. "✅ MyGroup [a]".
+# Tapping "👤 View: a" switches into per-account mode, filtered/annotated
+# for account [a] specifically — toggling a group there assigns/unassigns
+# ONLY account [a] to that group (other accounts' assignments to the same
+# group are untouched, so a group CAN have several accounts on it).
 # ============================================================
 
 PAGE_SIZE = 20
@@ -1729,15 +1814,21 @@ async def cmd_listgroups(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not _is_admin(update.effective_user.id):
         return
     owner_id = update.effective_user.id
-    await _show_groups_list(update.message, edit=False, page=0, owner_id=owner_id)
+    await _show_groups_list(update.message, edit=False, page=0, owner_id=owner_id, view_label=None)
 
 
-async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id: int = 0):
+def _account_labels(owner_id: int) -> list:
+    return sorted([a["label"] for a in db_get_all_accounts(owner_id)])
+
+
+async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id: int = 0, view_label: str = None):
     rows = db_list_groups(owner_id)
     active_group = db_get_setting(owner_id, "active_group_id")
     target_group = db_get_setting(owner_id, "target_group_id")
     target_link = db_get_setting(owner_id, "target_group_link")
     auto_add_on = (db_get_setting(owner_id, "auto_add_enabled") or "true") == "true"
+    assignment_map = db_get_group_assignment_map(owner_id)
+    all_labels = _account_labels(owner_id)
 
     if not rows:
         text = "📭 Group የለም\n\n/syncgroups — userbot ያለባቸውን ሁሉ ያምጣ"
@@ -1758,7 +1849,13 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id
 
     auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
     link_str = f"\n🔗 Target Link: {target_link}" if target_link else ""
-    lines = [f"🤖 Auto-Add: {auto_status}{link_str}\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"]
+
+    if view_label:
+        header = f"🤖 Auto-Add: {auto_status}{link_str}\n👤 Account [{view_label}] view — ✅ ማለት ይህ group በ[{view_label}] ይሰራል\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"
+    else:
+        header = f"🤖 Auto-Add: {auto_status}{link_str}\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"
+
+    lines = [header]
     keyboard = []
 
     for i, (gid, group_id, group_name, is_source) in enumerate(page_rows):
@@ -1768,25 +1865,52 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id
             tags.append("🟢")
         if str(group_id) == target_group:
             tags.append("🎯")
+        assigned_labels = assignment_map.get(group_id, [])
+        if assigned_labels:
+            tags.append(f"[{','.join(assigned_labels)}]")
         tag_str = " ".join(tags)
-        name_str = (group_name or str(group_id))[:22]
-        source_icon = "✅" if is_source else "⬜"
-        lines.append(f"#{num} {source_icon} {name_str} {tag_str}")
+        name_str = (group_name or str(group_id))[:20]
 
-        if is_source:
-            connect_btn = InlineKeyboardButton(f"#{num} 🔴 Disconnect", callback_data=f"grp_disconnect:{group_id}:{page}")
+        if view_label:
+            is_mine = view_label in assigned_labels
+            source_icon = "✅" if is_mine else "⬜"
+            lines.append(f"#{num} {source_icon} {name_str} {tag_str}")
+            toggle_btn = InlineKeyboardButton(
+                f"#{num} {'🔴 Remove' if is_mine else '✅ Assign'} [{view_label}]",
+                callback_data=f"grp_toggle:{view_label}:{group_id}:{page}"
+            )
+            remove_btn = InlineKeyboardButton("❌", callback_data=f"grp_remove:{group_id}:{page}")
+            keyboard.append([toggle_btn, remove_btn])
         else:
-            connect_btn = InlineKeyboardButton(f"#{num} ✅ Connect", callback_data=f"grp_connect:{group_id}:{page}")
-        remove_btn = InlineKeyboardButton("❌", callback_data=f"grp_remove:{group_id}:{page}")
-        keyboard.append([connect_btn, remove_btn])
+            source_icon = "✅" if is_source else "⬜"
+            lines.append(f"#{num} {source_icon} {name_str} {tag_str}")
+            if is_source:
+                connect_btn = InlineKeyboardButton(f"#{num} 🔴 Disconnect", callback_data=f"grp_disconnect:{group_id}:{page}")
+            else:
+                connect_btn = InlineKeyboardButton(f"#{num} ✅ Connect (auto-assign)", callback_data=f"grp_connect:{group_id}:{page}")
+            remove_btn = InlineKeyboardButton("❌", callback_data=f"grp_remove:{group_id}:{page}")
+            keyboard.append([connect_btn, remove_btn])
 
     nav_row = []
+    view_prefix = f"grp_view:{view_label}:" if view_label else "grp_page:"
     if page > 0:
-        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"grp_page:{page-1}"))
+        nav_row.append(InlineKeyboardButton("◀️ Prev", callback_data=f"{view_prefix}{page-1}"))
     nav_row.append(InlineKeyboardButton(f"{page+1}/{total_pages}", callback_data="grp_noop"))
     if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"grp_page:{page+1}"))
+        nav_row.append(InlineKeyboardButton("Next ▶️", callback_data=f"{view_prefix}{page+1}"))
     keyboard.append(nav_row)
+
+    # Account-view switcher row
+    account_row = []
+    if view_label:
+        account_row.append(InlineKeyboardButton("🌐 All (overview)", callback_data="grp_view_all:0"))
+    for lbl in all_labels:
+        icon = "👤" if lbl != view_label else "🔵"
+        account_row.append(InlineKeyboardButton(f"{icon}{lbl}", callback_data=f"grp_view:{lbl}:0"))
+    if account_row:
+        # Telegram keyboards look better with rows of ~4 buttons
+        for i in range(0, len(account_row), 4):
+            keyboard.append(account_row[i:i+4])
 
     toggle_btn = InlineKeyboardButton(
         "🔴 Pause Auto-Add" if auto_add_on else "🟢 Resume Auto-Add",
@@ -1823,21 +1947,50 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
     if data == "grp_sync":
         await query.edit_message_text("🔄 Syncing...")
         await _sync_all_account_groups(owner_id)
-        await _show_groups_list(query.message, edit=True, page=0, owner_id=owner_id)
+        await _show_groups_list(query.message, edit=True, page=0, owner_id=owner_id, view_label=None)
         return
 
     if data == "grp_autoadd_toggle":
         current = (db_get_setting(owner_id, "auto_add_enabled") or "true") == "true"
         db_set_setting(owner_id, "auto_add_enabled", "false" if current else "true")
-        await _show_groups_list(query.message, edit=True, page=0, owner_id=owner_id)
+        await _show_groups_list(query.message, edit=True, page=0, owner_id=owner_id, view_label=None)
         return
 
     if data == "grp_noop":
         return
 
+    if data.startswith("grp_view_all:"):
+        page = int(data.split(":")[1])
+        await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id, view_label=None)
+        return
+
+    if data.startswith("grp_view:"):
+        _, label, page_str = data.split(":")
+        await _show_groups_list(query.message, edit=True, page=int(page_str), owner_id=owner_id, view_label=label)
+        return
+
     if data.startswith("grp_page:"):
         page = int(data.split(":")[1])
-        await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id)
+        await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id, view_label=None)
+        return
+
+    if data.startswith("grp_toggle:"):
+        _, label, group_id_str, page_str = data.split(":")
+        group_id = int(group_id_str)
+        page = int(page_str)
+        currently_assigned = label in db_get_labels_for_group(owner_id, group_id)
+        if currently_assigned:
+            db_unassign_group_from_account(owner_id, group_id, label)
+        else:
+            db_assign_group_to_account(owner_id, group_id, label)
+            db_set_group_source(owner_id, group_id, True)
+            asyncio.create_task(_add_assigned_accounts_to_source_group(group_id, owner_id, [label]))
+        # If a group has no accounts left assigned, it's no longer a
+        # live source group.
+        if not db_get_labels_for_group(owner_id, group_id):
+            db_set_group_source(owner_id, group_id, False)
+        asyncio.create_task(_reload_listeners(owner_id))
+        await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id, view_label=label)
         return
 
     parts = data.split(":")
@@ -1846,16 +1999,26 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
     page = int(parts[2]) if len(parts) > 2 else 0
 
     if action == "grp_connect":
-        db_set_group_source(owner_id, group_id, True)
-        asyncio.create_task(_reload_listeners(owner_id))
-        asyncio.create_task(_add_workers_to_source_group(group_id, owner_id))
+        # Auto-assign round-robin (a → b → c → a...) among accounts with
+        # a live session, then join that account to the group and start
+        # its listener.
+        assigned_label = db_auto_assign_group(owner_id, group_id)
+        if assigned_label:
+            db_set_group_source(owner_id, group_id, True)
+            asyncio.create_task(_reload_listeners(owner_id))
+            asyncio.create_task(_add_assigned_accounts_to_source_group(group_id, owner_id, [assigned_label]))
+        else:
+            await query.answer("❌ Session ያለው account የለም!", show_alert=True)
     elif action == "grp_disconnect":
+        # Fully disconnect — remove ALL accounts assigned to this group.
+        for lbl in db_get_labels_for_group(owner_id, group_id):
+            db_unassign_group_from_account(owner_id, group_id, lbl)
         db_set_group_source(owner_id, group_id, False)
         asyncio.create_task(_reload_listeners(owner_id))
     elif action == "grp_remove":
         db_delete_group(owner_id, group_id)
 
-    await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id)
+    await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id, view_label=None)
 
 
 async def cmd_deletegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1968,7 +2131,7 @@ async def _do_broadcast(msg, users: list, status_msg, owner_id: int = 0):
 
     dm_accounts = await asyncio.to_thread(get_dm_accounts, owner_id)
     if not dm_accounts:
-        await status_msg.edit_text("❌ DM accounts አልተሟሉም! ቢያንስ 6 worker accounts ያስፈልጋሉ።")
+        await status_msg.edit_text("❌ DM accounts አልተሟሉም! ቢያንስ 6 accounts ያስፈልጋሉ።")
         return
 
     for i, user_id in enumerate(users):
@@ -2083,13 +2246,13 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     daily_limit = db_get_setting(owner_id, "daily_limit") or "❌ አልተቀመጠም"
     accounts = db_list_accounts(owner_id)
     groups = db_list_groups(owner_id)
+    assignment_map = db_get_group_assignment_map(owner_id)
     now = datetime.now()
 
     acc_lines = []
-    for _, label, phone, is_active, session, flood_until, spam_until, is_listener in accounts:
+    for _, label, phone, is_active, session, flood_until, spam_until in accounts:
         status = "✅" if is_active else "❌"
         has_session = "🔑" if session else "⚠️"
-        role = "👂" if is_listener else "⚙️"
         flood = ""
         spam = ""
         if flood_until and flood_until > now:
@@ -2101,9 +2264,9 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 spam = f" 🚫spam {remaining_hr}hr"
             else:
                 spam = " 🔍checking"
-        daily = db_get_daily_add_count(label) if not is_listener else 0
-        daily_str = f" [{daily}/{daily_limit}]" if not is_listener else ""
-        acc_lines.append(f"  {status}{role}[{label}] {phone} {has_session}{daily_str}{flood}{spam}")
+        daily = db_get_daily_add_count(label)
+        my_groups = sum(1 for gid, labels in assignment_map.items() if label in labels)
+        acc_lines.append(f"  {status}[{label}] {phone} {has_session} 🏠{my_groups} [{daily}/{daily_limit}]{flood}{spam}")
 
     source_groups = [g for g in groups if g[3]]
     grp_lines = []
@@ -2113,15 +2276,16 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             tags.append("🟢")
         if str(group_id) == target_group:
             tags.append("🎯")
+        assigned_labels = assignment_map.get(group_id, [])
+        labels_str = f"[{','.join(assigned_labels)}]" if assigned_labels else "[unassigned]"
         name_str = f" — {group_name}" if group_name else ""
-        grp_lines.append(f"  ✅ {group_id}{name_str} {''.join(tags)}")
+        grp_lines.append(f"  ✅ {group_id}{name_str} {labels_str} {''.join(tags)}")
 
     auto_add_on = (db_get_setting(owner_id, "auto_add_enabled") or "true") == "true"
     auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
     uadmins = db_list_uadmins()
     uadmin_lines = [f"  🔹 {r[0]}" for r in uadmins] if uadmins else ["  📭 የለም"]
     api_id1 = db_get_setting(owner_id, "userbot_api_id") or "❌ አልተቀመጠም"
-    api_id2 = db_get_setting(owner_id, "userbot_api_id2") or "❌ አልተቀመጠም"
 
     text = (
         "🤖 Userbot Status & Commands\n"
@@ -2130,10 +2294,9 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f"🟢 Active Group: {active_group}\n"
         f"🎯 Target Group: {target_group}\n"
         f"🔗 Target Link: {target_link}\n"
-        f"📊 Daily Limit: {daily_limit} per worker\n\n"
-        f"🔑 API (Worker): {api_id1}\n"
-        f"🔑 API (Listener): {api_id2}\n\n"
-        "👤 Accounts:\n" +
+        f"📊 Daily Limit: {daily_limit} per account\n\n"
+        f"🔑 API: {api_id1}\n\n"
+        "👤 Accounts (each listens to its own assigned groups & adds itself):\n" +
         ("\n".join(acc_lines) if acc_lines else "  📭 የለም") +
         f"\n\n🏠 Source Groups ({len(source_groups)}/{len(groups)}):\n" +
         ("\n".join(grp_lines) if grp_lines else "  📭 የለም") +
@@ -2142,17 +2305,14 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "\n\n━━━━━━━━━━━━━━━━\n"
         "⚙️ Setup:\n"
         "/setuserapi api_id api_hash\n"
-        "/setuserapi2 api_id api_hash\n"
         "/addaccount a +phone\n"
         "/startsession +phone\n"
         "/verifycode +phone code\n"
         "/verify2fa +phone password\n"
-        "/setlistener +phone\n"
-        "/unsetlistener +phone\n"
         "/listaccounts\n"
         "/deleteaccount +phone\n"
         "/myapi\n\n"
-        "/listgroups\n"
+        "/listgroups  (👤 buttons switch to per-account assign view)\n"
         "/syncgroups\n"
         "/addgroup -100xxxxxxx\n"
         "/deletegroup -100xxxxxxx\n\n"
@@ -2211,15 +2371,12 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("removeuadmin", cmd_removeuadmin))
     app.add_handler(CommandHandler("listuadmins", cmd_listuadmins))
     app.add_handler(CommandHandler("setuserapi", cmd_setuserapi))
-    app.add_handler(CommandHandler("setuserapi2", cmd_setuserapi2))
     app.add_handler(CommandHandler("addaccount", cmd_addaccount))
     app.add_handler(CommandHandler("startsession", cmd_startsession))
     app.add_handler(CommandHandler("verifycode", cmd_verifycode))
     app.add_handler(CommandHandler("verify2fa", cmd_verify2fa))
     app.add_handler(CommandHandler("listaccounts", cmd_listaccounts))
     app.add_handler(CommandHandler("deleteaccount", cmd_deleteaccount))
-    app.add_handler(CommandHandler("setlistener", cmd_setlistener))
-    app.add_handler(CommandHandler("unsetlistener", cmd_unsetlistener))
     app.add_handler(CommandHandler("addgroup", cmd_addgroup))
     app.add_handler(CommandHandler("syncgroups", cmd_syncgroups))
     app.add_handler(CommandHandler("listgroups", cmd_listgroups))
@@ -2241,4 +2398,4 @@ def register_userbot_handlers(app):
 
     app.add_error_handler(_global_error_handler)
 
-    logger.info("✅ Userbot handlers registered")
+    logger.info("✅ Userbot handlers registered (no listener/worker split — each account handles its own assigned groups)")
