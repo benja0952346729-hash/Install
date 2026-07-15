@@ -38,7 +38,7 @@ import psycopg2
 from telethon import TelegramClient, events
 from telethon.sessions import StringSession
 from telethon.tl.functions.contacts import AddContactRequest
-from telethon.tl.functions.channels import InviteToChannelRequest
+from telethon.tl.functions.channels import InviteToChannelRequest, GetParticipantRequest
 from telethon.errors import FloodWaitError, PeerFloodError
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -1033,7 +1033,7 @@ def _normalize_source_id(gid) -> int:
 # CORE ACTIONS  (hot path — wrapped in to_thread)
 # ============================================================
 
-async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int, owner_id: int = 0, client=None):
+async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int, owner_id: int = 0, client=None, source_chat_id=None):
     """Adds `sender` to the target group using `account`.
 
     If `client` is passed in, it is the SAME already-connected client that
@@ -1043,6 +1043,16 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
     A client only gets disconnected here if this function created its
     own (client=None), e.g. when called from a context with no live
     listener client at hand.
+
+    `source_chat_id`, when given, is the group the sender's message came
+    from. It's used as a last-resort targeted lookup: event.get_sender()
+    can return a "min" User object (no usable access_hash outside the
+    chat it was seen in) when the user isn't otherwise cached, and a min
+    entity fails when used in InviteToChannelRequest for a DIFFERENT
+    channel (the target group). Calling GetParticipantRequest directly
+    against source_chat_id forces Telegram to return a full, non-min
+    User object usable anywhere — this succeeds even for members who
+    joined after the listener's one-time participant pre-warm ran.
     """
     own_client = client is None
     if own_client:
@@ -1060,12 +1070,22 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
             resolved_user = await client.get_entity(user_id)
             logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved from own cache")
         except Exception as e:
-            # The sender object itself came from this same client's event,
-            # so it's already a valid resolved entity even if a fresh
-            # get_entity() lookup can't re-derive it — use it directly
-            # instead of failing here.
-            logger.info(f"[Resolve] [{account['label']}] {user_id} not resolvable via get_entity, using event's sender object directly: {e}")
-            resolved_user = sender
+            logger.info(f"[Resolve] [{account['label']}] {user_id} not resolvable via get_entity: {e}")
+            if source_chat_id is not None:
+                try:
+                    result = await client(GetParticipantRequest(channel=source_chat_id, participant=user_id))
+                    if result.users:
+                        resolved_user = result.users[0]
+                        logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved via GetParticipantRequest on source group {source_chat_id}")
+                except Exception as e2:
+                    logger.info(f"[Resolve] [{account['label']}] {user_id} GetParticipantRequest on {source_chat_id} also failed: {e2}")
+            if resolved_user is None:
+                # Last resort — the sender object itself came from this
+                # same client's event. This may still be a min entity and
+                # can fail for InviteToChannelRequest, but it's better
+                # than nothing (e.g. AddContactRequest below may still
+                # succeed and produce a usable entity afterward).
+                resolved_user = sender
 
         if not resolved_user:
             already_contacted = await asyncio.to_thread(db_is_user_contacted, user_id, account["label"])
@@ -1098,8 +1118,18 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 resolved_user = await client.get_entity(user_id)
                 logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved after contact")
             except Exception as e:
-                logger.warning(f"[Resolve] ⚠️ [{account['label']}] still cannot re-resolve {user_id}, falling back to sender object: {e}")
-                resolved_user = sender
+                logger.info(f"[Resolve] [{account['label']}] {user_id} still not resolvable after contact: {e}")
+                resolved_user = None
+                if source_chat_id is not None:
+                    try:
+                        result = await client(GetParticipantRequest(channel=source_chat_id, participant=user_id))
+                        if result.users:
+                            resolved_user = result.users[0]
+                            logger.info(f"[Resolve] ✅ [{account['label']}] {user_id} resolved via GetParticipantRequest on source group {source_chat_id} (after contact)")
+                    except Exception as e2:
+                        logger.warning(f"[Resolve] ⚠️ [{account['label']}] GetParticipantRequest on {source_chat_id} also failed after contact: {e2}")
+                if resolved_user is None:
+                    resolved_user = sender
 
         if not resolved_user:
             logger.warning(f"[Add] ⏭ [{account['label']}] user {user_id} unresolvable — skip")
@@ -1196,84 +1226,71 @@ async def _spam_recovery_loop():
 
 
 # ============================================================
-# ADD ACCOUNTS TO SOURCE GROUP  (hot path — wrapped in to_thread)
-# Only invites the accounts that are ASSIGNED to this group (via
-# userbot_group_accounts) — not every account. An account must be a
-# member of a group to receive its messages or resolve its senders, so
-# whichever account(s) are assigned to a group must physically join it.
+# GROUP MEMBERSHIP CHECK  (hot path — wrapped in to_thread)
+# NOTE: there is deliberately NO auto-invite logic here any more. Per
+# owner's instruction, accounts are joined to groups manually (by the
+# owner, using their own Telegram client) — not by having one account
+# invite another. This function only checks/logs whether an assigned
+# account is actually a member yet, so the admin gets clear feedback
+# instead of a silent no-op.
 # ============================================================
 
-async def _add_assigned_accounts_to_source_group(group_id: int, owner_id: int, labels: list):
-    if not labels:
-        logger.info(f"[AutoJoin] ⏭ group={group_id} has no assigned accounts yet")
-        return
-
-    all_accounts = {a["label"]: a for a in await asyncio.to_thread(db_get_all_accounts, owner_id) if a.get("session")}
-    assigned = [all_accounts[l] for l in labels if l in all_accounts]
-    if not assigned:
-        logger.warning(f"[AutoJoin] ⚠️ none of the assigned labels {labels} have a live session")
-        return
-
-    # Use the first assigned account (or any account that can already
-    # resolve the group) as the "inviter" that performs the invites.
-    inviter = assigned[0]
-    inviter_client = await _get_client(inviter, owner_id)
+async def _check_account_group_membership(group_id: int, owner_id: int, label: str, auto_unassign_if_left: bool = False) -> bool:
+    account = await asyncio.to_thread(db_get_account_by_label, owner_id, label)
+    if not account or not account.get("session"):
+        logger.warning(f"[MembershipCheck] ⚠️ [{label}] has no live session")
+        return False
+    client = await _get_client(account, owner_id)
     try:
         try:
-            group_entity = await inviter_client.get_entity(group_id)
+            await client.get_entity(group_id)
+            logger.info(f"[MembershipCheck] ✅ [{label}] is already a member of group {group_id} — listener will work")
+            return True
         except Exception as e:
-            logger.warning(f"[AutoJoin] ❌ [{inviter['label']}] cannot resolve group {group_id} — it must already be a member for the invite flow to work: {e}")
-            return
-
-        existing_member_ids = set()
-        try:
-            async for participant in inviter_client.iter_participants(group_entity):
-                existing_member_ids.add(participant.id)
-        except Exception as e:
-            logger.warning(f"[AutoJoin] ⚠️ cannot list participants: {e}")
-
-        added = skipped = failed = 0
-        for acc in assigned:
-            if acc["label"] == inviter["label"]:
-                skipped += 1
-                continue
-            try:
-                acc_client = await _get_client(acc, owner_id)
-                try:
-                    me = await acc_client.get_me()
-                    acc_user_id = me.id
-                finally:
-                    await acc_client.disconnect()
-
-                if acc_user_id in existing_member_ids:
-                    skipped += 1
-                    continue
-
-                try:
-                    acc_input = await inviter_client.get_entity(acc_user_id)
-                except Exception as e:
-                    logger.warning(f"[AutoJoin] ❌ [{acc['label']}] cannot resolve: {e}")
-                    failed += 1
-                    continue
-
-                await inviter_client(InviteToChannelRequest(channel=group_entity, users=[acc_input]))
-                added += 1
-                logger.info(f"[AutoJoin] ✅✅ [{acc['label']}] added to source group {group_id}")
-
-            except FloodWaitError as e:
-                await asyncio.to_thread(db_set_flood, inviter["phone"], e.seconds)
-                logger.warning(f"[AutoJoin] 🚫 Flood: {e.seconds}s")
-                break
-            except Exception as e:
-                failed += 1
-                logger.warning(f"[AutoJoin] ❌ [{acc['label']}] failed: {e}")
-
-            await asyncio.sleep(random.uniform(15, 25))
-
-        logger.info(f"[AutoJoin] 🏁 group={group_id} added:{added} skipped:{skipped} failed:{failed}")
-
+            if auto_unassign_if_left:
+                # This is the periodic recheck path: this group/account
+                # pair was already assigned and presumably working
+                # before, so "not a member" now means [label] has LEFT
+                # the group (manually, or was removed) — automatically
+                # drop the assignment instead of leaving a dead listener
+                # registered forever, and tell the owner.
+                await asyncio.to_thread(db_unassign_group_from_account, owner_id, group_id, label)
+                if not await asyncio.to_thread(db_get_labels_for_group, owner_id, group_id):
+                    await asyncio.to_thread(db_set_group_source, owner_id, group_id, False)
+                logger.warning(f"[MembershipCheck] 🚪 [{label}] has LEFT group {group_id} — assignment automatically removed: {e}")
+                await _notify_admins(f"🚪 [{label}] group {group_id} ን ለቆ ወጥቷል (left) — assignment በራሱ ተነስቷል።")
+            else:
+                logger.warning(
+                    f"[MembershipCheck] ❌ [{label}] is NOT yet a member of group {group_id} — "
+                    f"join [{label}] to this group manually (from its own Telegram app/session), "
+                    f"otherwise its listener for this group will not work: {e}"
+                )
+            return False
     finally:
-        await inviter_client.disconnect()
+        await client.disconnect()
+
+
+async def _membership_recheck_loop():
+    """Periodically re-verifies that every assigned account is still a
+    member of its assigned group(s). If an account has left a group
+    (manually, or was kicked/removed), its assignment is automatically
+    dropped so a dead/non-functional listener doesn't stay registered
+    forever — the admin is notified when this happens."""
+    while True:
+        await asyncio.sleep(3 * 3600)  # every 3 hours
+        try:
+            owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_accounts, None)
+            for oid in owner_ids:
+                groups = await asyncio.to_thread(db_list_groups, oid)
+                for _, group_id, _, is_source in groups:
+                    if not is_source:
+                        continue
+                    labels = await asyncio.to_thread(db_get_labels_for_group, oid, group_id)
+                    for label in labels:
+                        await _check_account_group_membership(group_id, oid, label, auto_unassign_if_left=True)
+                        await asyncio.sleep(2)
+        except Exception as e:
+            logger.warning(f"[MembershipRecheck] loop error: {e}")
 
 
 # ============================================================
@@ -1389,6 +1406,25 @@ async def _reload_listeners(owner_id: int = None):
                         chat_id = _normalize_chat_id(event)
                         logger.info(f"[AutoAdd] 📨 [{acc['label']}] msg from chat {chat_id}")
 
+                        # If this group has MORE THAN ONE account assigned
+                        # to it (an explicit manual choice, not the
+                        # default), round-robin deterministically by
+                        # message id — every assigned account's handler
+                        # computes the exact same answer independently (no
+                        # shared counter, no race), so exactly one of them
+                        # proceeds per message. If only one account is
+                        # assigned (the normal case), this always resolves
+                        # to that same account and has zero effect — each
+                        # account still only ever works from its own
+                        # assigned group(s), with no cross-account
+                        # coordination otherwise.
+                        assigned_here = sorted(await asyncio.to_thread(db_get_labels_for_group, o, chat_id))
+                        if len(assigned_here) > 1:
+                            turn_label = assigned_here[event.message.id % len(assigned_here)]
+                            if turn_label != acc["label"]:
+                                logger.info(f"[AutoAdd] ⏭ [{acc['label']}] not this account's turn for chat {chat_id} (turn: [{turn_label}]) — skip")
+                                return
+
                         sender = await event.get_sender()
                         if not sender or sender.bot or sender.is_self:
                             return
@@ -1466,7 +1502,7 @@ async def _reload_listeners(owner_id: int = None):
 
                             logger.info(f"[AutoAdd] ⚙️ [{acc['label']}] adding {user_id} (self — no handoff)")
                             await asyncio.sleep(random.uniform(2, 5))
-                            await _contact_and_add_by_sender(fresh_acc, sender, target_group_id, o, client=client)
+                            await _contact_and_add_by_sender(fresh_acc, sender, target_group_id, o, client=client, source_chat_id=chat_id)
 
                     except Exception as e:
                         logger.warning(f"[AutoAdd] ❌ [{acc.get('label')}] Error: {e}", exc_info=True)
@@ -1487,6 +1523,7 @@ async def _cleanup_loop():
 async def start_listeners():
     asyncio.create_task(_cleanup_loop())
     asyncio.create_task(_spam_recovery_loop())
+    asyncio.create_task(_membership_recheck_loop())
     asyncio.create_task(_reload_listeners())
 
 
@@ -1861,8 +1898,26 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id
     assignment_map = db_get_group_assignment_map(owner_id)
     all_labels = _account_labels(owner_id)
 
+    # Per-account view shows ONLY groups assigned to that account —
+    # unassigned groups are fully hidden here (not shown as ⬜ options).
+    # To assign a brand-new/unassigned group to a specific account, use
+    # /assigngroup <label> <group_id> instead — this view is purely "what
+    # is [label] currently working on".
+    if view_label:
+        rows = [r for r in rows if view_label in assignment_map.get(r[1], [])]
+
+    auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
+    link_str = f"\n🔗 Target Link: {target_link}" if target_link else ""
+
     if not rows:
-        text = "📭 Group የለም\n\n/syncgroups — userbot ያለባቸውን ሁሉ ያምጣ"
+        if view_label:
+            text = (
+                f"🤖 Auto-Add: {auto_status}{link_str}\n"
+                f"👤 Account [{view_label}] — 📭 ምንም group የለም\n\n"
+                f"አዲስ group ለ[{view_label}] ለመመደብ፦\n/assigngroup {view_label} -100xxxxxxx"
+            )
+        else:
+            text = "📭 Group የለም\n\n/syncgroups — userbot ያለባቸውን ሁሉ ያምጣ"
         try:
             if edit:
                 await message.edit_text(text)
@@ -1878,11 +1933,8 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id
     start = page * PAGE_SIZE
     page_rows = rows[start: start + PAGE_SIZE]
 
-    auto_status = "🟢 ON" if auto_add_on else "🔴 OFF"
-    link_str = f"\n🔗 Target Link: {target_link}" if target_link else ""
-
     if view_label:
-        header = f"🤖 Auto-Add: {auto_status}{link_str}\n👤 Account [{view_label}] view — ✅ ማለት ይህ group በ[{view_label}] ይሰራል\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"
+        header = f"🤖 Auto-Add: {auto_status}{link_str}\n👤 Account [{view_label}] — የራሱ groups ({start+1}-{start+len(page_rows)}/{total}):\n"
     else:
         header = f"🤖 Auto-Add: {auto_status}{link_str}\n📋 Groups ({start+1}-{start+len(page_rows)}/{total}):\n"
 
@@ -1903,11 +1955,11 @@ async def _show_groups_list(message, edit: bool = False, page: int = 0, owner_id
         name_str = (group_name or str(group_id))[:20]
 
         if view_label:
-            is_mine = view_label in assigned_labels
-            source_icon = "✅" if is_mine else "⬜"
-            lines.append(f"#{num} {source_icon} {name_str} {tag_str}")
+            # Every row here IS assigned to view_label (filtered above),
+            # so the only action is to remove it.
+            lines.append(f"#{num} ✅ {name_str} {tag_str}")
             toggle_btn = InlineKeyboardButton(
-                f"#{num} {'🔴 Remove' if is_mine else '✅ Assign'} [{view_label}]",
+                f"#{num} 🔴 Remove [{view_label}]",
                 callback_data=f"grp_toggle:{view_label}:{group_id}:{page}"
             )
             remove_btn = InlineKeyboardButton("❌", callback_data=f"grp_remove:{group_id}:{page}")
@@ -2015,7 +2067,11 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             db_assign_group_to_account(owner_id, group_id, label)
             db_set_group_source(owner_id, group_id, True)
-            asyncio.create_task(_add_assigned_accounts_to_source_group(group_id, owner_id, [label]))
+            # No auto-invite: just check (and log) whether [label] is
+            # already a member. If not, the owner needs to manually join
+            # that account to the group themselves — the listener will
+            # simply stay inactive for this group until then.
+            asyncio.create_task(_check_account_group_membership(group_id, owner_id, label))
         # If a group has no accounts left assigned, it's no longer a
         # live source group.
         if not db_get_labels_for_group(owner_id, group_id):
@@ -2031,13 +2087,14 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if action == "grp_connect":
         # Auto-assign round-robin (a → b → c → a...) among accounts with
-        # a live session, then join that account to the group and start
-        # its listener.
+        # a live session. No auto-invite — if the chosen account isn't
+        # already a member of this group, the owner needs to join it
+        # manually; we just log a clear warning either way.
         assigned_label = db_auto_assign_group(owner_id, group_id)
         if assigned_label:
             db_set_group_source(owner_id, group_id, True)
             asyncio.create_task(_reload_listeners(owner_id))
-            asyncio.create_task(_add_assigned_accounts_to_source_group(group_id, owner_id, [assigned_label]))
+            asyncio.create_task(_check_account_group_membership(group_id, owner_id, assigned_label))
         else:
             await query.answer("❌ Session ያለው account የለም!", show_alert=True)
     elif action == "grp_disconnect":
@@ -2050,6 +2107,46 @@ async def cb_group_action(update, ctx: ContextTypes.DEFAULT_TYPE):
         db_delete_group(owner_id, group_id)
 
     await _show_groups_list(query.message, edit=True, page=page, owner_id=owner_id, view_label=None)
+
+
+async def cmd_assigngroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """/assigngroup <label> <group_id> — manually assign a specific group
+    to a specific account. Since the per-account view in /listgroups only
+    shows groups already assigned to that account, this is how you give a
+    brand-new (or existing) group to a particular account directly."""
+    if not _is_admin(update.effective_user.id):
+        return
+    owner_id = update.effective_user.id
+    args = update.message.text.split(maxsplit=2)
+    if len(args) < 3:
+        await update.message.reply_text("❌ Format: /assigngroup <label> <group_id>\nለምሳሌ: /assigngroup c -1002554977751")
+        return
+    label = args[1].lower()
+    try:
+        group_id = int(args[2])
+    except ValueError:
+        await update.message.reply_text("❌ Group ID ቁጥር መሆን አለበት!")
+        return
+
+    account = db_get_account_by_label(owner_id, label)
+    if not account:
+        await update.message.reply_text(f"❌ Account [{label}] አልተገኘም!")
+        return
+
+    db_add_group(owner_id, group_id, None, is_source=False)
+    db_assign_group_to_account(owner_id, group_id, label)
+    db_set_group_source(owner_id, group_id, True)
+    asyncio.create_task(_reload_listeners(owner_id))
+
+    msg = await update.message.reply_text(f"✅ Group {group_id} ለ[{label}] ተመድቧል። አባልነት እየተጣራ ነው...")
+    is_member = await _check_account_group_membership(group_id, owner_id, label)
+    if is_member:
+        await msg.edit_text(f"✅ Group {group_id} ለ[{label}] ተመድቧል — [{label}] ቀድሞ አባል ስለሆነ listener ወዲያውኑ ይሰራል።")
+    else:
+        await msg.edit_text(
+            f"✅ Group {group_id} ለ[{label}] ተመድቧል — ⚠️ [{label}] ግን ገና የቡድኑ አባል አይደለም።\n"
+            f"[{label}] ን በእጅ (ራስህ) ወደዚህ group ማስገባት አለብህ፣ ካልሆነ listener ስራ አይጀምርም።"
+        )
 
 
 async def cmd_deletegroup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2343,7 +2440,8 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/listaccounts\n"
         "/deleteaccount +phone\n"
         "/myapi\n\n"
-        "/listgroups  (👤 buttons switch to per-account assign view)\n"
+        "/listgroups  (👤 buttons show each account's OWN groups only)\n"
+        "/assigngroup <label> <group_id>  (assign a new group to one account)\n"
         "/syncgroups\n"
         "/addgroup -100xxxxxxx\n"
         "/deletegroup -100xxxxxxx\n\n"
@@ -2370,63 +2468,4 @@ async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# GLOBAL ERROR HANDLER — so failures are visible in logs
-# ============================================================
-
-async def _global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
-    """PTB swallows unhandled exceptions unless an error handler is
-    registered (that's the 'No error handlers are registered' warning).
-    This logs the full traceback so real causes show up in Railway logs
-    instead of the command just silently doing nothing."""
-    logger.error(
-        f"‼️ [UnhandledError] update={update} error={context.error}",
-        exc_info=context.error
-    )
-    try:
-        if isinstance(update, Update) and update.effective_message:
-            await update.effective_message.reply_text(
-                f"❌ Internal error: {context.error}"
-            )
-    except Exception:
-        pass
-
-
-# ============================================================
-# REGISTER ALL HANDLERS
-# ============================================================
-
-def register_userbot_handlers(app):
-    set_bot_app(app)
-
-    app.add_handler(CommandHandler("adduadmin", cmd_adduadmin))
-    app.add_handler(CommandHandler("removeuadmin", cmd_removeuadmin))
-    app.add_handler(CommandHandler("listuadmins", cmd_listuadmins))
-    app.add_handler(CommandHandler("setuserapi", cmd_setuserapi))
-    app.add_handler(CommandHandler("addaccount", cmd_addaccount))
-    app.add_handler(CommandHandler("startsession", cmd_startsession))
-    app.add_handler(CommandHandler("verifycode", cmd_verifycode))
-    app.add_handler(CommandHandler("verify2fa", cmd_verify2fa))
-    app.add_handler(CommandHandler("listaccounts", cmd_listaccounts))
-    app.add_handler(CommandHandler("deleteaccount", cmd_deleteaccount))
-    app.add_handler(CommandHandler("addgroup", cmd_addgroup))
-    app.add_handler(CommandHandler("syncgroups", cmd_syncgroups))
-    app.add_handler(CommandHandler("listgroups", cmd_listgroups))
-    app.add_handler(CommandHandler("deletegroup", cmd_deletegroup))
-    app.add_handler(CommandHandler("setactivegroup", cmd_setactivegroup))
-    app.add_handler(CommandHandler("settargetgroup", cmd_settargetgroup))
-    app.add_handler(CommandHandler("settargetlink", cmd_settargetlink))
-    app.add_handler(CommandHandler("setlimit", cmd_setlimit))
-    app.add_handler(CommandHandler("a", cmd_a))
-    app.add_handler(CommandHandler("b", cmd_b))
-    app.add_handler(CommandHandler("c", cmd_c))
-    app.add_handler(CommandHandler("d", cmd_d))
-    app.add_handler(CommandHandler("e", cmd_e))
-    app.add_handler(CommandHandler("myapi", cmd_myapi))
-    app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
-    app.add_handler(CommandHandler("status2", cmd_status2))
-    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
-    app.add_handler(CallbackQueryHandler(cb_group_action, pattern="^grp_"))
-
-    app.add_error_handler(_global_error_handler)
-
-    logger.info("✅ Userbot handlers registered (no listener/worker split — each account handles its own assigned groups)")
+# GLOBAL ERROR HANDLER —
