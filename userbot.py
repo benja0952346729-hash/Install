@@ -2468,4 +2468,64 @@ async def cmd_status2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# GLOBAL ERROR HANDLER —
+# GLOBAL ERROR HANDLER — so failures are visible in logs
+# ============================================================
+
+async def _global_error_handler(update, context: ContextTypes.DEFAULT_TYPE):
+    """PTB swallows unhandled exceptions unless an error handler is
+    registered (that's the 'No error handlers are registered' warning).
+    This logs the full traceback so real causes show up in Railway logs
+    instead of the command just silently doing nothing."""
+    logger.error(
+        f"‼️ [UnhandledError] update={update} error={context.error}",
+        exc_info=context.error
+    )
+    try:
+        if isinstance(update, Update) and update.effective_message:
+            await update.effective_message.reply_text(
+                f"❌ Internal error: {context.error}"
+            )
+    except Exception:
+        pass
+
+
+# ============================================================
+# REGISTER ALL HANDLERS
+# ============================================================
+
+def register_userbot_handlers(app):
+    set_bot_app(app)
+
+    app.add_handler(CommandHandler("adduadmin", cmd_adduadmin))
+    app.add_handler(CommandHandler("removeuadmin", cmd_removeuadmin))
+    app.add_handler(CommandHandler("listuadmins", cmd_listuadmins))
+    app.add_handler(CommandHandler("setuserapi", cmd_setuserapi))
+    app.add_handler(CommandHandler("addaccount", cmd_addaccount))
+    app.add_handler(CommandHandler("startsession", cmd_startsession))
+    app.add_handler(CommandHandler("verifycode", cmd_verifycode))
+    app.add_handler(CommandHandler("verify2fa", cmd_verify2fa))
+    app.add_handler(CommandHandler("listaccounts", cmd_listaccounts))
+    app.add_handler(CommandHandler("deleteaccount", cmd_deleteaccount))
+    app.add_handler(CommandHandler("addgroup", cmd_addgroup))
+    app.add_handler(CommandHandler("assigngroup", cmd_assigngroup))
+    app.add_handler(CommandHandler("syncgroups", cmd_syncgroups))
+    app.add_handler(CommandHandler("listgroups", cmd_listgroups))
+    app.add_handler(CommandHandler("deletegroup", cmd_deletegroup))
+    app.add_handler(CommandHandler("setactivegroup", cmd_setactivegroup))
+    app.add_handler(CommandHandler("settargetgroup", cmd_settargetgroup))
+    app.add_handler(CommandHandler("settargetlink", cmd_settargetlink))
+    app.add_handler(CommandHandler("setlimit", cmd_setlimit))
+    app.add_handler(CommandHandler("a", cmd_a))
+    app.add_handler(CommandHandler("b", cmd_b))
+    app.add_handler(CommandHandler("c", cmd_c))
+    app.add_handler(CommandHandler("d", cmd_d))
+    app.add_handler(CommandHandler("e", cmd_e))
+    app.add_handler(CommandHandler("myapi", cmd_myapi))
+    app.add_handler(CommandHandler("ubothelp", cmd_ubothelp))
+    app.add_handler(CommandHandler("status2", cmd_status2))
+    app.add_handler(CommandHandler("broadcast", cmd_broadcast))
+    app.add_handler(CallbackQueryHandler(cb_group_action, pattern="^grp_"))
+
+    app.add_error_handler(_global_error_handler)
+
+    logger.info("✅ Userbot handlers registered (no listener/worker split — each account handles its own assigned groups)")
