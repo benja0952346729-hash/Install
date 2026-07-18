@@ -363,6 +363,8 @@ def init_db():
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS show_all_slots BOOLEAN DEFAULT FALSE;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS pre_wipe_snapshot JSONB;")
             cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS profit_per_game NUMERIC DEFAULT 0;")
+            cur.execute("ALTER TABLE game_settings ADD COLUMN IF NOT EXISTS round_number INT DEFAULT 1;")
+            cur.execute("ALTER TABLE winners ADD COLUMN IF NOT EXISTS won_round INT;")
             cur.execute("ALTER TABLE groups ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS group_id BIGINT;")
             cur.execute("ALTER TABLE user_balance ADD COLUMN IF NOT EXISTS carry_balance NUMERIC DEFAULT 0;")
@@ -2030,12 +2032,33 @@ def get_user_by_number(game_id: int, number: int) -> dict:
 def get_users_by_number(game_id: int, number: int) -> list:
     """
     ✅ FIX: pre-booking ሲጀምር (handle_video_chat_started) registrations
-    በጸጥታ ይጠፋሉ። Winner photo ገና ውጤቱ ካልታወቀ በፊት ይህ ቢፈጠር፣ live
-    registrations ምንም ስለማይገኝ "user አልተገኘም" ይሆናል። ስለዚህ live ውጤት ባዶ
-    ከሆነ፣ ከመጥፋቱ በፊት የተቀመጠውን game_settings.pre_wipe_snapshot ላይ
-    ተመልክቶ ትክክለኛውን ባለቤት ያገኛል። ይህ ማንኛውም caller (handlers.py፣
-    userbot2.py፣ ወዘተ) ራሱ ምንም ሳይቀየር በራሱ ይጠቀማል።
+    በጸጥታ ይጠፋሉ፣ ግን ከዚያ በኋላ የሚመዘገቡ (የቀጣዩ ዙር prebooking) ደግሞ
+    **ተመሳሳይ game_id** ስር ይመዘገባሉ (game_id በ /newgame ወይም auto-restart
+    አይቀየርም)። ስለዚህ snapshot ከተወሰደ በኋላ (ይህ ጨዋታ prebooking phase ውስጥ
+    ገብቷል ማለት ነው)፣ **snapshot ቅድሚያ ይሰጠዋል** — ማንኛውም ከዚያ በኋላ ያለ
+    "live" registration የቀጣዩ ዙር ምዝገባ ነው እንጂ ይህ ውጤት እየተሰላለት ላለው
+    ዙር ትክክለኛ ባለቤት አይደለም (ይህ ደግሞ "ትክክለኛው አሸናፊ አይታይም" bug ትክክለኛ
+    ምክንያት ነበር)። Snapshot ገና ካልተወሰደ (ይህ ጨዋታ prebooking phase ውስጥ
+    ገና ካላለፈ) ብቻ ወደ live registrations ይመለሳል።
     """
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT pre_wipe_snapshot FROM game_settings WHERE id=%s", (game_id,))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+
+    snapshot = row[0] if row else None
+    if snapshot:
+        if isinstance(snapshot, str):
+            try:
+                snapshot = _json.loads(snapshot)
+            except Exception:
+                snapshot = None
+        if snapshot is not None:
+            entry = snapshot.get(str(number))
+            return entry if entry else []
+
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
@@ -2047,29 +2070,7 @@ def get_users_by_number(game_id: int, number: int) -> list:
     cur.close()
     conn.close()
 
-    live = [{"telegram_id": r[0], "user_name": r[1], "slot": r[2], "is_half": r[3]} for r in rows]
-    if live:
-        return live
-
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT pre_wipe_snapshot FROM game_settings WHERE id=%s", (game_id,))
-    row = cur.fetchone()
-    cur.close()
-    conn.close()
-
-    if not row or not row[0]:
-        return []
-
-    snapshot = row[0]
-    if isinstance(snapshot, str):
-        try:
-            snapshot = _json.loads(snapshot)
-        except Exception:
-            return []
-
-    entry = snapshot.get(str(number))
-    return entry if entry else []
+    return [{"telegram_id": r[0], "user_name": r[1], "slot": r[2], "is_half": r[3]} for r in rows]
 
 
 def save_registrations_snapshot(game_id: int):
@@ -2189,15 +2190,19 @@ def save_winner(game_id: int, place: int, telegram_id: int, user_name: str,
                 number: int, prize: float, group_id: int = None):
     conn = get_conn()
     cur = conn.cursor()
+    cur.execute("SELECT COALESCE(round_number, 1) FROM game_settings WHERE id=%s", (game_id,))
+    row = cur.fetchone()
+    current_round = row[0] if row else 1
     cur.execute("""
-        INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize, group_id)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO winners (game_id, place, telegram_id, user_name, number, prize, group_id, won_round)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (game_id, place, telegram_id) DO UPDATE
             SET user_name=EXCLUDED.user_name,
                 number=EXCLUDED.number,
                 prize=EXCLUDED.prize,
-                group_id=EXCLUDED.group_id
-    """, (game_id, place, telegram_id, user_name, number, prize, group_id))
+                group_id=EXCLUDED.group_id,
+                won_round=EXCLUDED.won_round
+    """, (game_id, place, telegram_id, user_name, number, prize, group_id, current_round))
     conn.commit()
     cur.close()
     conn.close()
@@ -2608,6 +2613,16 @@ def clear_game(game_id: int):
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM registrations WHERE game_id=%s", (game_id,))
+
+    # NEW: round_number ይጨምራል — ይህ "ካሸነፉ ስንት round ተላልፏል" ለሚለው
+    # winner-greeting time-window ማስላት ይጠቅማል (24-ሰዓት wall-clock ሳይሆን፣
+    # ልክ እንደ carry_balance clearing round-based ነው)
+    cur.execute("UPDATE game_settings SET round_number = COALESCE(round_number, 1) + 1 WHERE id=%s", (game_id,))
+
+    # NEW: pre_wipe_snapshot ን ደግሞ አጽዳ — አለበለዚያ አዲሱ ዙር ለዘላለም
+    # የቆየውን snapshot ብቻ ይጠቀም ነበር (get_users_by_number() snapshot
+    # ካለ ቅድሚያ ስለሚሰጠው) ፣ ትክክለኛው live ውሂብ ጨርሶ አይታይም ነበር
+    cur.execute("UPDATE game_settings SET pre_wipe_snapshot=NULL WHERE id=%s", (game_id,))
 
     # ✅ FIX: game_id → group_id ፈልግ፣ ያልተዛመደ (unmatched) sms/screenshot payments ጽዳ
     cur.execute("SELECT group_id FROM game_settings WHERE id=%s", (game_id,))
@@ -3487,12 +3502,30 @@ def get_ungreeted_winner(game_id: int, telegram_id: int) -> bool:
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("""
-        SELECT id FROM winners
+        SELECT id, won_round FROM winners
         WHERE telegram_id=%s AND place=1 AND greeted=FALSE
         ORDER BY game_id DESC LIMIT 1
     """, (telegram_id,))
     row = cur.fetchone()
     if not row:
+        cur.close()
+        conn.close()
+        return False
+
+    winner_id, won_round = row
+
+    # NEW: 24-ሰዓት wall-clock ሳይሆን — ልክ እንደ carry_balance mechanic
+    # round-based ነው። አሸናፊው ካሸነፈበት round ቀጥሎ ባለው ROUND ብቻ ነው
+    # ብቁ (ልክ carry_balance ደግሞ ቀጣዩ round ላይ ብቻ auto✅ እንደሚያደርግላቸው)።
+    # 2 ወይም ከዚያ በላይ round ካለፈ (ገና ካልተከበሩ) ጊዜው አልፎበታል ተብሎ
+    # greeted=TRUE ይመዘገባል፣ ምንም አይላክም።
+    cur.execute("SELECT COALESCE(round_number, 1) FROM game_settings WHERE id=%s", (game_id,))
+    grow = cur.fetchone()
+    current_round = grow[0] if grow else 1
+
+    if won_round is not None and (current_round - won_round) > 1:
+        cur.execute("UPDATE winners SET greeted=TRUE WHERE id=%s", (winner_id,))
+        conn.commit()
         cur.close()
         conn.close()
         return False
@@ -3646,10 +3679,24 @@ def save_game_report(group_id: int, game_id: int, total_bet: float,
     conn.close()
 
 
+def _get_addis_day_boundary_utc() -> datetime:
+    """
+    NEW: ቀን መጀመሪያ — ቀኑ የሚጀምረው ጠዋት 5:00 (ዶሮ የሚጨውበት ሰዓት/dawn) ላይ
+    ነው፣ rolling 24-ሰዓት (ከአሁኑ ጀምሮ ወደ ኋላ) ሳይሆን። ተጨማሪ timezone
+    conversion አልተጨመረም (server ቀድሞ በሚጠቀምበት clock ላይ ብቻ 5am threshold
+    ተተግብሯል) — ሌላ ክፍል ላይ mismatch እንዳይፈጠር።
+    """
+    now = datetime.now()
+    boundary = now.replace(hour=5, minute=0, second=0, microsecond=0)
+    if now < boundary:
+        boundary -= timedelta(days=1)
+    return boundary
+
+
 def get_report(group_id: int) -> dict:
     conn = get_conn()
     cur = conn.cursor()
-    cutoff = datetime.now() - timedelta(hours=24)
+    cutoff = _get_addis_day_boundary_utc()
 
     try:
         cur.execute("""
@@ -3724,7 +3771,7 @@ def get_report(group_id: int) -> dict:
 def cleanup_old_reports():
     conn = get_conn()
     cur = conn.cursor()
-    cutoff = datetime.now() - timedelta(hours=24)
+    cutoff = datetime.now() - timedelta(hours=48)
     try:
         cur.execute("DELETE FROM game_reports WHERE created_at < %s", (cutoff,))
         conn.commit()
