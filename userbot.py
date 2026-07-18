@@ -275,6 +275,25 @@ def init_userbot_db():
         )
     """, "create userbot_group_accounts")
 
+    # --- NEW: optional "night batch" mode. When enabled (via /addon),
+    # eligible users are queued here instead of being added immediately.
+    # A background loop (_night_batch_loop) then works through the
+    # queue only during night hours, in batches of 50 with rest periods
+    # between batches, respecting flood/spam/daily-limit exactly like
+    # the immediate-add path does. /addoff disables it and reverts to
+    # immediate adding. ---
+    run("""
+        CREATE TABLE IF NOT EXISTS userbot_pending_adds (
+            id SERIAL PRIMARY KEY,
+            owner_id BIGINT NOT NULL DEFAULT 0,
+            user_id BIGINT NOT NULL,
+            target_group_id BIGINT NOT NULL,
+            label CHAR(1) NOT NULL,
+            source_chat_id BIGINT,
+            queued_at TIMESTAMP DEFAULT NOW()
+        )
+    """, "create userbot_pending_adds")
+
     cur.close()
     conn.close()
     logger.info("✅ Userbot DB tables ready (dedicated DB)")
@@ -650,6 +669,82 @@ def db_auto_assign_group(owner_id: int, group_id: int):
     _group_assign_rr_index += 1
     db_assign_group_to_account(owner_id, group_id, account["label"])
     return account["label"]
+
+
+# ============================================================
+# DB HELPERS — NIGHT BATCH QUEUE (optional /addon mode)
+# ============================================================
+
+def db_queue_pending_add(owner_id: int, user_id: int, target_group_id: int, label: str, source_chat_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        INSERT INTO userbot_pending_adds (owner_id, user_id, target_group_id, label, source_chat_id)
+        VALUES (%s, %s, %s, %s, %s)
+    """, (owner_id, user_id, target_group_id, label, source_chat_id))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_get_next_pending_add(owner_id: int, label: str):
+    """Oldest queued entry for this specific account, or None."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT id, user_id, target_group_id, source_chat_id FROM userbot_pending_adds
+        WHERE owner_id=%s AND label=%s ORDER BY queued_at ASC LIMIT 1
+    """, (owner_id, label))
+    row = cur.fetchone()
+    cur.close()
+    conn.close()
+    return row
+
+
+def db_remove_pending_add(pending_id: int):
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("DELETE FROM userbot_pending_adds WHERE id=%s", (pending_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+
+
+def db_count_pending_adds(owner_id: int, label: str = None) -> int:
+    conn = get_conn()
+    cur = conn.cursor()
+    if label:
+        cur.execute("SELECT COUNT(*) FROM userbot_pending_adds WHERE owner_id=%s AND label=%s", (owner_id, label))
+    else:
+        cur.execute("SELECT COUNT(*) FROM userbot_pending_adds WHERE owner_id=%s", (owner_id,))
+    count = cur.fetchone()[0]
+    cur.close()
+    conn.close()
+    return count
+
+
+def db_clear_pending_queue(owner_id: int) -> int:
+    """Deletes every leftover queued entry for this owner at the end of a
+    night — so the NEXT night starts fresh with only new users. Also
+    releases each cleared user's claim (the row in userbot_added_users
+    made at queue time) — since they were NOT actually added, they must
+    remain addable later. If that same user messages again another time,
+    they'll simply get queued again like any new user, instead of being
+    permanently skipped. Returns how many rows were cleared."""
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT user_id, target_group_id FROM userbot_pending_adds WHERE owner_id=%s", (owner_id,))
+    rows = cur.fetchall()
+    for user_id, target_group_id in rows:
+        cur.execute(
+            "DELETE FROM userbot_added_users WHERE user_id=%s AND group_id=%s",
+            (user_id, target_group_id)
+        )
+    cur.execute("DELETE FROM userbot_pending_adds WHERE owner_id=%s", (owner_id,))
+    conn.commit()
+    cur.close()
+    conn.close()
+    return len(rows)
 
 
 # ============================================================
@@ -1175,6 +1270,16 @@ async def _contact_and_add_by_sender(account: dict, sender, target_group_id: int
                 # the "too many groups" case: leave the claim in place so
                 # future checks silently treat them as already handled.
                 logger.warning(f"[Add] 🛑 [{account['label']}] user={user_id} unresolvable by Telegram (left group / deleted account) — marking as permanently skipped, will NOT retry")
+            elif "blocked" in err_text or "privacy" in err_text:
+                # PERMANENT, user-side restriction — this user has blocked
+                # this account (or their privacy settings refuse it), so
+                # no account will ever succeed in adding/contacting them
+                # via this path. Do NOT release the claim — same reasoning
+                # as "too many groups": releasing it would retry this user
+                # forever on every future message. Also record them in
+                # userbot_blocked_users so broadcast skips them too.
+                await asyncio.to_thread(db_mark_user_blocked, user_id)
+                logger.warning(f"[Add] 🛑 [{account['label']}] user={user_id} has blocked this account / privacy-restricted — marking as permanently skipped, will NOT retry")
             else:
                 logger.warning(f"[Add] ❌ [{account['label']}] user={user_id} target={target_group_id}: {e}")
                 await asyncio.to_thread(db_release_claim, user_id, target_group_id)
@@ -1299,6 +1404,152 @@ async def _membership_recheck_loop():
                         await asyncio.sleep(2)
         except Exception as e:
             logger.warning(f"[MembershipRecheck] loop error: {e}")
+
+
+# ============================================================
+# NIGHT BATCH MODE (optional — toggled with /addon and /addoff)
+#
+# When OFF (default): users are added immediately as messages arrive,
+# exactly as before.
+#
+# When ON: instead of adding immediately, eligible users are queued
+# (userbot_pending_adds). This background loop then works through each
+# account's queue, but ONLY during night hours, in batches of
+# NIGHT_BATCH_SIZE with a NIGHT_BATCH_REST_HOURS rest between batches,
+# using a NIGHT_BATCH_DELAY_RANGE gap between individual adds. It fully
+# respects flood_until/spam_until/daily_limit exactly like the immediate
+# path — a flood or spam hit pauses that account's batch processing the
+# same way it would during the day, using the same DB fields and the
+# same _contact_and_add_by_sender function (so db_set_flood/db_set_spam
+# are triggered identically either way).
+# ============================================================
+
+NIGHT_START_HOUR = 0    # 12 AM (midnight) — was 21 (9 PM), owner requested 24:00
+NIGHT_END_HOUR = 7      # 7 AM
+NIGHT_BATCH_SIZE = 50
+NIGHT_BATCH_REST_HOURS = 2
+NIGHT_BATCH_DELAY_RANGE = (5, 7)
+
+# Per-account in-memory batch progress: label -> {"count": int, "resting_until": datetime|None}
+_night_batch_state: dict = {}
+
+# Tracks whether the previous loop tick was during night hours, so we can
+# detect the exact night → day transition and clear the queue once.
+_was_night_last_tick = True
+
+
+def _is_night_now() -> bool:
+    h = datetime.now().hour
+    if NIGHT_START_HOUR > NIGHT_END_HOUR:
+        return h >= NIGHT_START_HOUR or h < NIGHT_END_HOUR
+    return NIGHT_START_HOUR <= h < NIGHT_END_HOUR
+
+
+class _MinimalSender:
+    """A lightweight stand-in for a Telethon sender object, used when
+    processing a queued user we no longer have the original live event
+    for. _contact_and_add_by_sender only ever reads .id/.first_name/
+    .last_name/.phone from it, and otherwise re-resolves the real entity
+    itself via get_entity()/GetParticipantRequest — so this is safe."""
+    def __init__(self, user_id: int):
+        self.id = user_id
+        self.first_name = "User"
+        self.last_name = ""
+        self.phone = None
+
+
+async def _night_batch_loop():
+    global _was_night_last_tick
+    while True:
+        await asyncio.sleep(15)
+        try:
+            is_night = _is_night_now()
+
+            if _was_night_last_tick and not is_night:
+                # Night just ended — clear every owner's leftover queue
+                # so tomorrow night starts completely fresh, per owner's
+                # request. Users who were cleared without being added
+                # keep their existing claim (see db_clear_pending_queue),
+                # so they can never be queued or added again even if
+                # they message again later — the system will simply move
+                # on to genuinely new users instead.
+                owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_accounts, None)
+                for oid in owner_ids:
+                    cleared = await asyncio.to_thread(db_clear_pending_queue, oid)
+                    if cleared:
+                        logger.info(f"[NightBatch] 🧹 owner={oid} — cleared {cleared} leftover queued user(s), fresh start tonight")
+                _night_batch_state.clear()
+
+            _was_night_last_tick = is_night
+
+            if not is_night:
+                continue
+
+            owner_ids = await asyncio.to_thread(_sql_distinct_owner_ids_with_accounts, None)
+            for oid in owner_ids:
+                batch_on = (await asyncio.to_thread(db_get_setting, oid, "batch_mode_enabled")) == "true"
+                if not batch_on:
+                    continue
+
+                accounts = await asyncio.to_thread(db_get_all_accounts, oid)
+                for account in accounts:
+                    label = account["label"]
+                    if not account.get("session"):
+                        continue
+
+                    state = _night_batch_state.setdefault(label, {"count": 0, "resting_until": None})
+                    now = datetime.now()
+                    if state["resting_until"] and state["resting_until"] > now:
+                        continue  # this account is on its 2-hour rest between batches
+
+                    if account.get("flood_until") and account["flood_until"] > now:
+                        continue
+                    if account.get("spam_until") and account["spam_until"] > now:
+                        continue
+
+                    daily_limit_str = await asyncio.to_thread(db_get_setting, oid, "daily_limit")
+                    if not daily_limit_str:
+                        continue
+                    daily_limit = int(daily_limit_str)
+                    current_count = await asyncio.to_thread(db_get_daily_add_count, label)
+                    if current_count >= daily_limit:
+                        continue
+
+                    pending = await asyncio.to_thread(db_get_next_pending_add, oid, label)
+                    if not pending:
+                        continue
+                    pending_id, user_id, target_group_id, source_chat_id = pending
+
+                    already_added = await asyncio.to_thread(db_is_user_added, user_id, target_group_id)
+                    if already_added:
+                        # Was handled by something else in the meantime —
+                        # just drop it from the queue.
+                        await asyncio.to_thread(db_remove_pending_add, pending_id)
+                        continue
+
+                    lock = _get_account_lock(label)
+                    async with lock:
+                        client = await _get_client(account, oid)
+                        try:
+                            logger.info(f"[NightBatch] 🌙 [{label}] processing queued user={user_id} ({state['count']+1}/{NIGHT_BATCH_SIZE} this batch)")
+                            await _contact_and_add_by_sender(
+                                account, _MinimalSender(user_id), target_group_id, oid,
+                                client=client, source_chat_id=source_chat_id
+                            )
+                        finally:
+                            await client.disconnect()
+
+                    await asyncio.to_thread(db_remove_pending_add, pending_id)
+                    state["count"] += 1
+                    if state["count"] >= NIGHT_BATCH_SIZE:
+                        state["count"] = 0
+                        state["resting_until"] = datetime.now() + timedelta(hours=NIGHT_BATCH_REST_HOURS)
+                        logger.info(f"[NightBatch] 😴 [{label}] finished a batch of {NIGHT_BATCH_SIZE} — resting {NIGHT_BATCH_REST_HOURS}h")
+
+                    await asyncio.sleep(random.uniform(*NIGHT_BATCH_DELAY_RANGE))
+
+        except Exception as e:
+            logger.warning(f"[NightBatch] loop error: {e}")
 
 
 # ============================================================
@@ -1458,9 +1709,19 @@ async def _reload_listeners(owner_id: int = None):
                         if already_added:
                             return
 
-                        auto_add = (await asyncio.to_thread(db_get_setting, o, "auto_add_enabled")) or "true"
-                        if auto_add == "false":
-                            return
+                        # /addon (batch_mode_enabled) and the separate
+                        # "Pause Auto-Add" toggle (auto_add_enabled) are
+                        # fully independent switches — each does its own
+                        # job regardless of what the other is set to. So
+                        # the auto_add_enabled pause only gates the
+                        # IMMEDIATE-add path; when batch mode is on,
+                        # queuing for the night worker happens either way.
+                        batch_mode_on = (await asyncio.to_thread(db_get_setting, o, "batch_mode_enabled")) == "true"
+
+                        if not batch_mode_on:
+                            auto_add = (await asyncio.to_thread(db_get_setting, o, "auto_add_enabled")) or "true"
+                            if auto_add == "false":
+                                return
 
                         daily_limit_str = await asyncio.to_thread(db_get_setting, o, "daily_limit")
                         if not daily_limit_str:
@@ -1508,6 +1769,18 @@ async def _reload_listeners(owner_id: int = None):
                                 logger.info(f"[AutoAdd] ⏭ user={user_id} already claimed by another account — skip")
                                 return
 
+                            batch_mode_on = (await asyncio.to_thread(db_get_setting, o, "batch_mode_enabled")) == "true"
+                            if batch_mode_on:
+                                # Night-batch mode (/addon): don't add now
+                                # — save this user for the background
+                                # night-batch worker to process later, in
+                                # controlled batches. The claim above
+                                # already prevents any other account from
+                                # also queuing/adding this same user.
+                                await asyncio.to_thread(db_queue_pending_add, o, user_id, target_group_id, acc["label"], chat_id)
+                                logger.info(f"[AutoAdd] 🌙 [{acc['label']}] user={user_id} queued for night-batch processing")
+                                return
+
                             logger.info(f"[AutoAdd] ⚙️ [{acc['label']}] adding {user_id} (self — no handoff)")
                             await asyncio.sleep(random.uniform(2, 5))
                             await _contact_and_add_by_sender(fresh_acc, sender, target_group_id, o, client=client, source_chat_id=chat_id)
@@ -1532,6 +1805,7 @@ async def start_listeners():
     asyncio.create_task(_cleanup_loop())
     asyncio.create_task(_spam_recovery_loop())
     asyncio.create_task(_membership_recheck_loop())
+    asyncio.create_task(_night_batch_loop())
     asyncio.create_task(_reload_listeners())
 
 
@@ -1739,6 +2013,34 @@ async def cmd_setlimit(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"✅ Daily limit set: {limit} per account")
     except ValueError:
         await update.message.reply_text("❌ ቁጥር መሆን አለበት!")
+
+
+async def cmd_addon(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Enables night-batch mode: users are queued instead of added
+    immediately, and processed only at night in batches of 50 with a
+    2-hour rest between batches."""
+    if not _is_admin(update.effective_user.id):
+        return
+    owner_id = update.effective_user.id
+    db_set_setting(owner_id, "batch_mode_enabled", "true")
+    await update.message.reply_text(
+        f"🌙 Night-batch mode ON\n"
+        f"ከአሁን ጀምሮ ተጠቃሚዎች ወዲያውኑ አይታከሉም — ይቀመጣሉ (queue)፣ እና በሌሊት ({NIGHT_START_HOUR}:00-{NIGHT_END_HOUR}:00) "
+        f"በ{NIGHT_BATCH_SIZE} ባች እየተደረገ፣ በ{NIGHT_BATCH_REST_HOURS} ሰዓት እረፍት እየተደረገ ​​ይታከላሉ።\n"
+        f"/addoff ስትል ወደ ወዲያውኑ-መጨመር ይመለሳል።"
+    )
+
+
+async def cmd_addoff(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Disables night-batch mode — reverts to adding users immediately
+    as messages arrive, exactly like before."""
+    if not _is_admin(update.effective_user.id):
+        return
+    owner_id = update.effective_user.id
+    db_set_setting(owner_id, "batch_mode_enabled", "false")
+    pending_count = db_count_pending_adds(owner_id)
+    note = f"\n⚠️ {pending_count} ተጠቃሚ(ዎች) queue ውስጥ ቀርተዋል — /addon ን እንደገና እስክታበራ ድረስ አይታከሉም።" if pending_count else ""
+    await update.message.reply_text(f"☀️ Night-batch mode OFF — ወዲያውኑ-መጨመር ተመልሷል።{note}")
 
 
 async def cmd_listaccounts(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2456,7 +2758,9 @@ async def cmd_ubothelp(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         "/setactivegroup -100xxxxxxx\n"
         "/settargetgroup -100xxxxxxx\n"
         "/settargetlink https://t.me/+xxx\n"
-        "/setlimit 50\n\n"
+        "/setlimit 50\n"
+        "/addon (queue + night-batch mode)\n"
+        "/addoff (back to immediate adding)\n\n"
         "━━━━━━━━━━━━━━━━\n"
         "⚡ Send:\n"
         "/a /b /c /d /e መልዕክት\n\n"
@@ -2523,6 +2827,8 @@ def register_userbot_handlers(app):
     app.add_handler(CommandHandler("settargetgroup", cmd_settargetgroup))
     app.add_handler(CommandHandler("settargetlink", cmd_settargetlink))
     app.add_handler(CommandHandler("setlimit", cmd_setlimit))
+    app.add_handler(CommandHandler("addon", cmd_addon))
+    app.add_handler(CommandHandler("addoff", cmd_addoff))
     app.add_handler(CommandHandler("a", cmd_a))
     app.add_handler(CommandHandler("b", cmd_b))
     app.add_handler(CommandHandler("c", cmd_c))
