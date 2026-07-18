@@ -368,7 +368,10 @@ async def _debounced_resend_remaining_or_nekay(bot, group_id: int, game_id: int)
             fresh_nekay = get_nekay_numbers(game_id)
             snap = {}
             for number, slots, is_half in fresh_nekay:
-                snap[number] = 2 if is_half else 0
+                if is_half:
+                    snap[number] = -1 if slots == {1} else (-2 if slots == {2} else 0)
+                else:
+                    snap[number] = 0
             nekay_numbers[key] = snap
 
             rem_msg_id = settings.get("remaining_message_id")
@@ -421,7 +424,10 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list,
     fresh_nekay = get_nekay_numbers(game_id)
     snap = {}
     for number, slots, is_half in fresh_nekay:
-        snap[number] = 2 if is_half else 0
+        if is_half:
+            snap[number] = -1 if slots == {1} else (-2 if slots == {2} else 0)
+        else:
+            snap[number] = 0
     nekay_numbers[key] = snap
 
     if not snap:
@@ -644,7 +650,10 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 
         snap = {}
         for number, slots, is_half in unpaid:
-            snap[number] = 2 if is_half else 0
+            if is_half:
+                snap[number] = -1 if slots == {1} else (-2 if slots == {2} else 0)
+            else:
+                snap[number] = 0
         nekay_numbers[_gk(group_id, game_id)] = snap
 
         for number, slots, is_half in unpaid:
@@ -875,6 +884,7 @@ async def _finish_setgame(update, ctx):
         nekay_numbers.pop(old_key, None)
         countdown_done.discard(old_key)
         handled_video_boards.discard(old_key)
+        profit_counted_games.discard(old_key)
         _stop_inactivity_tracker(old_settings["id"], old_group_id)
         try:
             clear_all_context_for_group(old_group_id)
@@ -1126,7 +1136,15 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 UPDATE registrations SET is_nekay=TRUE
                 WHERE game_id=%s AND number=%s
             """, (game_id, num))
-            snap[num] = 2 if is_half else 0
+            if is_half:
+                cur.execute("""
+                    SELECT slot FROM registrations
+                    WHERE game_id=%s AND number=%s AND is_nekay=TRUE
+                """, (game_id, num))
+                nekay_slots = {r[0] for r in cur.fetchall()}
+                snap[num] = -1 if nekay_slots == {1} else (-2 if nekay_slots == {2} else 0)
+            else:
+                snap[num] = 0
 
     conn.commit()
     cur.close()
@@ -1464,7 +1482,10 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                 fresh_nekay = get_nekay_numbers(game_id)
                 rebuilt_snap = {}
                 for n, slots, is_half in fresh_nekay:
-                    rebuilt_snap[n] = 2 if is_half else 0
+                    if is_half:
+                        rebuilt_snap[n] = -1 if slots == {1} else (-2 if slots == {2} else 0)
+                    else:
+                        rebuilt_snap[n] = 0
                 nekay_numbers[_gk(group_id, game_id)] = rebuilt_snap
             fresh = get_active_settings(group_id=group_id)
             if fresh:
@@ -2639,7 +2660,10 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             nekay_fresh = get_nekay_numbers(game_id)
             snap = {}
             for number, slots, is_half in nekay_fresh:
-                snap[number] = 2 if is_half else 0
+                if is_half:
+                    snap[number] = -1 if slots == {1} else (-2 if slots == {2} else 0)
+                else:
+                    snap[number] = 0
             nekay_numbers[_gk(group_id, game_id)] = snap
 
             rem_msg_id = fresh.get("remaining_message_id")
@@ -2917,7 +2941,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             eshi_body = text[len("#eshi"):].strip()
 
-        eshi_parts = [p for p in re.split(r'[,\s]+', eshi_body.strip()) if p]
+        eshi_parts = [p for p in _re_owner.split(r'[,\s]+', eshi_body.strip()) if p]
         if not eshi_parts:
             await msg.reply_text("❌ ምሳሌ: #እሺ 01 ወይም #እሺ 01+2 06✅")
             return
@@ -3276,6 +3300,7 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     admin_nekay_games.discard(_gk(group_id, settings["id"]))
     active_countdowns.pop(_gk(group_id, settings["id"]), None)
     nekay_numbers.pop(_gk(group_id, settings["id"]), None)
+    profit_counted_games.discard(_gk(group_id, settings["id"]))
     countdown_done.discard(_gk(group_id, settings["id"]))
     handled_video_boards.discard(_gk(group_id, settings["id"]))
     _stop_inactivity_tracker(settings["id"], group_id)
@@ -3977,6 +4002,7 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
     clear_prize_balance(_group_id)
     clear_carry_balance(_group_id)
     clear_game(game_id)
+    profit_counted_games.discard(_gk(_group_id, game_id))
     board_text = build_board(settings, {}, {})
     new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
     update_board_message_id(game_id, new_msg.message_id)
