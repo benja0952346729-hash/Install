@@ -40,6 +40,29 @@ from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
 
+_BOLD_SANS_MAP = {}
+for _i, _c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
+    _BOLD_SANS_MAP[_c] = chr(0x1D5D4 + _i)
+for _i, _c in enumerate("abcdefghijklmnopqrstuvwxyz"):
+    _BOLD_SANS_MAP[_c] = chr(0x1D5EE + _i)
+for _i, _c in enumerate("0123456789"):
+    _BOLD_SANS_MAP[_c] = chr(0x1D7EC + _i)
+
+
+def to_bold_sans(text: str) -> str:
+    """Converts plain ASCII text to Mathematical Sans-Serif Bold unicode
+    so it renders bold/eye-catching in plain Telegram messages (no parse_mode needed)."""
+    return "".join(_BOLD_SANS_MAP.get(ch, ch) for ch in text)
+
+
+def format_etb(amount) -> str:
+    """Formats a prize amount with thousands separators, dropping a trailing .0."""
+    amount = float(amount)
+    if amount == int(amount):
+        return f"{int(amount):,}"
+    return f"{amount:,.2f}"
+
+
 PAYMENT_SUCCESS_MESSAGES = [
     "መልካም ዕድል, ወዳጄ 🙏",
     "መልካም ዕድል, ይቅናህ ቤተሰብ 🙏",
@@ -1535,7 +1558,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
         }
         medals = {1: "🥇", 2: "🥈", 3: "🥉"}
         per_person = settings.get("numbers_per_person", 1)
-        lines = ["🏆 Winners!\n"]
+        blocks = [f"🏆 {to_bold_sans('Winners!')}"]
         _group_id = group_id or settings.get("group_id")
 
         for place in sorted(winners.keys()):
@@ -1544,7 +1567,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             medal = medals.get(place, "🎖️")
 
             if not prize:
-                lines.append(f"{medal} {place}ኛ: #{number} — prize አልተቀመጠም")
+                blocks.append(f"{medal} {place}ኛ #{number} — prize አልተቀመጠም")
                 continue
 
             if per_person > 1:
@@ -1556,7 +1579,7 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             users = get_users_by_number(settings["id"], lookup_number)
 
             if not users:
-                lines.append(f"{medal} {place}ኛ: #{number} — user አልተገኘም")
+                blocks.append(f"{medal} {place}ኛ #{number} — user አልተገኘም")
                 continue
 
             split_prize = round(prize / len(users), 2)
@@ -1565,7 +1588,6 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
             for u in users:
                 telegram_id = u["telegram_id"]
                 user_name = u["user_name"]
-                is_half = u["is_half"]
 
                 add_winner_balance(settings["id"], telegram_id, split_prize, group_id=_group_id)
                 save_winner(
@@ -1573,8 +1595,9 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
                     number, split_prize, group_id=_group_id
                 )
 
-                half_label = " (በግማሽ)" if is_half else ""
-                winner_parts.append(f"{user_name}{half_label} → ETB {split_prize} ✅")
+                winner_parts.append(
+                    f"✅ {user_name} — {to_bold_sans('ETB')} {to_bold_sans(format_etb(split_prize))}"
+                )
 
                 try:
                     from ai_fallback import log_transaction
@@ -1588,14 +1611,10 @@ async def handle_winner_photo(bot, msg, settings: dict, group_id: int = None) ->
                 except Exception as _log_err:
                     logger.warning(f"[log_transaction] Error: {_log_err}")
 
-            if len(users) == 1:
-                lines.append(f"{medal} {place}ኛ: #{number} — {winner_parts[0]}")
-            else:
-                lines.append(f"{medal} {place}ኛ: #{number} (prize ÷ {len(users)})")
-                for part in winner_parts:
-                    lines.append(f"   • {part}")
+            place_block = f"{medal} {place}ኛ #{number}\n   " + "\n   ".join(winner_parts)
+            blocks.append(place_block)
 
-        announcement = "\n".join(lines)
+        announcement = "\n\n".join(blocks)
         await msg.reply_text(announcement)
 
         return True
@@ -2062,7 +2081,7 @@ async def handle_winner_correction(bot, msg, previous_winners: list, settings: d
     per_person = settings.get("numbers_per_person", 1)
 
     prev_by_place = {w["place"]: w for w in (previous_winners or [])}
-    lines = ["🏆 Winners (ተስተካክሏል)!\n"]
+    blocks = [f"🏆 {to_bold_sans('Winners')} (ተስተካክሏል)!"]
 
     for place, new_number in enumerate(numbers, start=1):
         prize = prize_map.get(place)
@@ -2084,7 +2103,7 @@ async def handle_winner_correction(bot, msg, previous_winners: list, settings: d
 
         # 2) Pay the corrected number — only if a real owner is found
         if not prize:
-            lines.append(f"{medal} {place}ኛ: #{new_number} — prize አልተቀመጠም")
+            blocks.append(f"{medal} {place}ኛ #{new_number} — prize አልተቀመጠም")
             continue
 
         if per_person > 1:
@@ -2096,7 +2115,7 @@ async def handle_winner_correction(bot, msg, previous_winners: list, settings: d
         users = get_users_by_number(game_id, lookup_number)
 
         if not users:
-            lines.append(f"{medal} {place}ኛ: #{new_number} — user አልተገኘም (ምንም አልተከፈለም)")
+            blocks.append(f"{medal} {place}ኛ #{new_number} — user አልተገኘም (ምንም አልተከፈለም)")
             continue
 
         split_prize = round(prize / len(users), 2)
@@ -2105,13 +2124,13 @@ async def handle_winner_correction(bot, msg, previous_winners: list, settings: d
         for u in users:
             telegram_id = u["telegram_id"]
             user_name = u["user_name"]
-            is_half = u["is_half"]
 
             add_winner_balance(game_id, telegram_id, split_prize, group_id=_group_id)
             save_winner(game_id, place, telegram_id, user_name, new_number, split_prize, group_id=_group_id)
 
-            half_label = " (በግማሽ)" if is_half else ""
-            winner_parts.append(f"{user_name}{half_label} → ETB {split_prize} ✅")
+            winner_parts.append(
+                f"✅ {user_name} — {to_bold_sans('ETB')} {to_bold_sans(format_etb(split_prize))}"
+            )
 
             try:
                 from ai_fallback import log_transaction
@@ -2125,14 +2144,10 @@ async def handle_winner_correction(bot, msg, previous_winners: list, settings: d
             except Exception as _log_err:
                 logger.warning(f"[log_transaction] Error: {_log_err}")
 
-        if len(users) == 1:
-            lines.append(f"{medal} {place}ኛ: #{new_number} — {winner_parts[0]}")
-        else:
-            lines.append(f"{medal} {place}ኛ: #{new_number} (prize ÷ {len(users)})")
-            for part in winner_parts:
-                lines.append(f"   • {part}")
+        place_block = f"{medal} {place}ኛ #{new_number}\n   " + "\n   ".join(winner_parts)
+        blocks.append(place_block)
 
-    announcement = "\n".join(lines)
+    announcement = "\n\n".join(blocks)
 
     try:
         await bot.edit_message_text(
