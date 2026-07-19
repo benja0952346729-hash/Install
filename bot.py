@@ -1132,18 +1132,58 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             # ስለዚህ user ሲይዝ ትክክለኛው slot force-overwrite ይደረግለታል
             snap[num] = -1 if slot_only == 1 else -2
         else:
-            cur.execute("""
-                UPDATE registrations SET is_nekay=TRUE
-                WHERE game_id=%s AND number=%s
-            """, (game_id, num))
+            # FIX: "NUM+" (የትኛው slot እንዳልተገለጸ) — ይህ ብዙ ጊዜ ማለት የሚፈልገው
+            # "ክፍት (ገና ያልተያዘውን) slot እንደ nekay አሳይ/አስተዋውቅ" ማለት ነው፣
+            # "ነባሩን registration nekay አድርግ" ማለት አይደለም። ስለዚህ የትኛው slot
+            # በትክክል ክፍት እንደሆነ አረጋግጦ ያንን ብቻ ይነካል (placeholder INSERT)፣
+            # ነባር (የተከፈለ) registration ፈጽሞ አይነካም።
+            slots_for_num = taken.get(num, [])
+            existing_slots = {s[2] for s in slots_for_num}
+
             if is_half:
-                cur.execute("""
-                    SELECT slot FROM registrations
-                    WHERE game_id=%s AND number=%s AND is_nekay=TRUE
-                """, (game_id, num))
-                nekay_slots = {r[0] for r in cur.fetchall()}
-                snap[num] = -1 if nekay_slots == {1} else (-2 if nekay_slots == {2} else 0)
+                if existing_slots == {1}:
+                    target_slot = 2
+                elif existing_slots == {2}:
+                    target_slot = 1
+                elif not existing_slots:
+                    target_slot = 1
+                else:
+                    errors.append(part + " (ሙሉ ተይዟል)")
+                    continue
+
+                if target_slot in existing_slots:
+                    # ያ specific slot ራሱ ነባር registration ስላለው ብቻ —
+                    # ያንን ብቻ nekay አድርግ (ነባር ሎጂክ)
+                    cur.execute("""
+                        UPDATE registrations SET is_nekay=TRUE
+                        WHERE game_id=%s AND number=%s AND slot=%s
+                    """, (game_id, num, target_slot))
+                else:
+                    # ክፍት slot — ማንም ገና ያልያዘው፣ placeholder INSERT
+                    # (nekay list ላይ እንዲታይ/ ወደፊት ሰው ሲይዘው በትክክል force
+                    # ይደረግለት ዘንድ)
+                    cur.execute("""
+                        SELECT 1 FROM registrations
+                        WHERE game_id=%s AND number=%s AND slot=%s
+                    """, (game_id, num, target_slot))
+                    if not cur.fetchone():
+                        cur.execute("""
+                            INSERT INTO registrations
+                                (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                            VALUES (%s, 0, '', %s, TRUE, %s, FALSE, TRUE, FALSE)
+                        """, (game_id, num, target_slot))
+                    else:
+                        cur.execute("""
+                            UPDATE registrations SET is_nekay=TRUE
+                            WHERE game_id=%s AND number=%s AND slot=%s
+                        """, (game_id, num, target_slot))
+
+                snap[num] = -1 if target_slot == 1 else -2
             else:
+                cur.execute("""
+                    UPDATE registrations SET is_nekay=TRUE
+                    WHERE game_id=%s AND number=%s
+                """, (game_id, num))
                 snap[num] = 0
 
     conn.commit()
@@ -2978,6 +3018,64 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             if number < 1 or number > settings_eshi["total_numbers"]:
                 errors.append(part)
                 continue
+
+            if not is_half:
+                # FIX: ሙሉ (full) ከሆነ — ነባር slot(s) (ባዶ፣ ግማሽ፣ ወይም ሙሉ
+                # ይሁኑ) ምንም ይሁኑ ንፁህ በአንድ full row ይተካል። admin_replace_owner
+                # ብቻ ቢጠቀም (UPDATE ብቻ) is_half አይነካም/ ተጨማሪ slot2 row
+                # አይጠፋም ነበር — ስለዚህ ግማሽ→ሙሉ change ፈጽሞ አይሰራም ነበር።
+                found = False
+                try:
+                    conn_full = get_conn()
+                    cur_full = conn_full.cursor()
+                    cur_full.execute(
+                        "DELETE FROM registrations WHERE game_id=%s AND number=%s",
+                        (game_id_eshi, number),
+                    )
+                    cur_full.execute("""
+                        INSERT INTO registrations (game_id, user_id, user_name, number, is_half, slot, is_paid, is_nekay, pending_upgrade)
+                        VALUES (%s, %s, %s, %s, FALSE, 1, %s, FALSE, FALSE)
+                    """, (game_id_eshi, owner_id, target_name, number, mark_paid))
+                    conn_full.commit()
+                    cur_full.close()
+                    conn_full.close()
+                    found = True
+                except Exception as e:
+                    logging.warning(f"[Eshi] full-conversion error: {e}")
+
+                if found:
+                    assigned.append(f"{number:02d}")
+                else:
+                    errors.append(part)
+                continue
+
+            if slot is None and is_half:
+                # FIX: "01+" (የትኛው slot እንዳልገለጽክ) ሲባል — ነባር registration
+                # ካለ (ለምሳሌ slot1=አበበ)፣ ክፍት slot ን (slot2) ብቻ ነው መያዝ
+                # ያለበት — ነባሩን (አበበን) ጨርሶ መተካት የለበትም። የትኛው slot ክፍት
+                # እንደሆነ አረጋግጦ ብቻ ይነካል።
+                try:
+                    conn_chk = get_conn()
+                    cur_chk = conn_chk.cursor()
+                    cur_chk.execute("""
+                        SELECT slot FROM registrations WHERE game_id=%s AND number=%s
+                    """, (game_id_eshi, number))
+                    existing_slots_eshi = {r[0] for r in cur_chk.fetchall()}
+                    cur_chk.close()
+                    conn_chk.close()
+                except Exception as e:
+                    logging.warning(f"[Eshi] slot lookup error: {e}")
+                    existing_slots_eshi = set()
+
+                if existing_slots_eshi == {1}:
+                    slot = 2
+                elif existing_slots_eshi == {2}:
+                    slot = 1
+                elif not existing_slots_eshi:
+                    slot = 1
+                else:
+                    errors.append(part + " (ሙሉ ተይዟል)")
+                    continue
 
             found = admin_replace_owner(
                 game_id_eshi, number, owner_id, target_name,
