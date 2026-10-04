@@ -39,6 +39,7 @@ from database import (
 from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
+logger.warning("🟢 handlers.py VERSION=2026-10-04-mistral2603 loaded")
 
 _BOLD_SANS_MAP = {}
 for _i, _c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
