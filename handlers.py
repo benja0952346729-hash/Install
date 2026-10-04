@@ -39,7 +39,7 @@ from database import (
 from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
-logger.warning("🟢 handlers.py VERSION=2026-10-04-mistral-fallback-chain loaded")
+logger.warning("🟢 handlers.py VERSION=2026-10-04-zemen-ad-fix loaded")
 
 _BOLD_SANS_MAP = {}
 for _i, _c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
@@ -322,6 +322,10 @@ def _mistral_is_tier_error(e) -> bool:
 
 NVIDIA_RPM_LIMIT = 25  # ministral-14b = 0.5 RPS = 30/min; 25 leaves headroom (vision + text share this limiter)
 NVIDIA_WINDOW_SECONDS = 60
+# ministral-14b = 0.5 req/sec → at least 2.1s between call STARTS per key.
+# Photos that arrive together are queued and processed one by one.
+NVIDIA_MIN_INTERVAL = 2.1
+_nvidia_next_slot = defaultdict(float)  # key idx -> earliest time the next call may start
 NVIDIA_MAX_WAIT_SECONDS = 120
 NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
 
@@ -347,14 +351,18 @@ def _nvidia_prune_window(idx: int, now: float):
 
 
 async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
+    """Pick a key and reserve a time-slot on it. Calls to the same key are spaced
+    NVIDIA_MIN_INTERVAL seconds apart, so photos arriving together are queued and
+    processed one by one instead of all hitting Mistral at once (→ 429)."""
     global _nvidia_index
     deadline = time.time() + max_wait
 
     while True:
+        chosen = None  # (idx, delay)
+        soonest_free_at = None
+
         async with _nvidia_lock:
             now = time.time()
-            soonest_free_at = None
-
             for _ in range(len(_nvidia_clients)):
                 idx = _nvidia_index
                 _nvidia_index = (_nvidia_index + 1) % len(_nvidia_clients)
@@ -363,12 +371,25 @@ async def _get_available_nvidia_client(max_wait: int = NVIDIA_MAX_WAIT_SECONDS):
                 q = _nvidia_call_times[idx]
 
                 if len(q) < NVIDIA_RPM_LIMIT:
-                    q.append(now)
-                    return _nvidia_clients[idx], idx
+                    slot = max(now, _nvidia_next_slot[idx] + NVIDIA_MIN_INTERVAL)
+                    if slot - now <= max_wait:
+                        _nvidia_next_slot[idx] = slot
+                        q.append(slot)
+                        chosen = (idx, slot - now)
+                        break
+                    key_free_at = slot
+                else:
+                    key_free_at = q[0] + NVIDIA_WINDOW_SECONDS
 
-                key_free_at = q[0] + NVIDIA_WINDOW_SECONDS
                 if soonest_free_at is None or key_free_at < soonest_free_at:
                     soonest_free_at = key_free_at
+
+        if chosen is not None:
+            idx, delay = chosen
+            if delay > 0.05:
+                logger.info(f"[Mistral] queued — waiting {delay:.1f}s for key #{idx+1} slot")
+                await asyncio.sleep(delay)
+            return _nvidia_clients[idx], idx
 
         now = time.time()
         if now >= deadline:
@@ -615,6 +636,10 @@ except ImportError:
     GEMINI_API_KEYS = []
 
 GEMINI_MODEL = "gemini-2.5-flash"
+# Which model reads payment screenshots FIRST (one call per photo):
+#   "gemini"  → Gemini only; Mistral is used just if Gemini fails (best for Amharic)
+#   "mistral" → old behaviour: Mistral first, and Gemini again if the photo is Amharic (2 calls)
+SCREENSHOT_PRIMARY = "mistral"
 GEMINI_RPM_LIMIT = 8  # conservative vs free-tier ceiling (10-15 RPM/key)
 GEMINI_WINDOW_SECONDS = 60
 GEMINI_MAX_WAIT_SECONDS = 120
@@ -1403,6 +1428,15 @@ RULES:
 - description: brief English description
 - lang: is the receipt text in "amharic" or "english"?
 
+HOW TO IDENTIFY THE BANK (very important):
+- Decide the bank ONLY from the receipt/app itself: its header, logo, colors and layout.
+- IGNORE advertisement banners and promo images shown on the receipt. They are NOT the bank.
+  Example: "Zemen GEBEYA" (ዘመን ገበያ) is an e-commerce ad shown inside the Telebirr app.
+  It is NOT Zemen Bank. Only return "Zemen" if the receipt itself is from Zemen Bank.
+- Telebirr clues: green theme, round green check mark with "ተሳክቷል" (Successful),
+  "የግብይት ቁጥር" (transaction no.), "ገንዘብ ለመላክ" (send money), "QR Code" link,
+  amount in ETB, "Finished" button. If these appear → photoType = "Telebirr".
+
 CRITICAL:
 - ONLY return photoType = "other" if image is clearly NOT a bank receipt
 
@@ -1428,6 +1462,21 @@ JSON object below, starting with { and ending with }.
                 parsed[field] = None
         logger.info(f"[Screenshot] ✅ parsed via {label} | photoType={parsed.get('photoType')} amount={parsed.get('amount')}")
         return parsed
+
+    if SCREENSHOT_PRIMARY == "gemini":
+        try:
+            text2 = await _call_gemini_with_rotation(image_base64, prompt)
+            logger.info(f"[Screenshot] Gemini raw response: {text2[:300]!r}")
+            return _parse(text2, "Gemini")
+        except Exception as e:
+            logger.warning(f"[Screenshot] Gemini failed/unparseable: {e} — trying Mistral")
+            try:
+                text = await _call_nvidia_with_rotation(image_base64, prompt)
+                logger.info(f"[Screenshot] Mistral raw response: {text[:300]!r}")
+                return _parse(text, "Mistral")
+            except Exception as e2:
+                logger.error(f"[Screenshot] Both Gemini and Mistral failed: {e2}")
+                return {"photoType": "other", "amount": None, "sender_name": None, "ref": None, "description": "Could not analyze"}
 
     nvidia_parsed = None
     try:
