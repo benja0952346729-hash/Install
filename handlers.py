@@ -134,7 +134,7 @@ _groq_clients = [Groq(api_key=key) for key in GROQ_API_KEYS] if GROQ_API_KEYS el
 # by Groq on 2026-06-17). qwen/qwen3.6-27b is Groq's recommended replacement.
 # Groq is now used for text-only calls (parse_sms, HTML parsing, Amharic
 # descriptions) — all vision/image calls go through Mistral/Gemini instead.
-GROQ_TEXT_MODEL = "qwen/qwen3.6-27b"
+GROQ_TEXT_MODEL = "qwen/qwen3.8-27b"  # 3.6 deprecated by Groq on 2026-09-14
 
 
 def _get_groq_client() -> Groq:
@@ -222,7 +222,7 @@ async def _call_groq_with_rotation(messages: list, max_tokens: int = 300) -> str
 # Groq vision — used ONLY as a last-resort fallback for analyze_winner_photo
 # (Mistral and Gemini are tried first). Kept because this used to work
 # reliably before the switch.
-GROQ_VISION_MODEL = "qwen/qwen3.6-27b"
+GROQ_VISION_MODEL = "qwen/qwen3.8-27b"  # 3.6 deprecated by Groq on 2026-09-14
 
 
 async def _call_groq_vision_with_rotation(image_base64: str, prompt: str) -> str:
@@ -293,13 +293,14 @@ _nvidia_index = 0
 _nvidia_clients = [
     OpenAI(
         base_url="https://api.mistral.ai/v1",
-        api_key=key
+        api_key=key,
+        max_retries=0,  # SDK ራሱ እንደገና እንዳይሞክር — ኮዱ ራሱ rotation ያደርጋል
     ) for key in MISTRAL_API_KEYS
 ] if MISTRAL_API_KEYS else []
 
-MISTRAL_VISION_MODEL = "mistral-small-2506"
+MISTRAL_VISION_MODEL = "mistral-small-2603"  # 2506 (Small 3.2) retired 2026-07-31 → Mistral Small 4
 
-NVIDIA_RPM_LIMIT = 280  # mistral-small-2506 dashboard limit ~300 RPM — kept a safety margin
+NVIDIA_RPM_LIMIT = 280  # ⚠️ ትክክለኛውን ገደብ በ admin.mistral.ai Limits ገጽ ተመልከትና አስተካክል
 NVIDIA_WINDOW_SECONDS = 60
 NVIDIA_MAX_WAIT_SECONDS = 120
 NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
@@ -413,6 +414,22 @@ def ensure_nvidia_health_task_started():
         _nvidia_health_task_started = False
 
 
+def _log_mistral_limit_info(e, label: str):
+    """429 ሲመጣ Mistral የላከውን rate-limit headers እና body ሎግ ላይ አሳይ።"""
+    try:
+        resp = getattr(e, "response", None)
+        if resp is None:
+            logger.warning(f"[{label}] 429 (no response object): {e}")
+            return
+        info = {
+            k: v for k, v in resp.headers.items()
+            if "ratelimit" in k.lower() or k.lower() == "retry-after"
+        }
+        logger.warning(f"[{label}] 429 headers={info} body={resp.text[:300]}")
+    except Exception as ex:
+        logger.warning(f"[{label}] could not read limit info: {ex}")
+
+
 async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
     total_keys = len(_nvidia_clients)
     if total_keys == 0:
@@ -446,6 +463,9 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                 )
             )
             _nvidia_clear_blocked(idx)
+            _u = getattr(response, "usage", None)
+            if _u:
+                logger.info(f"[Mistral] tokens used: total={_u.total_tokens}")
             raw = response.choices[0].message.content or ""
             text = raw.strip()
             logger.info(f"[Mistral] raw response (key {idx+1}): {raw[:300]!r}")
@@ -461,6 +481,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
             last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                _log_mistral_limit_info(e, "Mistral")
                 logger.warning(f"[Mistral] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
                 _nvidia_mark_blocked(idx)
                 last_limited_idx = idx
@@ -477,7 +498,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
 # calls above (_get_available_nvidia_client) since it's the same provider —
 # just without an image in the payload. Groq is now only a fallback here,
 # used ONLY when the Mistral pool itself is exhausted/rate-limited/erroring.
-MISTRAL_TEXT_MODEL = "mistral-small-2506"
+MISTRAL_TEXT_MODEL = "mistral-small-2603"  # 2506 (Small 3.2) retired 2026-07-31 → Mistral Small 4
 
 
 async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400) -> str:
@@ -507,6 +528,9 @@ async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400
                 )
             )
             _nvidia_clear_blocked(idx)
+            _u = getattr(response, "usage", None)
+            if _u:
+                logger.info(f"[Mistral Text] tokens used: total={_u.total_tokens}")
             raw = response.choices[0].message.content or ""
             text = raw.strip()
             logger.info(f"[Mistral Text] raw response (key {idx+1}): {raw[:300]!r}")
@@ -522,6 +546,7 @@ async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400
             last_error = e
             err_str = str(e).lower()
             if "rate" in err_str or "429" in err_str or "limit" in err_str:
+                _log_mistral_limit_info(e, "Mistral Text")
                 logger.warning(f"[Mistral Text] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
                 _nvidia_mark_blocked(idx)
                 last_limited_idx = idx
