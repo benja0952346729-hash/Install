@@ -39,7 +39,7 @@ from database import (
 from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
-logger.warning("🟢 handlers.py VERSION=2026-10-04-mistral2603 loaded")
+logger.warning("🟢 handlers.py VERSION=2026-10-04-mistral-large2512 loaded")
 
 _BOLD_SANS_MAP = {}
 for _i, _c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
@@ -299,9 +299,9 @@ _nvidia_clients = [
     ) for key in MISTRAL_API_KEYS
 ] if MISTRAL_API_KEYS else []
 
-MISTRAL_VISION_MODEL = "mistral-small-2603"  # 2506 (Small 3.2) retired 2026-07-31 → Mistral Small 4
+MISTRAL_VISION_MODEL = "mistral-large-2512"  # small-2603 had only 20k TPM; large = 250k TPM, better Amharic
 
-NVIDIA_RPM_LIMIT = 280  # ⚠️ ትክክለኛውን ገደብ በ admin.mistral.ai Limits ገጽ ተመልከትና አስተካክል
+NVIDIA_RPM_LIMIT = 50  # mistral-large-2512 = 1 RPS = 60/min; 50 leaves headroom (vision + text share this limiter)
 NVIDIA_WINDOW_SECONDS = 60
 NVIDIA_MAX_WAIT_SECONDS = 120
 NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
@@ -499,7 +499,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
 # calls above (_get_available_nvidia_client) since it's the same provider —
 # just without an image in the payload. Groq is now only a fallback here,
 # used ONLY when the Mistral pool itself is exhausted/rate-limited/erroring.
-MISTRAL_TEXT_MODEL = "mistral-small-2603"  # 2506 (Small 3.2) retired 2026-07-31 → Mistral Small 4
+MISTRAL_TEXT_MODEL = "mistral-large-2512"  # better Amharic quality; 250k TPM
 
 
 async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400) -> str:
