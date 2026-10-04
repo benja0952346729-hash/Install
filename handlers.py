@@ -39,7 +39,7 @@ from database import (
 from jina_brain import get_shared_jina_key
 
 logger = logging.getLogger(__name__)
-logger.warning("🟢 handlers.py VERSION=2026-10-04-mistral-large2512 loaded")
+logger.warning("🟢 handlers.py VERSION=2026-10-04-mistral-fallback-chain loaded")
 
 _BOLD_SANS_MAP = {}
 for _i, _c in enumerate("ABCDEFGHIJKLMNOPQRSTUVWXYZ"):
@@ -299,9 +299,28 @@ _nvidia_clients = [
     ) for key in MISTRAL_API_KEYS
 ] if MISTRAL_API_KEYS else []
 
-MISTRAL_VISION_MODEL = "mistral-large-2512"  # small-2603 had only 20k TPM; large = 250k TPM, better Amharic
+# Models are tried in order. If one returns 403 tier_not_allowed (or 404), it is
+# skipped for MISTRAL_MODEL_SKIP_SECONDS and the next one is used automatically.
+MISTRAL_VISION_MODELS = ["ministral-14b-2512", "ministral-8b-2512", "mistral-small-2603"]
+MISTRAL_VISION_MODEL = MISTRAL_VISION_MODELS[0]  # (used by health-check ping)
+MISTRAL_MODEL_SKIP_SECONDS = 3600
+_mistral_bad_models = {}  # model -> time when it was marked not-allowed
 
-NVIDIA_RPM_LIMIT = 50  # mistral-large-2512 = 1 RPS = 60/min; 50 leaves headroom (vision + text share this limiter)
+
+def _mistral_pick_model(models: list) -> str:
+    now = time.time()
+    for m in models:
+        if now - _mistral_bad_models.get(m, 0) > MISTRAL_MODEL_SKIP_SECONDS:
+            return m
+    raise RuntimeError("No Mistral model allowed for this key/tier")
+
+
+def _mistral_is_tier_error(e) -> bool:
+    t = str(e).lower()
+    return ("tier_not_allowed" in t or "not available in your subscription" in t
+            or "error code: 403" in t or "error code: 404" in t)
+
+NVIDIA_RPM_LIMIT = 25  # ministral-14b = 0.5 RPS = 30/min; 25 leaves headroom (vision + text share this limiter)
 NVIDIA_WINDOW_SECONDS = 60
 NVIDIA_MAX_WAIT_SECONDS = 120
 NVIDIA_HEALTH_RECHECK_INTERVAL = 7 * 60
@@ -436,7 +455,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
     if total_keys == 0:
         raise RuntimeError("MISTRAL_API_KEYS ያልተቀመጠ!")
 
-    max_attempts = total_keys * 3
+    max_attempts = total_keys * 3 + len(MISTRAL_VISION_MODELS)
     last_error = None
     last_limited_idx = None
 
@@ -448,10 +467,11 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
             await asyncio.sleep(2)
             continue
 
+        model = _mistral_pick_model(MISTRAL_VISION_MODELS)
         try:
             response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model=MISTRAL_VISION_MODEL,
+                lambda c=client, m=model: c.chat.completions.create(
+                    model=m,
                     messages=[{
                         "role": "user",
                         "content": [
@@ -476,7 +496,7 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                 continue
             if last_limited_idx is not None and last_limited_idx != idx:
                 logger.info(f"[Mistral] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
-            logger.info(f"[Mistral] ✅ Key #{idx+1}/{total_keys} used ({MISTRAL_VISION_MODEL})")
+            logger.info(f"[Mistral] ✅ Key #{idx+1}/{total_keys} used ({model})")
             return text
         except Exception as e:
             last_error = e
@@ -486,6 +506,10 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
                 logger.warning(f"[Mistral] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
                 _nvidia_mark_blocked(idx)
                 last_limited_idx = idx
+                continue
+            if _mistral_is_tier_error(e):
+                logger.warning(f"[Mistral] model {model} not allowed — skipping it, trying next: {e}")
+                _mistral_bad_models[model] = time.time()
                 continue
             logger.error(f"[Mistral] Non-rate error: {e}")
             raise
@@ -499,7 +523,8 @@ async def _call_nvidia_with_rotation(image_base64: str, prompt: str) -> str:
 # calls above (_get_available_nvidia_client) since it's the same provider —
 # just without an image in the payload. Groq is now only a fallback here,
 # used ONLY when the Mistral pool itself is exhausted/rate-limited/erroring.
-MISTRAL_TEXT_MODEL = "mistral-large-2512"  # better Amharic quality; 250k TPM
+MISTRAL_TEXT_MODELS = ["ministral-14b-2512", "ministral-8b-2512", "mistral-small-2603"]
+MISTRAL_TEXT_MODEL = MISTRAL_TEXT_MODELS[0]
 
 
 async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400) -> str:
@@ -507,7 +532,7 @@ async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400
     if total_keys == 0:
         raise RuntimeError("MISTRAL_API_KEYS ያልተቀመጠ!")
 
-    max_attempts = total_keys * 3
+    max_attempts = total_keys * 3 + len(MISTRAL_TEXT_MODELS)
     last_error = None
     last_limited_idx = None
 
@@ -519,10 +544,11 @@ async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400
             await asyncio.sleep(2)
             continue
 
+        model = _mistral_pick_model(MISTRAL_TEXT_MODELS)
         try:
             response = await asyncio.to_thread(
-                lambda c=client: c.chat.completions.create(
-                    model=MISTRAL_TEXT_MODEL,
+                lambda c=client, m=model: c.chat.completions.create(
+                    model=m,
                     messages=messages,
                     max_tokens=max_tokens,
                     temperature=0.1,
@@ -541,7 +567,7 @@ async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400
                 continue
             if last_limited_idx is not None and last_limited_idx != idx:
                 logger.info(f"[Mistral Text] 🔄 Rotated: Key #{last_limited_idx+1} → Key #{idx+1}")
-            logger.info(f"[Mistral Text] ✅ Key #{idx+1}/{total_keys} used ({MISTRAL_TEXT_MODEL})")
+            logger.info(f"[Mistral Text] ✅ Key #{idx+1}/{total_keys} used ({model})")
             return text
         except Exception as e:
             last_error = e
@@ -551,6 +577,10 @@ async def _call_mistral_text_with_rotation(messages: list, max_tokens: int = 400
                 logger.warning(f"[Mistral Text] Key #{idx+1} rate limited — attempt {attempt+1}/{max_attempts}")
                 _nvidia_mark_blocked(idx)
                 last_limited_idx = idx
+                continue
+            if _mistral_is_tier_error(e):
+                logger.warning(f"[Mistral Text] model {model} not allowed — skipping it, trying next: {e}")
+                _mistral_bad_models[model] = time.time()
                 continue
             logger.error(f"[Mistral Text] Non-rate error: {e}")
             raise
