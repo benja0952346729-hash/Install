@@ -88,8 +88,8 @@ import random
     ASK_SEND_PLACE, ASK_SEND_AMOUNT, ASK_SEND_WINNER
 ) = range(16)
 
-# ጨዋታ ካለቀ በኋላ (ሁሉም ✅ ሆነው live/pre-booking ሲጀምር ወይም ውጤት ሲላክ) daily
-# profit ድጋሚ እንዳይቆጠር የሚከታተል set — game_id-based guard
+# áŒ¨á‹‹á‰³ áŠ«áˆˆá‰€ á‰ áŠ‹áˆ‹ (áˆáˆ‰áˆ âœ… áˆ†áŠá‹ live/pre-booking áˆ²áŒ€áˆáˆ­ á‹ˆá‹­áˆ á‹áŒ¤á‰µ áˆ²áˆ‹áŠ­) daily
+# profit á‹µáŒ‹áˆš áŠ¥áŠ•á‹³á‹­á‰†áŒ áˆ­ á‹¨áˆšáŠ¨á‰³á‰°áˆ set â€” game_id-based guard
 profit_counted_games = set()
 
 pending_ambiguous = {}
@@ -109,35 +109,35 @@ low_remaining_trackers = {}
 
 prebooking_groups = set()  # groups in silent pre-booking mode (live started, all paid)
 
-# FIX: winner photo ከተላከ እስከ _auto_newgame ድረስ ያለው 30 ሰከንድ ክፍተት —
-# board/ቀጣይ ዙር ገና ስላልተጠናቀቀ፣ በዚህ ጊዜ ውስጥ registration ቢሳካ ልክ እንደ
-# prebooking_groups reaction-only (👍) ብቻ ይሆን (text reply አይላክም)
+# FIX: winner photo áŠ¨á‰°áˆ‹áŠ¨ áŠ¥áˆµáŠ¨ _auto_newgame á‹µáˆ¨áˆµ á‹«áˆˆá‹ 30 áˆ°áŠ¨áŠ•á‹µ áŠ­áá‰°á‰µ â€”
+# board/á‰€áŒ£á‹­ á‹™áˆ­ áŒˆáŠ“ áˆµáˆ‹áˆá‰°áŒ áŠ“á‰€á‰€á£ á‰ á‹šáˆ… áŒŠá‹œ á‹áˆµáŒ¥ registration á‰¢áˆ³áŠ« áˆáŠ­ áŠ¥áŠ•á‹°
+# prebooking_groups reaction-only (ðŸ‘) á‰¥á‰» á‹­áˆ†áŠ• (text reply áŠ á‹­áˆ‹áŠ­áˆ)
 winner_pending_groups = set()
 handled_video_boards = set()  # game_ids where 30s+ video board replace already done
 
 # ============================================================
-# FIX: cross-group data leak — ቦቱ 4 የተለያዩ databases ስላሉት
-# (DATABASE_URLS rotation)፣ እያንዳንዱ DB የራሱ የተለየ game_settings.id
-# (SERIAL) አቆጣጠር አለው። ስለዚህ ሁለት የተለያዩ groups በአጋጣሚ ተመሳሳይ game_id
-# ቁጥር ሊኖራቸው ይችላል (ለምሳሌ Group A game_id=12 በ DB#1፣ Group B
-# game_id=12 በ DB#2)። ከላይ ያሉት global trackers (nekay_numbers,
-# nekay_active, ወዘተ) በ game_id ብቻ ስለሚቀመጡ ነበር፣ ይህ ማለት Group A's
-# /nekay ውሂብ በ Group B's board ላይ ይታይ ነበር (ወይም በተቃራኒው)።
-# FIX: ሁሉም እነዚህ trackers በ (group_id, game_id) combo ቁልፍ ብቻ
-# እንዲቀመጡ ተቀይረዋል — _gk() helper ይህን combo ቁልፍ ይገነባል።
+# FIX: cross-group data leak â€” á‰¦á‰± 4 á‹¨á‰°áˆˆá‹«á‹© databases áˆµáˆ‹áˆ‰á‰µ
+# (DATABASE_URLS rotation)á£ áŠ¥á‹«áŠ•á‹³áŠ•á‹± DB á‹¨áˆ«áˆ± á‹¨á‰°áˆˆá‹¨ game_settings.id
+# (SERIAL) áŠ á‰†áŒ£áŒ áˆ­ áŠ áˆˆá‹á¢ áˆµáˆˆá‹šáˆ… áˆáˆˆá‰µ á‹¨á‰°áˆˆá‹«á‹© groups á‰ áŠ áŒ‹áŒ£áˆš á‰°áˆ˜áˆ³áˆ³á‹­ game_id
+# á‰áŒ¥áˆ­ áˆŠáŠ–áˆ«á‰¸á‹ á‹­á‰½áˆ‹áˆ (áˆˆáˆáˆ³áˆŒ Group A game_id=12 á‰  DB#1á£ Group B
+# game_id=12 á‰  DB#2)á¢ áŠ¨áˆ‹á‹­ á‹«áˆ‰á‰µ global trackers (nekay_numbers,
+# nekay_active, á‹ˆá‹˜á‰°) á‰  game_id á‰¥á‰» áˆµáˆˆáˆšá‰€áˆ˜áŒ¡ áŠá‰ áˆ­á£ á‹­áˆ… áˆ›áˆˆá‰µ Group A's
+# /nekay á‹áˆ‚á‰¥ á‰  Group B's board áˆ‹á‹­ á‹­á‰³á‹­ áŠá‰ áˆ­ (á‹ˆá‹­áˆ á‰ á‰°á‰ƒáˆ«áŠ’á‹)á¢
+# FIX: áˆáˆ‰áˆ áŠ¥áŠá‹šáˆ… trackers á‰  (group_id, game_id) combo á‰áˆá á‰¥á‰»
+# áŠ¥áŠ•á‹²á‰€áˆ˜áŒ¡ á‰°á‰€á‹­áˆ¨á‹‹áˆ â€” _gk() helper á‹­áˆ…áŠ• combo á‰áˆá á‹­áŒˆáŠá‰£áˆá¢
 # ============================================================
 
 def _gk(group_id, game_id):
-    """Group-scoped key ለ in-memory trackers (cross-group game_id collision እንዳይፈጠር)"""
+    """Group-scoped key áˆˆ in-memory trackers (cross-group game_id collision áŠ¥áŠ•á‹³á‹­áˆáŒ áˆ­)"""
     return (group_id, game_id)
 
 URGENCY_MESSAGES = [
-    "ቤተሰብ ገባ ገባ በሉ🙏",
-    "ቤተሰብ ጫወታውን አናድምቅ 🙏",
-    "ቤተሰብ ቀሪ ቁጥሮች ብቻ አሉ ገባ ገባ በሉ 🙏",
+    "á‰¤á‰°áˆ°á‰¥ áŒˆá‰£ áŒˆá‰£ á‰ áˆ‰ðŸ™",
+    "á‰¤á‰°áˆ°á‰¥ áŒ«á‹ˆá‰³á‹áŠ• áŠ áŠ“á‹µáˆá‰… ðŸ™",
+    "á‰¤á‰°áˆ°á‰¥ á‰€áˆª á‰áŒ¥áˆ®á‰½ á‰¥á‰» áŠ áˆ‰ áŒˆá‰£ áŒˆá‰£ á‰ áˆ‰ ðŸ™",
 ]
 
-NEKAY_COUNTDOWN_MESSAGE = "ቤተሰብ ትንሽ ይጠብቁ ነቃይ ላወጣ ነው 🙏"
+NEKAY_COUNTDOWN_MESSAGE = "á‰¤á‰°áˆ°á‰¥ á‰µáŠ•áˆ½ á‹­áŒ á‰¥á‰ áŠá‰ƒá‹­ áˆ‹á‹ˆáŒ£ áŠá‹ ðŸ™"
 
 
 # ============================================================
@@ -328,8 +328,8 @@ def get_admin_group_id(user_id: int):
 
 
 # ============================================================
-# NEW — DEBOUNCED REMAINING/NEKAY RESEND (payment confirm → 5-second
-# debounce → resend ቀሪ/ነቃይ list ከታች, no duplicates ever)
+# NEW â€” DEBOUNCED REMAINING/NEKAY RESEND (payment confirm â†’ 5-second
+# debounce â†’ resend á‰€áˆª/áŠá‰ƒá‹­ list áŠ¨á‰³á‰½, no duplicates ever)
 # ============================================================
 _remaining_debounce_tasks = {}  # key: _gk(group_id, game_id) -> asyncio.Task
 
@@ -346,11 +346,11 @@ def _schedule_remaining_resend(bot, group_id: int, game_id: int):
 
 async def _debounced_resend_remaining_or_nekay(bot, group_id: int, game_id: int):
     """
-    Payment (photo/SMS) confirm → "መልካም ዕድል" ካለ በኋላ 5 ሰከንድ ምንም ተጨማሪ
-    ክፍያ/እንቅስቃሴ ከሌለ ቀሪ (ወይም ነቃይ mode ገባሪ ከሆነ ነቃይ) ዝርዝር ከታች resend
-    ይሁን — ነባሩን አጥፍቶ አዲስ ብቻ (duplicate በፍጹም እንዳይፈጠር)። 5 ሰከንድ ውስጥ
-    ሌላ ክፍያ ቢመጣ (_schedule_remaining_resend ተጠርቶ) ይህ task ይሰረዛል
-    (cancel) አዲስ 5 ሰከንድ ይጀምራል።
+    Payment (photo/SMS) confirm â†’ "áˆ˜áˆáŠ«áˆ á‹•á‹µáˆ" áŠ«áˆˆ á‰ áŠ‹áˆ‹ 5 áˆ°áŠ¨áŠ•á‹µ áˆáŠ•áˆ á‰°áŒ¨áˆ›áˆª
+    áŠ­áá‹«/áŠ¥áŠ•á‰…áˆµá‰ƒáˆ´ áŠ¨áˆŒáˆˆ á‰€áˆª (á‹ˆá‹­áˆ áŠá‰ƒá‹­ mode áŒˆá‰£áˆª áŠ¨áˆ†áŠ áŠá‰ƒá‹­) á‹áˆ­á‹áˆ­ áŠ¨á‰³á‰½ resend
+    á‹­áˆáŠ• â€” áŠá‰£áˆ©áŠ• áŠ áŒ¥áá‰¶ áŠ á‹²áˆµ á‰¥á‰» (duplicate á‰ ááŒ¹áˆ áŠ¥áŠ•á‹³á‹­áˆáŒ áˆ­)á¢ 5 áˆ°áŠ¨áŠ•á‹µ á‹áˆµáŒ¥
+    áˆŒáˆ‹ áŠ­áá‹« á‰¢áˆ˜áŒ£ (_schedule_remaining_resend á‰°áŒ áˆ­á‰¶) á‹­áˆ… task á‹­áˆ°áˆ¨á‹›áˆ
+    (cancel) áŠ á‹²áˆµ 5 áˆ°áŠ¨áŠ•á‹µ á‹­áŒ€áˆáˆ«áˆá¢
     """
     try:
         await asyncio.sleep(5)
@@ -415,9 +415,9 @@ async def _debounced_resend_remaining_or_nekay(bot, group_id: int, game_id: int)
 async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list, group_id: int = None):
     key = _gk(group_id, game_id)
     if key not in nekay_active:
-        # NEW: ነቃይ mode ባይሆንም እንኳ (ተራ ጨዋታ)፣ ክፍያ ከተረጋገጠ በኋላ ቀሪ ዝርዝር
-        # 5 ሰከንድ debounce ቆይቶ resend ይሁን (ከዚህ በፊት ምንም አልነበረም — ይሄ
-        # ክፍተት ነበር)
+        # NEW: áŠá‰ƒá‹­ mode á‰£á‹­áˆ†áŠ•áˆ áŠ¥áŠ•áŠ³ (á‰°áˆ« áŒ¨á‹‹á‰³)á£ áŠ­áá‹« áŠ¨á‰°áˆ¨áŒ‹áŒˆáŒ  á‰ áŠ‹áˆ‹ á‰€áˆª á‹áˆ­á‹áˆ­
+        # 5 áˆ°áŠ¨áŠ•á‹µ debounce á‰†á‹­á‰¶ resend á‹­áˆáŠ• (áŠ¨á‹šáˆ… á‰ áŠá‰µ áˆáŠ•áˆ áŠ áˆáŠá‰ áˆ¨áˆ â€” á‹­áˆ„
+        # áŠ­áá‰°á‰µ áŠá‰ áˆ­)
         _schedule_remaining_resend(bot, group_id, game_id)
         return
 
@@ -475,8 +475,8 @@ async def nekay_payment_cb(bot, game_id: int, telegram_id: int, confirmed: list,
                 new_msg = await bot.send_message(chat_id=_group_id, text=board_text)
                 update_board_message_id(game_id, new_msg.message_id)
 
-    # NEW: ነቃይ ዝርዝር ወዲያውኑ ሳይሆን 5 ሰከንድ debounce ቆይቶ resend ይሁን (ሌላ
-    # ክፍያ/እንቅስቃሴ በዚያ 5 ሰከንድ ውስጥ ቢመጣ timer ይታደሳል)
+    # NEW: áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ á‹ˆá‹²á‹«á‹áŠ‘ áˆ³á‹­áˆ†áŠ• 5 áˆ°áŠ¨áŠ•á‹µ debounce á‰†á‹­á‰¶ resend á‹­áˆáŠ• (áˆŒáˆ‹
+    # áŠ­áá‹«/áŠ¥áŠ•á‰…áˆµá‰ƒáˆ´ á‰ á‹šá‹« 5 áˆ°áŠ¨áŠ•á‹µ á‹áˆµáŒ¥ á‰¢áˆ˜áŒ£ timer á‹­á‰³á‹°áˆ³áˆ)
     _schedule_remaining_resend(bot, group_id, game_id)
 
     fresh = get_active_settings(group_id=_group_id)
@@ -493,9 +493,9 @@ def _increment_counter(group_id: int) -> bool:
 
 
 # ============================================================
-# FIX #6: fire-and-forget helpers — reply/reaction Telegram API
-# call ን board edit ከመጀመሩ በፊት እንዲጠብቅ ላለማድረግ (ቀድሞ sequential ስለነበር
-# board edit ይዘገይ ነበር)። ውጤቱን አንጠብቅም፣ ስህተት ቢፈጠር log ብቻ እናደርጋለን።
+# FIX #6: fire-and-forget helpers â€” reply/reaction Telegram API
+# call áŠ• board edit áŠ¨áˆ˜áŒ€áˆ˜áˆ© á‰ áŠá‰µ áŠ¥áŠ•á‹²áŒ á‰¥á‰… áˆ‹áˆˆáˆ›á‹µáˆ¨áŒ (á‰€á‹µáˆž sequential áˆµáˆˆáŠá‰ áˆ­
+# board edit á‹­á‹˜áŒˆá‹­ áŠá‰ áˆ­)á¢ á‹áŒ¤á‰±áŠ• áŠ áŠ•áŒ á‰¥á‰…áˆá£ áˆµáˆ…á‰°á‰µ á‰¢áˆáŒ áˆ­ log á‰¥á‰» áŠ¥áŠ“á‹°áˆ­áŒ‹áˆˆáŠ•á¢
 # ============================================================
 
 async def _safe_reply_text(msg, text: str):
@@ -505,7 +505,7 @@ async def _safe_reply_text(msg, text: str):
         logging.warning(f"[SafeReply] Error: {e}")
 
 
-async def _safe_set_reaction(bot, chat_id: int, message_id: int, emoji: str = "👍"):
+async def _safe_set_reaction(bot, chat_id: int, message_id: int, emoji: str = "ðŸ‘"):
     try:
         try:
             from telegram import ReactionTypeEmoji
@@ -520,8 +520,8 @@ async def _safe_set_reaction(bot, chat_id: int, message_id: int, emoji: str = "�
 
 
 # ============================================================
-# FIX #4: admin confirmation messages ("✅ ...") ከተላኩ ከ1.5-2 ሰከንድ
-# በኋላ በራሳቸው ይጠፉ (admin ካየ በቂ ነው)።
+# FIX #4: admin confirmation messages ("âœ… ...") áŠ¨á‰°áˆ‹áŠ© áŠ¨1.5-2 áˆ°áŠ¨áŠ•á‹µ
+# á‰ áŠ‹áˆ‹ á‰ áˆ«áˆ³á‰¸á‹ á‹­áŒ á‰ (admin áŠ«á‹¨ á‰ á‰‚ áŠá‹)á¢
 # ============================================================
 
 async def _send_temp_admin_message(bot, chat_id: int, text: str, delay: float = 1.75):
@@ -543,28 +543,28 @@ async def _send_temp_admin_message(bot, chat_id: int, text: str, delay: float = 
 
 
 # ============================================================
-# NEW — winner "🔥 reaction" balance-clear feature: admin puts a native
-# 🔥 reaction on any message previously sent BY a recent winner (in the
-# group) → that winner's balance ONLY gets cleared (exactly like
+# NEW â€” winner "ðŸ”¥ reaction" balance-clear feature: admin puts a native
+# ðŸ”¥ reaction on any message previously sent BY a recent winner (in the
+# group) â†’ that winner's balance ONLY gets cleared (exactly like
 # /clearbalance @username, but by telegram_id directly). Board/paid
-# status is untouched — this only zeroes user_balance.
+# status is untouched â€” this only zeroes user_balance.
 #
 # Telegram's message_reaction_updated update does not include who wrote
-# the original (reacted-to) message — only who reacted and which
+# the original (reacted-to) message â€” only who reacted and which
 # chat/message_id. So we keep a small bounded in-memory cache mapping
 # (chat_id, message_id) -> (telegram_id, user_name) for recent group
 # text messages, populated (read-only/additive) inside
 # handle_group_message. This does not alter any existing behavior.
 # ============================================================
 # ============================================================
-# NEW — winner "🔥 reaction" balance-clear feature: admin puts a native
-# 🔥 reaction on any message previously sent BY a recent winner (in the
-# group) → that winner's balance ONLY gets cleared (exactly like
+# NEW â€” winner "ðŸ”¥ reaction" balance-clear feature: admin puts a native
+# ðŸ”¥ reaction on any message previously sent BY a recent winner (in the
+# group) â†’ that winner's balance ONLY gets cleared (exactly like
 # /clearbalance @username, but by telegram_id directly). Board/paid
-# status is untouched — this only zeroes user_balance.
+# status is untouched â€” this only zeroes user_balance.
 #
 # Telegram's message_reaction_updated update does not include who wrote
-# the original (reacted-to) message — only who reacted and which
+# the original (reacted-to) message â€” only who reacted and which
 # chat/message_id. This mapping (chat_id, message_id) -> telegram_id is
 # stored in the DB (message_senders table, via database.py) rather than
 # an in-memory cache, so it survives bot restarts and scales correctly
@@ -582,10 +582,10 @@ def _record_group_message(chat_id: int, message_id: int, telegram_id: int, user_
 
 
 # ============================================================
-# NEW — "እሺ/eshi NUM[+SLOT][✅] ..." admin replacement feature: bot's
-# earlier "ተይዞብሃል"/booking_taken rejection reply message_id ተመዝግቦ
-# ይቀመጣል፣ ስለዚህ admin ተጠቃሚው ኦርጅናል message ላይ reply አድርጎ "እሺ ..." ሲል
-# ያንን ነባር rejection message ማጥፋት ይቻላል።
+# NEW â€” "# NUM[+SLOT][âœ…] ..." admin replacement feature: bot's
+# earlier "á‰°á‹­á‹žá‰¥áˆƒáˆ"/booking_taken rejection reply message_id á‰°áˆ˜á‹áŒá‰¦
+# á‹­á‰€áˆ˜áŒ£áˆá£ áˆµáˆˆá‹šáˆ… admin á‰°áŒ á‰ƒáˆšá‹ áŠ¦áˆ­áŒ…áŠ“áˆ message áˆ‹á‹­ reply áŠ á‹µáˆ­áŒŽ "# ..." áˆ²áˆ
+# á‹«áŠ•áŠ• áŠá‰£áˆ­ rejection message áˆ›áŒ¥á‹á‰µ á‹­á‰»áˆ‹áˆá¢
 # key: (group_id, user_message_id) -> bot_reply_message_id
 # ============================================================
 _taken_rejection_msgs = {}
@@ -607,7 +607,7 @@ async def _safe_reply_text_and_track(msg, text: str, group_id: int):
 def _build_nekay_from_snap(snap: dict) -> list:
     result = []
     for number, slot in sorted(snap.items()):
-        # 0 = ሙሉ nekay (full)፣ 2/-1/-2 ሁሉም half/slot-specific nekay ናቸው
+        # 0 = áˆ™áˆ‰ nekay (full)á£ 2/-1/-2 áˆáˆ‰áˆ half/slot-specific nekay áŠ“á‰¸á‹
         is_half = (slot != 0)
         result.append((number, is_half))
     return result
@@ -675,7 +675,7 @@ async def _countdown_task(bot, game_id: int, group_id: int, warn_seconds: int = 
 # ============================================================
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🤖 Bot ተሰናድቷል!")
+    await update.message.reply_text("ðŸ¤– Bot á‰°áˆ°áŠ“á‹µá‰·áˆ!")
 
 
 # ============================================================
@@ -685,10 +685,10 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def setgame_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id if update.effective_chat.type != "private" else None
     if not is_admin(update.effective_user.id, group_id):
-        await update.message.reply_text("❌ Admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Admin á‰¥á‰» áŠá‹!")
         return ConversationHandler.END
     ctx.user_data["setup_group_id"] = group_id
-    await update.message.reply_text("🎮 ስንት ቁጥሮች አሉ? (ለምሳሌ: 100)")
+    await update.message.reply_text("ðŸŽ® áˆµáŠ•á‰µ á‰áŒ¥áˆ®á‰½ áŠ áˆ‰? (áˆˆáˆáˆ³áˆŒ: 100)")
     return ASK_TOTAL
 
 
@@ -696,9 +696,9 @@ async def ask_total(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["total_numbers"] = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
         return ASK_TOTAL
-    await update.message.reply_text("👥 ለ1 ሰው ስንት ቁጥሮች? (ለምሳሌ: 5)")
+    await update.message.reply_text("ðŸ‘¥ áˆˆ1 áˆ°á‹ áˆµáŠ•á‰µ á‰áŒ¥áˆ®á‰½? (áˆˆáˆáˆ³áˆŒ: 5)")
     return ASK_PER_PERSON
 
 
@@ -706,9 +706,9 @@ async def ask_per_person(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["numbers_per_person"] = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
         return ASK_PER_PERSON
-    await update.message.reply_text("💰 ሙሉ ዋጋ ስንት ብር?")
+    await update.message.reply_text("ðŸ’° áˆ™áˆ‰ á‹‹áŒ‹ áˆµáŠ•á‰µ á‰¥áˆ­?")
     return ASK_PRICE_FULL
 
 
@@ -716,23 +716,23 @@ async def ask_price_full(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["price_full"] = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
         return ASK_PRICE_FULL
-    await update.message.reply_text("💳 ግማሽ ዋጋ አለ? (ቁጥር ጻፍ ወይም 'አይደለም')")
+    await update.message.reply_text("ðŸ’³ áŒáˆ›áˆ½ á‹‹áŒ‹ áŠ áˆˆ? (á‰áŒ¥áˆ­ áŒ»á á‹ˆá‹­áˆ 'áŠ á‹­á‹°áˆˆáˆ')")
     return ASK_PRICE_HALF
 
 
 async def ask_price_half(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    if text in ["አይደለም", "aydelem", "no", "የለም"]:
+    if text in ["áŠ á‹­á‹°áˆˆáˆ", "aydelem", "no", "á‹¨áˆˆáˆ"]:
         ctx.user_data["price_half"] = None
     else:
         try:
             ctx.user_data["price_half"] = int(text)
         except ValueError:
-            await update.message.reply_text("❌ ቁጥር ወይም 'አይደለም' ጻፍ!")
+            await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‹ˆá‹­áˆ 'áŠ á‹­á‹°áˆˆáˆ' áŒ»á!")
             return ASK_PRICE_HALF
-    await update.message.reply_text("🥇 1ኛ ሽልማት ስንት ብር?")
+    await update.message.reply_text("ðŸ¥‡ 1áŠ› áˆ½áˆáˆ›á‰µ áˆµáŠ•á‰µ á‰¥áˆ­?")
     return ASK_PRIZE_1
 
 
@@ -740,58 +740,58 @@ async def ask_prize_1(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["prize_1st"] = int(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
         return ASK_PRIZE_1
-    await update.message.reply_text("🥈 2ኛ ሽልማት? (ከሌለ 'አይደለም')")
+    await update.message.reply_text("ðŸ¥ˆ 2áŠ› áˆ½áˆáˆ›á‰µ? (áŠ¨áˆŒáˆˆ 'áŠ á‹­á‹°áˆˆáˆ')")
     return ASK_PRIZE_2
 
 
 async def ask_prize_2(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    if text in ["አይደለም", "aydelem", "no", "የለም"]:
+    if text in ["áŠ á‹­á‹°áˆˆáˆ", "aydelem", "no", "á‹¨áˆˆáˆ"]:
         ctx.user_data["prize_2nd"] = None
     else:
         try:
             ctx.user_data["prize_2nd"] = int(text)
         except ValueError:
-            await update.message.reply_text("❌ ቁጥር ወይም 'አይደለም' ጻፍ!")
+            await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‹ˆá‹­áˆ 'áŠ á‹­á‹°áˆˆáˆ' áŒ»á!")
             return ASK_PRIZE_2
-    await update.message.reply_text("🥉 3ኛ ሽልማት? (ከሌለ 'አይደለም')")
+    await update.message.reply_text("ðŸ¥‰ 3áŠ› áˆ½áˆáˆ›á‰µ? (áŠ¨áˆŒáˆˆ 'áŠ á‹­á‹°áˆˆáˆ')")
     return ASK_PRIZE_3
 
 
 async def ask_prize_3(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    if text in ["አይደለም", "aydelem", "no", "የለም"]:
+    if text in ["áŠ á‹­á‹°áˆˆáˆ", "aydelem", "no", "á‹¨áˆˆáˆ"]:
         ctx.user_data["prize_3rd"] = None
     else:
         try:
             ctx.user_data["prize_3rd"] = int(text)
         except ValueError:
-            await update.message.reply_text("❌ ቁጥር ወይም 'አይደለም' ጻፍ!")
+            await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‹ˆá‹­áˆ 'áŠ á‹­á‹°áˆˆáˆ' áŒ»á!")
             return ASK_PRIZE_3
-    await update.message.reply_text("💳 Payment info ጻፍ (CBE, Telebirr...):")
+    await update.message.reply_text("ðŸ’³ Payment info áŒ»á (CBE, Telebirr...):")
     return ASK_PAYMENT
 
 
 async def ask_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     ctx.user_data["payment_info"] = update.message.text.strip()
     await update.message.reply_text(
-        "📌 Game rule ጻፍ (board ላይ ከላይ ይታያል)\n"
-        "ወይም 'skip' ካልፈለጋቸህ"
+        "ðŸ“Œ Game rule áŒ»á (board áˆ‹á‹­ áŠ¨áˆ‹á‹­ á‹­á‰³á‹«áˆ)\n"
+        "á‹ˆá‹­áˆ 'skip' áŠ«áˆáˆáˆˆáŒ‹á‰¸áˆ…"
     )
     return ASK_GAME_RULE
 
 
 async def ask_game_rule(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
-    if text.lower() in ["skip", "አይደለም", "no", "የለም"]:
+    if text.lower() in ["skip", "áŠ á‹­á‹°áˆˆáˆ", "no", "á‹¨áˆˆáˆ"]:
         ctx.user_data["game_rule"] = None
     else:
         ctx.user_data["game_rule"] = text
     await update.message.reply_text(
-        "🔣 Slot symbol ምረጥ\n"
-        "ለምሳሌ: # ⭐ 🎯 🔥 ወይም ባዶ (skip)\n"
+        "ðŸ”£ Slot symbol áˆáˆ¨áŒ¥\n"
+        "áˆˆáˆáˆ³áˆŒ: # â­ ðŸŽ¯ ðŸ”¥ á‹ˆá‹­áˆ á‰£á‹¶ (skip)\n"
         "Default: #"
     )
     return ASK_SLOT_SYMBOL
@@ -801,31 +801,31 @@ async def ask_slot_symbol(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text.lower() in ["skip", "default", "#"]:
         ctx.user_data["slot_symbol"] = "#"
-    elif text.lower() in ["ባዶ", "none", "empty", ""]:
+    elif text.lower() in ["á‰£á‹¶", "none", "empty", ""]:
         ctx.user_data["slot_symbol"] = ""
     else:
         ctx.user_data["slot_symbol"] = text
     await update.message.reply_text(
-        "⏳ ተነቃይ countdown አለ?\n"
-        "(አዎ / አይደለም)"
+        "â³ á‰°áŠá‰ƒá‹­ countdown áŠ áˆˆ?\n"
+        "(áŠ á‹Ž / áŠ á‹­á‹°áˆˆáˆ)"
     )
     return ASK_COUNTDOWN_ENABLED
 
 
 async def ask_countdown_enabled(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip().lower()
-    yes = text in ["አዎ", "awo", "yes", "aha", "አዎን"]
+    yes = text in ["áŠ á‹Ž", "awo", "yes", "aha", "áŠ á‹ŽáŠ•"]
     ctx.user_data["countdown_enabled"] = yes
 
     if yes:
         await update.message.reply_text(
-            "⏱️ ስንት ደቂቃ?\n"
-            "0.5 = 30 ሰከንድ\n"
-            "1 = 1 ደቂቃ\n"
-            "2 = 2 ደቂቃ\n"
-            "5 = 5 ደቂቃ\n"
-            "10 = 10 ደቂቃ\n"
-            "(0.5 እስከ 10)"
+            "â±ï¸ áˆµáŠ•á‰µ á‹°á‰‚á‰ƒ?\n"
+            "0.5 = 30 áˆ°áŠ¨áŠ•á‹µ\n"
+            "1 = 1 á‹°á‰‚á‰ƒ\n"
+            "2 = 2 á‹°á‰‚á‰ƒ\n"
+            "5 = 5 á‹°á‰‚á‰ƒ\n"
+            "10 = 10 á‹°á‰‚á‰ƒ\n"
+            "(0.5 áŠ¥áˆµáŠ¨ 10)"
         )
         return ASK_COUNTDOWN_MINUTES
     else:
@@ -840,14 +840,14 @@ async def ask_countdown_minutes(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             raise ValueError
         ctx.user_data["countdown_minutes"] = mins
     except ValueError:
-        await update.message.reply_text("❌ 0.5 እስከ 10 ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ 0.5 áŠ¥áˆµáŠ¨ 10 á‰¥á‰» áŒ»á!")
         return ASK_COUNTDOWN_MINUTES
     return await ask_profit_per_game_prompt(update, ctx)
 
 
 async def ask_profit_per_game_prompt(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📈 ከ1 ጨዋታ ስንት ብር profit ያገኛሉ? (ለምሳሌ: 300)"
+        "ðŸ“ˆ áŠ¨1 áŒ¨á‹‹á‰³ áˆµáŠ•á‰µ á‰¥áˆ­ profit á‹«áŒˆáŠ›áˆ‰? (áˆˆáˆáˆ³áˆŒ: 300)"
     )
     return ASK_PROFIT_PER_GAME
 
@@ -856,7 +856,7 @@ async def ask_profit_per_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         ctx.user_data["profit_per_game"] = float(update.message.text.strip())
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ! (ለምሳሌ: 300)")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á! (áˆˆáˆáˆ³áˆŒ: 300)")
         return ASK_PROFIT_PER_GAME
     return await _finish_setgame(update, ctx)
 
@@ -864,10 +864,10 @@ async def ask_profit_per_game(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _finish_setgame(update, ctx):
     setup_group_id = ctx.user_data.get("setup_group_id")
 
-    # NEW: /newgame ራሱ ከዚህ በፊት game switch ሲያደርግ (clear_game + in-memory
-    # nekay/countdown state ማጽዳት) የሚያደርገውን ተመሳሳይ cleanup — /setgame ግን
-    # ከዚህ በፊት ይህን አያደርግም ነበር (ወጥነት ማጣት፣ stale winners/nekay state
-    # እንዲቀጥል ምክንያት ሆኖ ነበር)። አዲሱን game_id ከመፍጠሩ በፊት የቆየውን ያጸዳል።
+    # NEW: /newgame áˆ«áˆ± áŠ¨á‹šáˆ… á‰ áŠá‰µ game switch áˆ²á‹«á‹°áˆ­áŒ (clear_game + in-memory
+    # nekay/countdown state áˆ›áŒ½á‹³á‰µ) á‹¨áˆšá‹«á‹°áˆ­áŒˆá‹áŠ• á‰°áˆ˜áˆ³áˆ³á‹­ cleanup â€” /setgame áŒáŠ•
+    # áŠ¨á‹šáˆ… á‰ áŠá‰µ á‹­áˆ…áŠ• áŠ á‹«á‹°áˆ­áŒáˆ áŠá‰ áˆ­ (á‹ˆáŒ¥áŠá‰µ áˆ›áŒ£á‰µá£ stale winners/nekay state
+    # áŠ¥áŠ•á‹²á‰€áŒ¥áˆ áˆáŠ­áŠ•á‹«á‰µ áˆ†áŠ– áŠá‰ áˆ­)á¢ áŠ á‹²áˆ±áŠ• game_id áŠ¨áˆ˜ááŒ áˆ© á‰ áŠá‰µ á‹¨á‰†á‹¨á‹áŠ• á‹«áŒ¸á‹³áˆá¢
     old_settings = get_active_settings(group_id=setup_group_id)
     if old_settings:
         old_group_id = setup_group_id or old_settings.get("group_id") or GROUP_ID
@@ -902,19 +902,19 @@ async def _finish_setgame(update, ctx):
         msg = await ctx.bot.send_message(chat_id=target, text=board_text)
         update_board_message_id(game_id, msg.message_id)
 
-    countdown_status = "✅ On" if ctx.user_data.get("countdown_enabled") else "❌ Off"
+    countdown_status = "âœ… On" if ctx.user_data.get("countdown_enabled") else "âŒ Off"
     mins = ctx.user_data.get("countdown_minutes", 0)
     await update.message.reply_text(
-        f"✅ Settings ተቀምጧል!\n"
+        f"âœ… Settings á‰°á‰€áˆáŒ§áˆ!\n"
         f"Game ID: {game_id}\n"
-        f"⏳ Countdown: {countdown_status}"
-        + (f" ({mins} ደቂቃ)" if ctx.user_data.get("countdown_enabled") else "")
+        f"â³ Countdown: {countdown_status}"
+        + (f" ({mins} á‹°á‰‚á‰ƒ)" if ctx.user_data.get("countdown_enabled") else "")
     )
     return ConversationHandler.END
 
 
 async def cancel_setup(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ Setup ተሰርዟል።")
+    await update.message.reply_text("âŒ Setup á‰°áˆ°áˆ­á‹Ÿáˆá¢")
     return ConversationHandler.END
 
 
@@ -933,15 +933,15 @@ async def handle_setcountdown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         group_id = get_admin_group_id(user_id)
         if not group_id:
-            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
             return
 
     parts = update.message.text.strip().split()
     if len(parts) < 2:
         await update.message.reply_text(
-            "❌ ምሳሌ: /setcountdown 2\n"
-            "0 = countdown አጥፋ\n"
-            "0.5, 1, 2, 5, 10 = ደቂቃ"
+            "âŒ áˆáˆ³áˆŒ: /setcountdown 2\n"
+            "0 = countdown áŠ áŒ¥á‹\n"
+            "0.5, 1, 2, 5, 10 = á‹°á‰‚á‰ƒ"
         )
         return
 
@@ -950,21 +950,21 @@ async def handle_setcountdown(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if mins != 0 and (mins < 0.5 or mins > 10):
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ 0 ወይም 0.5 እስከ 10 ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ 0 á‹ˆá‹­áˆ 0.5 áŠ¥áˆµáŠ¨ 10 á‰¥á‰» áŒ»á!")
         return
 
     settings = get_active_settings(group_id=group_id)
     if not settings:
-        await update.message.reply_text("❌ Active game የለም!")
+        await update.message.reply_text("âŒ Active game á‹¨áˆˆáˆ!")
         return
 
     enabled = mins > 0
     update_countdown_settings(settings["id"], enabled, mins if enabled else 0)
 
     if enabled:
-        await update.message.reply_text(f"✅ Countdown {mins} ደቂቃ ተቀምጧል!")
+        await update.message.reply_text(f"âœ… Countdown {mins} á‹°á‰‚á‰ƒ á‰°á‰€áˆáŒ§áˆ!")
     else:
-        await update.message.reply_text("✅ Countdown ጠፍቷል!")
+        await update.message.reply_text("âœ… Countdown áŒ áá‰·áˆ!")
 
 
 # ============================================================
@@ -982,21 +982,21 @@ async def handle_showslots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         group_id = get_admin_group_id(user_id)
         if not group_id:
-            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
             return
 
     parts = update.message.text.strip().split()
     if len(parts) < 2 or parts[1].lower() not in ("on", "off"):
         await update.message.reply_text(
-            "❌ ምሳሌ: /showslots on\n"
+            "âŒ áˆáˆ³áˆŒ: /showslots on\n"
             "       /showslots off\n"
-            "sub-slots ላይ ስም ያሳያል / ያጠፋል"
+            "sub-slots áˆ‹á‹­ áˆµáˆ á‹«áˆ³á‹«áˆ / á‹«áŒ á‹áˆ"
         )
         return
 
     settings = get_active_settings(group_id=group_id)
     if not settings:
-        await update.message.reply_text("❌ Active game የለም!")
+        await update.message.reply_text("âŒ Active game á‹¨áˆˆáˆ!")
         return
 
     enabled = parts[1].lower() == "on"
@@ -1030,7 +1030,7 @@ async def handle_showslots(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
             update_board_message_id(fresh["id"], new_msg.message_id)
 
-    status = "✅ On" if enabled else "❌ Off"
+    status = "âœ… On" if enabled else "âŒ Off"
     await update.message.reply_text(f"Sub-slots display: {status}")
 
 
@@ -1046,40 +1046,40 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     parts = update.message.text.strip().split()
     if len(parts) < 2:
         await update.message.reply_text(
-            "❌ ምሳሌ: /nekay 5 10+ 15 21\n"
-            "+ = ግማሽ (ለምሳሌ 10+)\n"
-            "5+1 = ቁጥር 5 slot 1 ብቻ\n"
-            "ቀድሞ የነበረውን ነቃይ ሁሉ ይተካል"
+            "âŒ áˆáˆ³áˆŒ: /nekay 5 10+ 15 21\n"
+            "+ = áŒáˆ›áˆ½ (áˆˆáˆáˆ³áˆŒ 10+)\n"
+            "5+1 = á‰áŒ¥áˆ­ 5 slot 1 á‰¥á‰»\n"
+            "á‰€á‹µáˆž á‹¨áŠá‰ áˆ¨á‹áŠ• áŠá‰ƒá‹­ áˆáˆ‰ á‹­á‰°áŠ«áˆ"
         )
         return
 
     settings = get_active_settings(group_id=group_id)
     if not settings:
-        await update.message.reply_text("❌ Active game የለም!")
+        await update.message.reply_text("âŒ Active game á‹¨áˆˆáˆ!")
         return
 
     game_id = settings["id"]
     per_person = settings["numbers_per_person"]
     taken = get_taken_numbers(game_id)
 
-    numbers = []   # (num, is_half, slot_only) — slot_only=None means all slots
+    numbers = []   # (num, is_half, slot_only) â€” slot_only=None means all slots
     errors = []
 
     for part in parts[1:]:
-        # NUM+SLOT pattern (ለምሳሌ 5+1 ወይም 5+2)
+        # NUM+SLOT pattern (áˆˆáˆáˆ³áˆŒ 5+1 á‹ˆá‹­áˆ 5+2)
         import re as _re
         slot_match = _re.match(r'^(\d+)\+(\d+)$', part)
         if slot_match:
             num = int(slot_match.group(1))
             slot = int(slot_match.group(2))
-            # ✅ FIX: 1-5 ቡድን ቢሆን (numbers_per_person>1)፣ ማንኛውም ቁጥር
-            # በዚያ ቡድን ውስጥ (ለምሳሌ 4) → group's first number (1) ይሆናል፣
-            # ምክንያቱም DB ላይ የተመዘገበው በ group start ብቻ ነው
+            # âœ… FIX: 1-5 á‰¡á‹µáŠ• á‰¢áˆ†áŠ• (numbers_per_person>1)á£ áˆ›áŠ•áŠ›á‹áˆ á‰áŒ¥áˆ­
+            # á‰ á‹šá‹« á‰¡á‹µáŠ• á‹áˆµáŒ¥ (áˆˆáˆáˆ³áˆŒ 4) â†’ group's first number (1) á‹­áˆ†áŠ“áˆá£
+            # áˆáŠ­áŠ•á‹«á‰±áˆ DB áˆ‹á‹­ á‹¨á‰°áˆ˜á‹˜áŒˆá‰ á‹ á‰  group start á‰¥á‰» áŠá‹
             actual_num = get_group_start(num, per_person) if per_person > 1 else num
             if actual_num < 1 or actual_num > settings["total_numbers"]:
                 errors.append(part)
                 continue
-            # ያ slot exist ያረጋግጥ
+            # á‹« slot exist á‹«áˆ¨áŒ‹áŒáŒ¥
             slots_for_num = taken.get(actual_num, [])
             slot_exists = any(s[2] == slot for s in slots_for_num)
             if not slot_exists:
@@ -1096,26 +1096,26 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             errors.append(part)
             continue
-        # ✅ FIX: እዚህም ተመሳሳይ group-start mapping
+        # âœ… FIX: áŠ¥á‹šáˆ…áˆ á‰°áˆ˜áˆ³áˆ³á‹­ group-start mapping
         actual_num = get_group_start(num, per_person) if per_person > 1 else num
         if actual_num < 1 or actual_num > settings["total_numbers"]:
             errors.append(part)
             continue
 
-        # NUM+ ሲሆን 2 slots ካለ አይሰራም
+        # NUM+ áˆ²áˆ†áŠ• 2 slots áŠ«áˆˆ áŠ á‹­áˆ°áˆ«áˆ
         if is_half:
             slots_for_num = taken.get(actual_num, [])
             if len(slots_for_num) > 1:
-                errors.append(part + " (2 slots አለ — 5+1 ወይም 5+2 ጠቀስ)")
+                errors.append(part + " (2 slots áŠ áˆˆ â€” 5+1 á‹ˆá‹­áˆ 5+2 áŒ á‰€áˆµ)")
                 continue
 
         numbers.append((actual_num, is_half, None))
 
     if not numbers:
-        await update.message.reply_text("❌ ትክክለኛ ቁጥር አልተገኘም!")
+        await update.message.reply_text("âŒ á‰µáŠ­áŠ­áˆˆáŠ› á‰áŒ¥áˆ­ áŠ áˆá‰°áŒˆáŠ˜áˆ!")
         return
 
-    # DB ላይ nekay ያደርጋል — slot_only ካለ ያ slot ብቻ
+    # DB áˆ‹á‹­ nekay á‹«á‹°áˆ­áŒ‹áˆ â€” slot_only áŠ«áˆˆ á‹« slot á‰¥á‰»
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("UPDATE registrations SET is_nekay=FALSE WHERE game_id=%s AND is_nekay=TRUE", (game_id,))
@@ -1123,20 +1123,20 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     snap = {}
     for num, is_half, slot_only in numbers:
         if slot_only is not None:
-            # slot ብቻ
+            # slot á‰¥á‰»
             cur.execute("""
                 UPDATE registrations SET is_nekay=TRUE
                 WHERE game_id=%s AND number=%s AND slot=%s
             """, (game_id, num, slot_only))
-            # FIX: የትኛው slot እንደሆነ ተለይቶ ይቀመጥ (-1 = slot 1, -2 = slot 2)
-            # ስለዚህ user ሲይዝ ትክክለኛው slot force-overwrite ይደረግለታል
+            # FIX: á‹¨á‰µáŠ›á‹ slot áŠ¥áŠ•á‹°áˆ†áŠ á‰°áˆˆá‹­á‰¶ á‹­á‰€áˆ˜áŒ¥ (-1 = slot 1, -2 = slot 2)
+            # áˆµáˆˆá‹šáˆ… user áˆ²á‹­á‹ á‰µáŠ­áŠ­áˆˆáŠ›á‹ slot force-overwrite á‹­á‹°áˆ¨áŒáˆˆá‰³áˆ
             snap[num] = -1 if slot_only == 1 else -2
         else:
-            # FIX: "NUM+" (የትኛው slot እንዳልተገለጸ) — ይህ ብዙ ጊዜ ማለት የሚፈልገው
-            # "ክፍት (ገና ያልተያዘውን) slot እንደ nekay አሳይ/አስተዋውቅ" ማለት ነው፣
-            # "ነባሩን registration nekay አድርግ" ማለት አይደለም። ስለዚህ የትኛው slot
-            # በትክክል ክፍት እንደሆነ አረጋግጦ ያንን ብቻ ይነካል (placeholder INSERT)፣
-            # ነባር (የተከፈለ) registration ፈጽሞ አይነካም።
+            # FIX: "NUM+" (á‹¨á‰µáŠ›á‹ slot áŠ¥áŠ•á‹³áˆá‰°áŒˆáˆˆáŒ¸) â€” á‹­áˆ… á‰¥á‹™ áŒŠá‹œ áˆ›áˆˆá‰µ á‹¨áˆšáˆáˆáŒˆá‹
+            # "áŠ­áá‰µ (áŒˆáŠ“ á‹«áˆá‰°á‹«á‹˜á‹áŠ•) slot áŠ¥áŠ•á‹° nekay áŠ áˆ³á‹­/áŠ áˆµá‰°á‹‹á‹á‰…" áˆ›áˆˆá‰µ áŠá‹á£
+            # "áŠá‰£áˆ©áŠ• registration nekay áŠ á‹µáˆ­áŒ" áˆ›áˆˆá‰µ áŠ á‹­á‹°áˆˆáˆá¢ áˆµáˆˆá‹šáˆ… á‹¨á‰µáŠ›á‹ slot
+            # á‰ á‰µáŠ­áŠ­áˆ áŠ­áá‰µ áŠ¥áŠ•á‹°áˆ†áŠ áŠ áˆ¨áŒ‹áŒáŒ¦ á‹«áŠ•áŠ• á‰¥á‰» á‹­áŠáŠ«áˆ (placeholder INSERT)á£
+            # áŠá‰£áˆ­ (á‹¨á‰°áŠ¨áˆáˆˆ) registration áˆáŒ½áˆž áŠ á‹­áŠáŠ«áˆá¢
             slots_for_num = taken.get(num, [])
             existing_slots = {s[2] for s in slots_for_num}
 
@@ -1148,20 +1148,20 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 elif not existing_slots:
                     target_slot = 1
                 else:
-                    errors.append(part + " (ሙሉ ተይዟል)")
+                    errors.append(part + " (áˆ™áˆ‰ á‰°á‹­á‹Ÿáˆ)")
                     continue
 
                 if target_slot in existing_slots:
-                    # ያ specific slot ራሱ ነባር registration ስላለው ብቻ —
-                    # ያንን ብቻ nekay አድርግ (ነባር ሎጂክ)
+                    # á‹« specific slot áˆ«áˆ± áŠá‰£áˆ­ registration áˆµáˆ‹áˆˆá‹ á‰¥á‰» â€”
+                    # á‹«áŠ•áŠ• á‰¥á‰» nekay áŠ á‹µáˆ­áŒ (áŠá‰£áˆ­ áˆŽáŒ‚áŠ­)
                     cur.execute("""
                         UPDATE registrations SET is_nekay=TRUE
                         WHERE game_id=%s AND number=%s AND slot=%s
                     """, (game_id, num, target_slot))
                 else:
-                    # ክፍት slot — ማንም ገና ያልያዘው፣ placeholder INSERT
-                    # (nekay list ላይ እንዲታይ/ ወደፊት ሰው ሲይዘው በትክክል force
-                    # ይደረግለት ዘንድ)
+                    # áŠ­áá‰µ slot â€” áˆ›áŠ•áˆ áŒˆáŠ“ á‹«áˆá‹«á‹˜á‹á£ placeholder INSERT
+                    # (nekay list áˆ‹á‹­ áŠ¥áŠ•á‹²á‰³á‹­/ á‹ˆá‹°áŠá‰µ áˆ°á‹ áˆ²á‹­á‹˜á‹ á‰ á‰µáŠ­áŠ­áˆ force
+                    # á‹­á‹°áˆ¨áŒáˆˆá‰µ á‹˜áŠ•á‹µ)
                     cur.execute("""
                         SELECT 1 FROM registrations
                         WHERE game_id=%s AND number=%s AND slot=%s
@@ -1194,7 +1194,7 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     nekay_active.add(_gk(group_id, game_id))
     admin_nekay_games.add(_gk(group_id, game_id))
 
-    # FIX: admin's own "/nekay ..." message ወዲያውኑ ይጠፋ (ልክ እንደ #/ እና #name)
+    # FIX: admin's own "/nekay ..." message á‹ˆá‹²á‹«á‹áŠ‘ á‹­áŒ á‹ (áˆáŠ­ áŠ¥áŠ•á‹° #/ áŠ¥áŠ“ #name)
     try:
         await ctx.bot.delete_message(chat_id=group_id, message_id=update.message.message_id)
     except Exception:
@@ -1216,11 +1216,152 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         format_number(n) + (f"+{slot}" if slot else ("+" if h else ""))
         for n, h, slot in numbers
     )
-    msg = f"✅ ነቃይ ተቀምጧል: {reg_list}"
+    msg = f"âœ… áŠá‰ƒá‹­ á‰°á‰€áˆáŒ§áˆ: {reg_list}"
     if errors:
-        msg += f"\n❌ ያልተቀበለ: {', '.join(errors)}"
-    # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
+        msg += f"\nâŒ á‹«áˆá‰°á‰€á‰ áˆˆ: {', '.join(errors)}"
+    # FIX #4: admin confirmation message áŠ¨1.5-2 áˆ°áŠ¨áŠ•á‹µ á‰ áŠ‹áˆ‹ áˆ«áˆ± á‹­áŒ á‹áˆ
     await _send_temp_admin_message(ctx.bot, group_id, msg)
+
+
+# ============================================================
+# NEW â€” "ðŸ”¥NUM[+SLOT] ..." áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ áˆ›á‹áŒ« (admin text message)
+#   ðŸ”¥16 21+   â†’ á‰áŒ¥áˆ­ 16 áŠ¥áŠ“ 21 áŠ¨áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ á‹­á‹ˆáŒ£áˆ‰ ("áŠá‰ƒá‹­ áŠ á‹­á‹°áˆˆáˆ")
+#   ðŸ”¥5+1      â†’ á‰áŒ¥áˆ­ 5 slot 1 á‰¥á‰» áŠ¨áŠá‰ƒá‹­ á‹­á‹ˆáŒ£áˆ
+# áŠ¨ DB áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ áˆ‹á‹­ á‰¥á‰» á‹«á‹ˆáŒ£áˆ (mode áŒˆá‰£áˆª áˆ˜áˆ†áŠ• áŠ á‹«áˆµáˆáˆáŒáˆ)á¢ á‰£áˆˆá‰¤á‰µ á‹«áˆˆá‹ (á‹¨á‰°áˆ˜á‹˜áŒˆá‰ ) á‰áŒ¥áˆ­ is_nekay=FALSE
+# á‹­áˆ†áŠ“áˆá£ á‰£áˆˆá‰¤á‰µ á‹¨áˆŒáˆˆá‹ placeholder (/nekay 10+ á‹¨áˆáŒ áˆ¨á‹ á‰£á‹¶ slot) á‹­áˆ°áˆ¨á‹›áˆá¢
+# ============================================================
+
+async def handle_unnekay_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    import re as _re_un
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    text = msg.text.strip()
+    if not text.startswith("ðŸ”¥"):
+        return
+
+    body = text.replace("\ufe0f", "")[len("ðŸ”¥"):].strip()
+    parts = [p for p in _re_un.split(r'[,\s]+', body) if p]
+    # á‰áŒ¥áˆ­ á‹¨áˆšáˆ˜áˆµáˆ áŠ«áˆáˆ†áŠ (á‰°áˆ« ðŸ”¥ á‹ˆá‹­áˆ ðŸ”¥ áŒ½áˆá) á‹áˆ á‰¥áˆŽ á‹­áˆˆá
+    if not parts or not _re_un.match(r'^\d+(\+\d*)?$', parts[0]):
+        return
+
+    group_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if not is_admin(user_id, group_id):
+        return
+    if not is_group_enabled(group_id) or not is_group_active(group_id):
+        return
+
+    settings = get_active_settings(group_id=group_id)
+    if not settings:
+        return
+    game_id = settings["id"]
+    key = _gk(group_id, game_id)
+
+    try:
+        await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
+    except Exception:
+        pass
+
+    per_person = settings["numbers_per_person"]
+    targets = []   # (actual_num, slot_only, original_part)
+    errors = []
+    for part in parts:
+        m = _re_un.match(r'^(\d+)\+(\d+)$', part)
+        if m:
+            num, slot = int(m.group(1)), int(m.group(2))
+        elif _re_un.match(r'^\d+\+?$', part):
+            num, slot = int(part.rstrip("+")), None
+        else:
+            errors.append(part)
+            continue
+        actual = get_group_start(num, per_person) if per_person > 1 else num
+        if actual < 1 or actual > settings["total_numbers"]:
+            errors.append(part)
+            continue
+        targets.append((actual, slot, part))
+
+    removed = []
+    conn = get_conn()
+    cur = conn.cursor()
+    try:
+        for actual, slot, part in targets:
+            if slot is None:
+                cur.execute(
+                    "SELECT slot, user_id FROM registrations WHERE game_id=%s AND number=%s AND is_nekay=TRUE",
+                    (game_id, actual),
+                )
+            else:
+                cur.execute(
+                    "SELECT slot, user_id FROM registrations WHERE game_id=%s AND number=%s AND slot=%s AND is_nekay=TRUE",
+                    (game_id, actual, slot),
+                )
+            rows = cur.fetchall()
+            if not rows:
+                errors.append(part + " (áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ áˆ‹á‹­ á‹¨áˆˆáˆ)")
+                continue
+            for r_slot, r_uid in rows:
+                if not r_uid:
+                    # á‰£áˆˆá‰¤á‰µ á‹¨áˆŒáˆˆá‹ placeholder â†’ á‹­áˆ°áˆ¨á‹›áˆ
+                    cur.execute(
+                        "DELETE FROM registrations WHERE game_id=%s AND number=%s AND slot=%s",
+                        (game_id, actual, r_slot),
+                    )
+                else:
+                    cur.execute(
+                        "UPDATE registrations SET is_nekay=FALSE WHERE game_id=%s AND number=%s AND slot=%s",
+                        (game_id, actual, r_slot),
+                    )
+            removed.append(part)
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        logging.warning(f"[UnNekay] DB error: {e}")
+        await _send_temp_admin_message(ctx.bot, group_id, "âŒ áˆµáˆ…á‰°á‰µ á‰°áˆáŒ¥áˆ¯áˆá£ áŠ¥áŠ•á‹°áŒˆáŠ“ áˆžáŠ­áˆ­")
+        return
+    finally:
+        cur.close()
+        conn.close()
+
+    if not removed:
+        await _send_temp_admin_message(ctx.bot, group_id, f"âŒ á‹«áˆá‰°áŒˆáŠ˜: {', '.join(errors)}")
+        return
+
+    # áŠ¨ DB áˆ‹á‹­ á‰µáŠ­áŠ­áˆˆáŠ›á‹áŠ• áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ áŠ¥áŠ•á‹°áŒˆáŠ“ áˆ˜áŒˆáŠ•á‰£á‰µ
+    snap = {}
+    for number, slots, is_half in get_nekay_numbers(game_id):
+        if is_half:
+            snap[number] = -1 if slots == {1} else (-2 if slots == {2} else 0)
+        else:
+            snap[number] = 0
+    nekay_numbers[key] = snap
+
+    fresh = get_active_settings(group_id=group_id)
+    if fresh:
+        await _refresh_board(ctx, fresh, group_id)
+        rem_msg_id = fresh.get("remaining_message_id")
+        if rem_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+            except Exception:
+                pass
+        if snap:
+            nekay_text = build_nekay(_build_nekay_from_snap(snap))
+            new_nekay = await ctx.bot.send_message(chat_id=group_id, text=nekay_text)
+            update_remaining_message_id(game_id, new_nekay.message_id)
+            nekay_active.add(key)
+        else:
+            # áŠá‰ƒá‹­ áˆ™áˆ‰ á‰ áˆ™áˆ‰ á‰£á‹¶ áˆ†áŠ â†’ áŠá‰ƒá‹­ mode á‹­áŒ á‹áˆ
+            update_remaining_message_id(game_id, None)
+            nekay_active.discard(key)
+            nekay_numbers.pop(key, None)
+            _stop_inactivity_tracker(game_id, group_id)
+
+    out = f"âœ… áŠá‰ƒá‹­ áŠ á‹­á‹°áˆˆáˆ: {', '.join(removed)}"
+    if errors:
+        out += f"\nâŒ á‹«áˆá‰°á‰€á‰ áˆˆ: {', '.join(errors)}"
+    await _send_temp_admin_message(ctx.bot, group_id, out)
 
 
 # ============================================================
@@ -1229,10 +1370,10 @@ async def handle_nekay_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_setcompletesticker(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Main admin á‰¥á‰» áŠá‹!")
         return
     ctx.user_data["awaiting_complete_sticker"] = True
-    await update.message.reply_text("✅ አሁን sticker ይላኩ (ሁሉም group ላይ ይሰራል)")
+    await update.message.reply_text("âœ… áŠ áˆáŠ• sticker á‹­áˆ‹áŠ© (áˆáˆ‰áˆ group áˆ‹á‹­ á‹­áˆ°áˆ«áˆ)")
 
 
 async def handle_listcompletestickers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1240,9 +1381,9 @@ async def handle_listcompletestickers(update: Update, ctx: ContextTypes.DEFAULT_
         return
     stickers = get_complete_stickers()
     if not stickers:
-        await update.message.reply_text("📋 Complete sticker የለም።")
+        await update.message.reply_text("ðŸ“‹ Complete sticker á‹¨áˆˆáˆá¢")
         return
-    lines = ["📋 Complete Stickers:\n"]
+    lines = ["ðŸ“‹ Complete Stickers:\n"]
     for i, s in enumerate(stickers, 1):
         added = s["added_at"].strftime("%m/%d %H:%M") if s["added_at"] else "?"
         lines.append(f"{i}. file_id: {s['file_id'][:20]}... ({added})")
@@ -1254,17 +1395,17 @@ async def handle_removecompletesticker(update: Update, ctx: ContextTypes.DEFAULT
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /removecompletesticker 1")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /removecompletesticker 1")
         return
     try:
         index = int(parts[1])
         success = remove_complete_sticker_by_index(index)
         if success:
-            await update.message.reply_text(f"✅ Sticker #{index} ጠፋ!")
+            await update.message.reply_text(f"âœ… Sticker #{index} áŒ á‹!")
         else:
-            await update.message.reply_text(f"❌ #{index} አልተገኘም!")
+            await update.message.reply_text(f"âŒ #{index} áŠ áˆá‰°áŒˆáŠ˜áˆ!")
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
 
 
 async def handle_complete_sticker_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1274,12 +1415,12 @@ async def handle_complete_sticker_upload(update: Update, ctx: ContextTypes.DEFAU
         return
     msg = update.message
     if not msg.sticker:
-        await msg.reply_text("❌ Sticker ብቻ ይላኩ!")
+        await msg.reply_text("âŒ Sticker á‰¥á‰» á‹­áˆ‹áŠ©!")
         return
     file_id = msg.sticker.file_id
     add_complete_sticker(file_id)
     ctx.user_data.pop("awaiting_complete_sticker", None)
-    await msg.reply_text("✅ Complete sticker ተቀምጧል!")
+    await msg.reply_text("âœ… Complete sticker á‰°á‰€áˆáŒ§áˆ!")
 
 
 # ============================================================
@@ -1288,12 +1429,12 @@ async def handle_complete_sticker_upload(update: Update, ctx: ContextTypes.DEFAU
 
 async def handle_setprebookingmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Main admin á‰¥á‰» áŠá‹!")
         return
     ctx.user_data["awaiting_prebooking_media"] = True
     await update.message.reply_text(
-        "✅ አሁን photo/video/sticker ይላኩ (pre-booking ሲጀምር group ላይ ይላካል)\n"
-        "ብዙ ጊዜ ሊጨምሩ ይችላሉ — ሁሉም በቅደም ተከተል ይላካሉ።"
+        "âœ… áŠ áˆáŠ• photo/video/sticker á‹­áˆ‹áŠ© (pre-booking áˆ²áŒ€áˆáˆ­ group áˆ‹á‹­ á‹­áˆ‹áŠ«áˆ)\n"
+        "á‰¥á‹™ áŒŠá‹œ áˆŠáŒ¨áˆáˆ© á‹­á‰½áˆ‹áˆ‰ â€” áˆáˆ‰áˆ á‰ á‰…á‹°áˆ á‰°áŠ¨á‰°áˆ á‹­áˆ‹áŠ«áˆ‰á¢"
     )
 
 
@@ -1302,12 +1443,12 @@ async def handle_listprebookingmedia(update: Update, ctx: ContextTypes.DEFAULT_T
         return
     medias = get_prebooking_media()
     if not medias:
-        await update.message.reply_text("📋 Pre-booking media የለም።")
+        await update.message.reply_text("ðŸ“‹ Pre-booking media á‹¨áˆˆáˆá¢")
         return
-    lines = ["📋 Pre-Booking Media:\n"]
+    lines = ["ðŸ“‹ Pre-Booking Media:\n"]
     for i, m in enumerate(medias, 1):
         added = m["added_at"].strftime("%m/%d %H:%M") if m["added_at"] else "?"
-        lines.append(f"{i}. {m['media_type']} — {m['file_id'][:20]}... ({added})")
+        lines.append(f"{i}. {m['media_type']} â€” {m['file_id'][:20]}... ({added})")
     await update.message.reply_text("\n".join(lines))
 
 
@@ -1316,17 +1457,17 @@ async def handle_removeprebookingmedia(update: Update, ctx: ContextTypes.DEFAULT
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /removeprebookingmedia 1")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /removeprebookingmedia 1")
         return
     try:
         index = int(parts[1])
         success = remove_prebooking_media_by_index(index)
         if success:
-            await update.message.reply_text(f"✅ Pre-booking media #{index} ጠፋ!")
+            await update.message.reply_text(f"âœ… Pre-booking media #{index} áŒ á‹!")
         else:
-            await update.message.reply_text(f"❌ #{index} አልተገኘም!")
+            await update.message.reply_text(f"âŒ #{index} áŠ áˆá‰°áŒˆáŠ˜áˆ!")
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
 
 
 async def handle_prebooking_media_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -1355,12 +1496,12 @@ async def handle_prebooking_media_upload(update: Update, ctx: ContextTypes.DEFAU
         media_type = "video"
 
     if not file_id:
-        await msg.reply_text("❌ Photo/Video/Sticker ብቻ ይላኩ!")
+        await msg.reply_text("âŒ Photo/Video/Sticker á‰¥á‰» á‹­áˆ‹áŠ©!")
         return
 
     add_prebooking_media(file_id, media_type)
     ctx.user_data.pop("awaiting_prebooking_media", None)
-    await msg.reply_text(f"✅ Pre-booking media ተቀምጧል! ({media_type})\nተጨማሪ ለማስቀመጥ /setprebookingmedia ድጋሚ ጥቀስ።")
+    await msg.reply_text(f"âœ… Pre-booking media á‰°á‰€áˆáŒ§áˆ! ({media_type})\ná‰°áŒ¨áˆ›áˆª áˆˆáˆ›áˆµá‰€áˆ˜áŒ¥ /setprebookingmedia á‹µáŒ‹áˆš áŒ¥á‰€áˆµá¢")
 
 
 # ============================================================
@@ -1378,9 +1519,9 @@ async def handle_group_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = msg.text.strip()
     group_id = update.effective_chat.id
 
-    # NEW: winner-🔥-reaction feature — this message's sender ተመዝግቦ ይቀመጣል
-    # (DB write ነው፣ event loop እንዳይዘገይ background thread ላይ fire-and-forget
-    # ሆኖ ይሰራል፣ ምንም ነባር ሎጂክ አይነካም)
+    # NEW: winner-ðŸ”¥-reaction feature â€” this message's sender á‰°áˆ˜á‹áŒá‰¦ á‹­á‰€áˆ˜áŒ£áˆ
+    # (DB write áŠá‹á£ event loop áŠ¥áŠ•á‹³á‹­á‹˜áŒˆá‹­ background thread áˆ‹á‹­ fire-and-forget
+    # áˆ†áŠ– á‹­áˆ°áˆ«áˆá£ áˆáŠ•áˆ áŠá‰£áˆ­ áˆŽáŒ‚áŠ­ áŠ á‹­áŠáŠ«áˆ)
     asyncio.create_task(asyncio.to_thread(_record_group_message, group_id, msg.message_id, user_id, user_name))
 
     if not is_group_enabled(group_id):
@@ -1432,7 +1573,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     _url_pattern = _re_url.compile(r'https?://[^\s\u1200-\u137F]+')
     _urls_in_msg = _url_pattern.findall(text)
 
-    # ✅ ማናቸውም URL → fetch ይሞክራል (domain check የለም)
+    # âœ… áˆ›áŠ“á‰¸á‹áˆ URL â†’ fetch á‹­áˆžáŠ­áˆ«áˆ (domain check á‹¨áˆˆáˆ)
     for _url in _urls_in_msg:
         async def _nekay_cb_url(confirmed):
             await nekay_payment_cb(ctx.bot, game_id, user_id, confirmed, group_id=group_id)
@@ -1502,7 +1643,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
     if resp.get("cancel_number"):
         num = resp["cancel_number"]
         if not user_owns_number(game_id, user_id, num):
-            await msg.reply_text("ቁጥሩ የእርስዎ አይደለም 🙏")
+            await msg.reply_text("á‰áŒ¥áˆ© á‹¨áŠ¥áˆ­áˆµá‹Ž áŠ á‹­á‹°áˆˆáˆ ðŸ™")
             return
         removed = remove_number(game_id, user_id, num)
         if removed:
@@ -1577,7 +1718,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                     skip_board_update=True
                 )
             elif not user_owns_number(game_id, user_id, actual_num):
-                await msg.reply_text(f"{actual_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
+                await msg.reply_text(f"{actual_num:02d} á‹¨áŠ¥áˆ­áˆµá‹Ž á‰áŒ¥áˆ­ áŠ á‹­á‹°áˆˆáˆ ðŸ™")
             else:
                 if parsed_name:
                     conn = get_conn()
@@ -1714,13 +1855,13 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
         to_num = ch["to"]
 
         if not user_owns_number(game_id, user_id, from_num):
-            await msg.reply_text(f"{from_num:02d} የእርስዎ ቁጥር አይደለም 🙏")
+            await msg.reply_text(f"{from_num:02d} á‹¨áŠ¥áˆ­áˆµá‹Ž á‰áŒ¥áˆ­ áŠ á‹­á‹°áˆˆáˆ ðŸ™")
             return
         if to_num in paid:
-            await msg.reply_text(f"{to_num:02d} ✅ ተከፍሏል መቀየር አይቻልም 🙏")
+            await msg.reply_text(f"{to_num:02d} âœ… á‰°áŠ¨ááˆáˆ áˆ˜á‰€á‹¨áˆ­ áŠ á‹­á‰»áˆáˆ ðŸ™")
             return
         if to_num in taken:
-            await msg.reply_text(f"{to_num:02d} ተይዟል ቤተሰብ ሌላ ምረጥ 🙏")
+            await msg.reply_text(f"{to_num:02d} á‰°á‹­á‹Ÿáˆ á‰¤á‰°áˆ°á‰¥ áˆŒáˆ‹ áˆáˆ¨áŒ¥ ðŸ™")
             return
 
         removed = remove_number(game_id, user_id, from_num)
@@ -1740,7 +1881,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
                     await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
             else:
                 register_number(game_id, user_id, user_name, from_num, False)
-                await msg.reply_text(f"{to_num:02d} አልተቻለም 🙏")
+                await msg.reply_text(f"{to_num:02d} áŠ áˆá‰°á‰»áˆˆáˆ ðŸ™")
         return
 
     if resp.get("why_not_registered") is not None:
@@ -1768,7 +1909,7 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             elif a["reason"] == "range":
                 line = random.choice(RESPONSES["why_not_registered_range"]).format(num=num)
             else:
-                line = f"{num} — ምክንያት ታወቀ 🙏"
+                line = f"{num} â€” áˆáŠ­áŠ•á‹«á‰µ á‰³á‹ˆá‰€ ðŸ™"
             lines.append(line)
 
         await msg.reply_text("\n".join(lines))
@@ -1872,15 +2013,15 @@ async def _handle_group_message_inner(update, ctx, msg, user_id, user_name, text
             "game_id": settings["id"], "settings": settings,
             "group_id": group_id, "user_name": user_name
         }
-        # FIX: መጀመሪያ እንደተጻፈው (as-typed — "+" የሌላቸው ሙሉ፣ "+" ያላቸው ግማሽ)
-        # ወዲያውኑ ይመዘገባል፤ ጥያቄው ከዚያ በኋላ ብቻ ይጠየቃል (ካስፈለገ ለውጥ ብቻ
-        # handle_ambiguous_reply ላይ ይደረጋል)። ቀድሞ ምዝገባው ጥያቄው እስኪመለስ
-        # ድረስ ይጠብቅ ነበር፣ ይህም ሌላ action ቢመጣ ምዝገባ ሳይፈጸም ይቀር ነበር።
+        # FIX: áˆ˜áŒ€áˆ˜áˆªá‹« áŠ¥áŠ•á‹°á‰°áŒ»áˆá‹ (as-typed â€” "+" á‹¨áˆŒáˆ‹á‰¸á‹ áˆ™áˆ‰á£ "+" á‹«áˆ‹á‰¸á‹ áŒáˆ›áˆ½)
+        # á‹ˆá‹²á‹«á‹áŠ‘ á‹­áˆ˜á‹˜áŒˆá‰£áˆá¤ áŒ¥á‹«á‰„á‹ áŠ¨á‹šá‹« á‰ áŠ‹áˆ‹ á‰¥á‰» á‹­áŒ á‹¨á‰ƒáˆ (áŠ«áˆµáˆáˆˆáŒˆ áˆˆá‹áŒ¥ á‰¥á‰»
+        # handle_ambiguous_reply áˆ‹á‹­ á‹­á‹°áˆ¨áŒ‹áˆ)á¢ á‰€á‹µáˆž áˆá‹áŒˆá‰£á‹ áŒ¥á‹«á‰„á‹ áŠ¥áˆµáŠªáˆ˜áˆˆáˆµ
+        # á‹µáˆ¨áˆµ á‹­áŒ á‰¥á‰… áŠá‰ áˆ­á£ á‹­áˆ…áˆ áˆŒáˆ‹ action á‰¢áˆ˜áŒ£ áˆá‹áŒˆá‰£ áˆ³á‹­áˆáŒ¸áˆ á‹­á‰€áˆ­ áŠá‰ áˆ­á¢
         await process_registration(ctx, settings, numbers, user_id, user_name, group_id, msg)
         if ambiguous == "all_half":
-            await msg.reply_text("ሁሉንም በግማሽ ነው? (አዎ/አይደለም)")
+            await msg.reply_text("áˆáˆ‰áŠ•áˆ á‰ áŒáˆ›áˆ½ áŠá‹? (áŠ á‹Ž/áŠ á‹­á‹°áˆˆáˆ)")
         elif ambiguous == "last_half":
-            await msg.reply_text(f"{format_number(ambiguous_number)} ብቻ በግማሽ ነው? (አዎ/አይደለም)")
+            await msg.reply_text(f"{format_number(ambiguous_number)} á‰¥á‰» á‰ áŒáˆ›áˆ½ áŠá‹? (áŠ á‹Ž/áŠ á‹­á‹°áˆˆáˆ)")
         return
 
     if _gk(group_id, game_id) in active_countdowns:
@@ -1907,8 +2048,8 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
         return
 
     text_lower = text.lower()
-    yes = text_lower in ["አዎ", "awo", "yes", "aha", "አዎን"]
-    no = text_lower in ["አይደለም", "aydelem", "no", "የለም"]
+    yes = text_lower in ["áŠ á‹Ž", "awo", "yes", "aha", "áŠ á‹ŽáŠ•"]
+    no = text_lower in ["áŠ á‹­á‹°áˆˆáˆ", "aydelem", "no", "á‹¨áˆˆáˆ"]
     if not yes and not no:
         no = True
 
@@ -1919,9 +2060,9 @@ async def handle_ambiguous_reply(update, ctx, text, user_id, user_name, group_id
 
     del pending_ambiguous[user_id]
 
-    # FIX: ምዝገባው ቀድሞ (as-typed) ተመዝግቧል — እዚህ ደግሞ የሚያስፈልገው ለውጥ ብቻ
-    # ነው የሚደረገው (register_number's toggle/target logic ቀድሞ የተመዘገቡትን
-    # ወደ አዲሱ half/full ይቀይራል)። ለውጥ የማያስፈልግ ከሆነ ምንም አይደረግም።
+    # FIX: áˆá‹áŒˆá‰£á‹ á‰€á‹µáˆž (as-typed) á‰°áˆ˜á‹áŒá‰§áˆ â€” áŠ¥á‹šáˆ… á‹°áŒáˆž á‹¨áˆšá‹«áˆµáˆáˆáŒˆá‹ áˆˆá‹áŒ¥ á‰¥á‰»
+    # áŠá‹ á‹¨áˆšá‹°áˆ¨áŒˆá‹ (register_number's toggle/target logic á‰€á‹µáˆž á‹¨á‰°áˆ˜á‹˜áŒˆá‰¡á‰µáŠ•
+    # á‹ˆá‹° áŠ á‹²áˆ± half/full á‹­á‰€á‹­áˆ«áˆ)á¢ áˆˆá‹áŒ¥ á‹¨áˆ›á‹«áˆµáˆáˆáŒ áŠ¨áˆ†áŠ áˆáŠ•áˆ áŠ á‹­á‹°áˆ¨áŒáˆá¢
     if ambiguous == "all_half" and yes:
         converted = [(n, True, nm) for n, _, nm in numbers]
         await process_registration(ctx, settings, converted, user_id, user_name, group_id, update.message)
@@ -1943,8 +2084,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
 
     allow_toggle = (len(numbers) == 1)
 
-    # FIX #3: admin "#name <name>" override ካለ (highest priority) —
-    # parsed_name/telegram username ምንም ይሁኑ ሁሌም override ስም ጥቅም ላይ ይውላል።
+    # FIX #3: admin "#name <name>" override áŠ«áˆˆ (highest priority) â€”
+    # parsed_name/telegram username áˆáŠ•áˆ á‹­áˆáŠ‘ áˆáˆŒáˆ override áˆµáˆ áŒ¥á‰…áˆ áˆ‹á‹­ á‹­á‹áˆ‹áˆá¢
     name_override = get_name_override(group_id, user_id)
 
     for num, is_half, parsed_name in numbers:
@@ -1955,9 +2096,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             nekay_snap_value = nekay_numbers[_gk(group_id, game_id)][actual_num]
 
         is_nekay = (nekay_snap_value is not None)
-        # FIX: -1/-2 (06+1 / 06+2 slot-specific nekay) ደግሞ force ናቸው —
-        # ቀደም ብሎ 0 ብቻ ነበር force ተብሎ የሚታየው፣ ስለዚህ +1/+2 slot-specific
-        # nekay ላይ force overwrite ፈጽሞ አይሰራም ነበር።
+        # FIX: -1/-2 (06+1 / 06+2 slot-specific nekay) á‹°áŒáˆž force áŠ“á‰¸á‹ â€”
+        # á‰€á‹°áˆ á‰¥áˆŽ 0 á‰¥á‰» áŠá‰ áˆ­ force á‰°á‰¥áˆŽ á‹¨áˆšá‰³á‹¨á‹á£ áˆµáˆˆá‹šáˆ… +1/+2 slot-specific
+        # nekay áˆ‹á‹­ force overwrite áˆáŒ½áˆž áŠ á‹­áˆ°áˆ«áˆ áŠá‰ áˆ­á¢
         is_nekay_force = nekay_snap_value in (0, -1, -2)
         force_slot = None
         if nekay_snap_value == -1:
@@ -1965,9 +2106,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         elif nekay_snap_value == -2:
             force_slot = 2
 
-        # FIX: parsed_name (ተጠቃሚው በጽሁፍ ያስገባው ስም) ከ #name override የበለጠ
-        # ቅድሚያ ያገኛል። Override የሚሰራው ተጠቃሚው ምንም ስም ካልጻፈ ብቻ ነው
-        # (default/fallback)።
+        # FIX: parsed_name (á‰°áŒ á‰ƒáˆšá‹ á‰ áŒ½áˆá á‹«áˆµáŒˆá‰£á‹ áˆµáˆ) áŠ¨ #name override á‹¨á‰ áˆˆáŒ 
+        # á‰…á‹µáˆšá‹« á‹«áŒˆáŠ›áˆá¢ Override á‹¨áˆšáˆ°áˆ«á‹ á‰°áŒ á‰ƒáˆšá‹ áˆáŠ•áˆ áˆµáˆ áŠ«áˆáŒ»áˆ á‰¥á‰» áŠá‹
+        # (default/fallback)á¢
         if parsed_name:
             actual_name = parsed_name
         elif name_override:
@@ -1995,7 +2136,7 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 actual_is_half = is_half
                 if result_tc.get("pending_upgrade"):
                     actual_is_half = True
-                # FIX: ትክክለኛውን slot ያግኝ (is_paid ማረጋገጫ ትክክለኛውን slot እንዲፈትሽ)
+                # FIX: á‰µáŠ­áŠ­áˆˆáŠ›á‹áŠ• slot á‹«áŒáŠ (is_paid áˆ›áˆ¨áŒ‹áŒˆáŒ« á‰µáŠ­áŠ­áˆˆáŠ›á‹áŠ• slot áŠ¥áŠ•á‹²áˆá‰µáˆ½)
                 actual_slot = 1
                 for n_num, n_half, n_slot, n_paid in get_user_numbers(game_id, user_id):
                     if n_num == actual_num and n_slot != 1:
@@ -2014,10 +2155,10 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
             is_parsed_name=bool(parsed_name), force_slot=force_slot,
         )
         if result in ["registered", "registered_half"]:
-            # FIX: is_half እና slot ትክክለኛውን ውጤት ያንፀባርቁ — ቀድሞ "registered_half"
-            # (አዲስ ሰው ቀድሞ በግማሽ ወደተያዘ ቁጥር ላይ "+" ሳይጠቀም ሲቀላቀል) is_half=False
-            # ተብሎ በስህተት ይመዘገብ ነበር፣ ይህም is_paid ማረጋገጫ የተሳሳተ slot እንዲፈትሽ
-            # ያደርግ ነበር (የተሳሳተ "still needs payment" መልእክት ያመጣ ነበር)።
+            # FIX: is_half áŠ¥áŠ“ slot á‰µáŠ­áŠ­áˆˆáŠ›á‹áŠ• á‹áŒ¤á‰µ á‹«áŠ•á€á‰£áˆ­á‰ â€” á‰€á‹µáˆž "registered_half"
+            # (áŠ á‹²áˆµ áˆ°á‹ á‰€á‹µáˆž á‰ áŒáˆ›áˆ½ á‹ˆá‹°á‰°á‹«á‹˜ á‰áŒ¥áˆ­ áˆ‹á‹­ "+" áˆ³á‹­áŒ á‰€áˆ áˆ²á‰€áˆ‹á‰€áˆ) is_half=False
+            # á‰°á‰¥áˆŽ á‰ áˆµáˆ…á‰°á‰µ á‹­áˆ˜á‹˜áŒˆá‰¥ áŠá‰ áˆ­á£ á‹­áˆ…áˆ is_paid áˆ›áˆ¨áŒ‹áŒˆáŒ« á‹¨á‰°áˆ³áˆ³á‰° slot áŠ¥áŠ•á‹²áˆá‰µáˆ½
+            # á‹«á‹°áˆ­áŒ áŠá‰ áˆ­ (á‹¨á‰°áˆ³áˆ³á‰° "still needs payment" áˆ˜áˆáŠ¥áŠ­á‰µ á‹«áˆ˜áŒ£ áŠá‰ áˆ­)á¢
             actual_is_half = is_half or (force_slot is not None) or (result == "registered_half")
             if force_slot is not None:
                 actual_slot = force_slot
@@ -2041,9 +2182,9 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         else:
             all_taken.append(actual_num)
 
-    # FIX: board edit delay — get_taken_numbers/get_paid_numbers (psycopg2,
-    # blocking) event loop ን እንዳያግድ asyncio.to_thread ውስጥ ይሮጣሉ። register_number
-    # (ከላይ ባለው loop ውስጥ) ሆን ተብሎ አልተነካም — race condition እንዳይፈጠር።
+    # FIX: board edit delay â€” get_taken_numbers/get_paid_numbers (psycopg2,
+    # blocking) event loop áŠ• áŠ¥áŠ•á‹³á‹«áŒá‹µ asyncio.to_thread á‹áˆµáŒ¥ á‹­áˆ®áŒ£áˆ‰á¢ register_number
+    # (áŠ¨áˆ‹á‹­ á‰£áˆˆá‹ loop á‹áˆµáŒ¥) áˆ†áŠ• á‰°á‰¥áˆŽ áŠ áˆá‰°áŠáŠ«áˆ â€” race condition áŠ¥áŠ•á‹³á‹­áˆáŒ áˆ­á¢
     taken = await asyncio.to_thread(get_taken_numbers, game_id)
     paid = await asyncio.to_thread(get_paid_numbers, game_id)
     remaining_count = count_remaining(settings, taken)
@@ -2051,16 +2192,16 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     nekay_list = _build_nekay_from_snap(snap)
 
     if not registered and not all_taken and no_change_reply:
-        await msg.reply_text("እሺ 🙏")
+        await msg.reply_text("áŠ¥áˆº ðŸ™")
         return
 
     reg_result = "registered" if registered else ("taken" if all_taken else None)
 
-    # FIX #2: ሁሉም ቁጥሮች ✅ (ሁሉም ተከፍለው) ካለቁ በኋላ (ውጤት ገና ካልታወቀ/pre-booking
-    # ገና ካልጀመረ)፣ ሰው ቁጥር ለመያዝ ቢሞክር "ተቀደምክ" ከመመለስ ይልቅ "አሁን የውጤት ሰዓት
-    # ነው" ይመለስ።
+    # FIX #2: áˆáˆ‰áˆ á‰áŒ¥áˆ®á‰½ âœ… (áˆáˆ‰áˆ á‰°áŠ¨ááˆˆá‹) áŠ«áˆˆá‰ á‰ áŠ‹áˆ‹ (á‹áŒ¤á‰µ áŒˆáŠ“ áŠ«áˆá‰³á‹ˆá‰€/pre-booking
+    # áŒˆáŠ“ áŠ«áˆáŒ€áˆ˜áˆ¨)á£ áˆ°á‹ á‰áŒ¥áˆ­ áˆˆáˆ˜á‹«á‹ á‰¢áˆžáŠ­áˆ­ "á‰°á‰€á‹°áˆáŠ­" áŠ¨áˆ˜áˆ˜áˆˆáˆµ á‹­áˆá‰… "áŠ áˆáŠ• á‹¨á‹áŒ¤á‰µ áˆ°á‹“á‰µ
+    # áŠá‹" á‹­áˆ˜áˆˆáˆµá¢
     if reg_result == "taken" and all_numbers_paid(game_id, settings):
-        await msg.reply_text("አሁን የውጤት ሰዓት ነው ቤተሰብ ትንሽ ይጠብቁ 🙏")
+        await msg.reply_text("áŠ áˆáŠ• á‹¨á‹áŒ¤á‰µ áˆ°á‹“á‰µ áŠá‹ á‰¤á‰°áˆ°á‰¥ á‰µáŠ•áˆ½ á‹­áŒ á‰¥á‰ ðŸ™")
         return
 
     is_paid_result = None
@@ -2083,18 +2224,18 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
         is_paid=is_paid_result,
     )
 
-    # FIX #1 + #6: pre-booking ሰዓት (ውጤት/board ገና ስላልታወቀ ገንዘቡ ማን
-    # እንደሚይዘው ገና ስለማይታወቅ) የተሳካ ምዝገባ ላይ የጽሁፍ reply ሳይሆን 👍 reaction
-    # ብቻ ይላክ። ደግሞም reply/reaction Telegram API call ን fire-and-forget
-    # (asyncio.create_task) አድርገን እንልካለን፣ ስለዚህ ከታች ያለው board edit
-    # ይህን call እስኪመለስ ድረስ መጠበቅ አያስፈልገውም (ቀድሞ sequential ስለነበር board
-    # edit ይዘገይ ነበር)።
+    # FIX #1 + #6: pre-booking áˆ°á‹“á‰µ (á‹áŒ¤á‰µ/board áŒˆáŠ“ áˆµáˆ‹áˆá‰³á‹ˆá‰€ áŒˆáŠ•á‹˜á‰¡ áˆ›áŠ•
+    # áŠ¥áŠ•á‹°áˆšá‹­á‹˜á‹ áŒˆáŠ“ áˆµáˆˆáˆ›á‹­á‰³á‹ˆá‰…) á‹¨á‰°áˆ³áŠ« áˆá‹áŒˆá‰£ áˆ‹á‹­ á‹¨áŒ½áˆá reply áˆ³á‹­áˆ†áŠ• ðŸ‘ reaction
+    # á‰¥á‰» á‹­áˆ‹áŠ­á¢ á‹°áŒáˆžáˆ reply/reaction Telegram API call áŠ• fire-and-forget
+    # (asyncio.create_task) áŠ á‹µáˆ­áŒˆáŠ• áŠ¥áŠ•áˆáŠ«áˆˆáŠ•á£ áˆµáˆˆá‹šáˆ… áŠ¨á‰³á‰½ á‹«áˆˆá‹ board edit
+    # á‹­áˆ…áŠ• call áŠ¥áˆµáŠªáˆ˜áˆˆáˆµ á‹µáˆ¨áˆµ áˆ˜áŒ á‰ á‰… áŠ á‹«áˆµáˆáˆáŒˆá‹áˆ (á‰€á‹µáˆž sequential áˆµáˆˆáŠá‰ áˆ­ board
+    # edit á‹­á‹˜áŒˆá‹­ áŠá‰ áˆ­)á¢
     if reg_result == "registered" and (group_id in prebooking_groups or group_id in winner_pending_groups):
         asyncio.create_task(_safe_set_reaction(ctx.bot, group_id, msg.message_id))
     elif resp["reply"]:
         if reg_result == "taken":
-            # NEW: "እሺ/eshi" replacement feature ይህን rejection reply message_id
-            # እንዲያገኘው (ወደፊት admin ቢተካው እንዲጠፋ) ተመዝግቦ ይቀመጣል
+            # NEW: "áŠ¥áˆº/eshi" replacement feature á‹­áˆ…áŠ• rejection reply message_id
+            # áŠ¥áŠ•á‹²á‹«áŒˆáŠ˜á‹ (á‹ˆá‹°áŠá‰µ admin á‰¢á‰°áŠ«á‹ áŠ¥áŠ•á‹²áŒ á‹) á‰°áˆ˜á‹áŒá‰¦ á‹­á‰€áˆ˜áŒ£áˆ
             asyncio.create_task(_safe_reply_text_and_track(msg, resp["reply"], group_id))
         else:
             asyncio.create_task(_safe_reply_text(msg, resp["reply"]))
@@ -2105,8 +2246,8 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
     if skip_board_update:
         return
 
-    # pre-booking mode (ወይም winner photo 30s ክፍተት) — registration ተሰርቷል
-    # ግን board አይታይም
+    # pre-booking mode (á‹ˆá‹­áˆ winner photo 30s áŠ­áá‰°á‰µ) â€” registration á‰°áˆ°áˆ­á‰·áˆ
+    # áŒáŠ• board áŠ á‹­á‰³á‹­áˆ
     if group_id in prebooking_groups or group_id in winner_pending_groups:
         return
 
@@ -2149,12 +2290,12 @@ async def process_registration(ctx, settings, numbers, user_id, user_name, group
                 new_board = await ctx.bot.send_message(chat_id=group_id, text=board_text)
                 await asyncio.to_thread(update_board_message_id, game_id, new_board.message_id)
 
-        # FIX: intermittent nekay-list corruption — ከላይ snap ከተነበበ ጀምሮ
-        # (መስመር ~1968) እስከዚህ ድረስ ብዙ awaits (board/nekay message edits)
-        # ስላሉ፣ 2 ሰዎች በተመሳሳይ ሰዓት የተለያየ ቁጥር ቢይዙ (interleaved coroutines)
-        # በአንድ shared dict ላይ ተደራርበው ሊጣረሱ ይችላሉ (ሌላውን entry ሊያጠፉ
-        # ይችላሉ)። ስለዚህ ልክ ከመንካቱ በፊት የቅርብ ጊዜውን nekay_numbers ደግሞ
-        # እናነብበዋለን (race window ለመቀነስ)።
+        # FIX: intermittent nekay-list corruption â€” áŠ¨áˆ‹á‹­ snap áŠ¨á‰°áŠá‰ á‰  áŒ€áˆáˆ®
+        # (áˆ˜áˆµáˆ˜áˆ­ ~1968) áŠ¥áˆµáŠ¨á‹šáˆ… á‹µáˆ¨áˆµ á‰¥á‹™ awaits (board/nekay message edits)
+        # áˆµáˆ‹áˆ‰á£ 2 áˆ°á‹Žá‰½ á‰ á‰°áˆ˜áˆ³áˆ³á‹­ áˆ°á‹“á‰µ á‹¨á‰°áˆˆá‹«á‹¨ á‰áŒ¥áˆ­ á‰¢á‹­á‹™ (interleaved coroutines)
+        # á‰ áŠ áŠ•á‹µ shared dict áˆ‹á‹­ á‰°á‹°áˆ«áˆ­á‰ á‹ áˆŠáŒ£áˆ¨áˆ± á‹­á‰½áˆ‹áˆ‰ (áˆŒáˆ‹á‹áŠ• entry áˆŠá‹«áŒ á‰
+        # á‹­á‰½áˆ‹áˆ‰)á¢ áˆµáˆˆá‹šáˆ… áˆáŠ­ áŠ¨áˆ˜áŠ•áŠ«á‰± á‰ áŠá‰µ á‹¨á‰…áˆ­á‰¥ áŒŠá‹œá‹áŠ• nekay_numbers á‹°áŒáˆž
+        # áŠ¥áŠ“áŠá‰¥á‰ á‹‹áˆˆáŠ• (race window áˆˆáˆ˜á‰€áŠáˆµ)á¢
         snap = nekay_numbers.get(_gk(group_id, game_id), snap)
         for num, is_half, _slot in registered:
             if num in snap:
@@ -2296,13 +2437,13 @@ async def _refresh_board(ctx, settings, group_id=None):
 
 def _parse_name_and_pending(raw: str):
     """
-    ✅/? marker parsing — ተጠቃሚው እውነተኛ ስም ራሱ "?" ቢይዝ (ለምሳሌ ስሙ በትክክል
-    "??" ቢሆን) stripping ስሙን ሙሉ ለሙሉ ባዶ እንዳያደርገው ይጠብቃል፦ stripping "?"
-    ስሙን ባዶ የሚያደርገው ከሆነ (እና stripping ከመደረጉ በፊት ይዘት ነበረ) ያ "?" እንደ
-    pending marker ሳይሆን የስሙ አካል ተደርጎ ይያዛል።
+    âœ…/? marker parsing â€” á‰°áŒ á‰ƒáˆšá‹ áŠ¥á‹áŠá‰°áŠ› áˆµáˆ áˆ«áˆ± "?" á‰¢á‹­á‹ (áˆˆáˆáˆ³áˆŒ áˆµáˆ™ á‰ á‰µáŠ­áŠ­áˆ
+    "??" á‰¢áˆ†áŠ•) stripping áˆµáˆ™áŠ• áˆ™áˆ‰ áˆˆáˆ™áˆ‰ á‰£á‹¶ áŠ¥áŠ•á‹³á‹«á‹°áˆ­áŒˆá‹ á‹­áŒ á‰¥á‰ƒáˆá¦ stripping "?"
+    áˆµáˆ™áŠ• á‰£á‹¶ á‹¨áˆšá‹«á‹°áˆ­áŒˆá‹ áŠ¨áˆ†áŠ (áŠ¥áŠ“ stripping áŠ¨áˆ˜á‹°áˆ¨áŒ‰ á‰ áŠá‰µ á‹­á‹˜á‰µ áŠá‰ áˆ¨) á‹« "?" áŠ¥áŠ•á‹°
+    pending marker áˆ³á‹­áˆ†áŠ• á‹¨áˆµáˆ™ áŠ áŠ«áˆ á‰°á‹°áˆ­áŒŽ á‹­á‹«á‹›áˆá¢
     """
-    paid = "✅" in raw
-    no_check = raw.replace("✅", "").strip()
+    paid = "âœ…" in raw
+    no_check = raw.replace("âœ…", "").strip()
     stripped = no_check.replace("?", "").strip()
     if not stripped and no_check:
         return no_check, False, paid
@@ -2359,13 +2500,13 @@ def _parse_board_text(text: str, symbol: str = "#") -> dict:
 
 
 # ============================================================
-# NEW — WINNER "🔥 REACTION" BALANCE-CLEAR FEATURE
-# Admin puts a native 🔥 reaction on any message previously sent BY a
-# recent winner (1ኛ/2ኛ/3ኛ) in the group → that winner's balance ONLY
+# NEW â€” WINNER "ðŸ”¥ REACTION" BALANCE-CLEAR FEATURE
+# Admin puts a native ðŸ”¥ reaction on any message previously sent BY a
+# recent winner (1áŠ›/2áŠ›/3áŠ›) in the group â†’ that winner's balance ONLY
 # gets cleared (exactly like /clearbalance @username, by telegram_id).
-# Board/registrations/paid status ናቸው untouched — user_balance ብቻ ነው
-# የሚጸዳው። Confirmation message ("✅ ... ጸድቷል") ይላካል እና 1.5 ሰከንድ ቆይቶ
-# ራሱ ይጠፋል (_send_temp_admin_message helper ተጠቅሞ)።
+# Board/registrations/paid status áŠ“á‰¸á‹ untouched â€” user_balance á‰¥á‰» áŠá‹
+# á‹¨áˆšáŒ¸á‹³á‹á¢ Confirmation message ("âœ… ... áŒ¸á‹µá‰·áˆ") á‹­áˆ‹áŠ«áˆ áŠ¥áŠ“ 1.5 áˆ°áŠ¨áŠ•á‹µ á‰†á‹­á‰¶
+# áˆ«áˆ± á‹­áŒ á‹áˆ (_send_temp_admin_message helper á‰°áŒ á‰…áˆž)á¢
 # ============================================================
 
 async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -2379,7 +2520,7 @@ async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_
         if emoji:
             new_emojis.add(emoji)
 
-    if "🔥" not in new_emojis:
+    if "ðŸ”¥" not in new_emojis:
         return
 
     old_emojis = set()
@@ -2388,8 +2529,8 @@ async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_
         if emoji:
             old_emojis.add(emoji)
 
-    if "🔥" in old_emojis:
-        # ቀድሞውኑ 🔥 ነበረው (አዲስ addition አይደለም) — ድጋሚ balance ማጽዳት አያስፈልግም
+    if "ðŸ”¥" in old_emojis:
+        # á‰€á‹µáˆžá‹áŠ‘ ðŸ”¥ áŠá‰ áˆ¨á‹ (áŠ á‹²áˆµ addition áŠ á‹­á‹°áˆˆáˆ) â€” á‹µáŒ‹áˆš balance áˆ›áŒ½á‹³á‰µ áŠ á‹«áˆµáˆáˆáŒáˆ
         return
 
     group_id = reaction.chat.id
@@ -2423,16 +2564,16 @@ async def handle_winner_fire_reaction(update: Update, ctx: ContextTypes.DEFAULT_
     if not cleared:
         return
 
-    # ✅ "cleared" ማረጋገጫ message ይላካል፣ ልክ እንደ nekay 1.5 ሰከንድ ቆይቶ ራሱ ይጠፋል
+    # âœ… "cleared" áˆ›áˆ¨áŒ‹áŒˆáŒ« message á‹­áˆ‹áŠ«áˆá£ áˆáŠ­ áŠ¥áŠ•á‹° nekay 1.5 áˆ°áŠ¨áŠ•á‹µ á‰†á‹­á‰¶ áˆ«áˆ± á‹­áŒ á‹áˆ
     await _send_temp_admin_message(
-        ctx.bot, group_id, f"✅ {target_name} ባላንስ ጸድቷል", delay=1.5,
+        ctx.bot, group_id, f"âœ… {target_name} á‰£áˆ‹áŠ•áˆµ áŒ¸á‹µá‰·áˆ", delay=1.5,
     )
 
 
 async def handle_winner_correction_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Admin group ላይ bot winner announcement ላይ '#/ 10 20 31' reply ሲያደርግ
-    handle_winner_correction ይጠራ።
+    Admin group áˆ‹á‹­ bot winner announcement áˆ‹á‹­ '#/ 10 20 31' reply áˆ²á‹«á‹°áˆ­áŒ
+    handle_winner_correction á‹­áŒ áˆ«á¢
     """
     msg = update.message
     if not msg or not msg.text:
@@ -2453,7 +2594,7 @@ async def handle_winner_correction_reply(update: Update, ctx: ContextTypes.DEFAU
     if not text.startswith("#/"):
         return
 
-    # reply to bot message ብቻ ይሰራ
+    # reply to bot message á‰¥á‰» á‹­áˆ°áˆ«
     if not msg.reply_to_message:
         return
     if not msg.reply_to_message.from_user:
@@ -2461,9 +2602,9 @@ async def handle_winner_correction_reply(update: Update, ctx: ContextTypes.DEFAU
     if not msg.reply_to_message.from_user.is_bot:
         return
 
-    # 'Winners!' ወይም 'Winners (ተስተካከለ)' announcement ላይ ብቻ
+    # 'Winners!' á‹ˆá‹­áˆ 'Winners (á‰°áˆµá‰°áŠ«áŠ¨áˆˆ)' announcement áˆ‹á‹­ á‰¥á‰»
     replied_text = msg.reply_to_message.text or ""
-    if "🏆" not in replied_text and "Winners" not in replied_text:
+    if "ðŸ†" not in replied_text and "Winners" not in replied_text:
         return
 
     settings = get_active_settings(group_id=group_id)
@@ -2473,10 +2614,10 @@ async def handle_winner_correction_reply(update: Update, ctx: ContextTypes.DEFAU
     from handlers import handle_winner_correction, parse_winner_correction
     numbers = parse_winner_correction(text)
     if not numbers:
-        await msg.reply_text("❌ ምሳሌ: #/ 10  ወይም  #/ 10 20  ወይም  #/ 10 20 31")
+        await msg.reply_text("âŒ áˆáˆ³áˆŒ: #/ 10  á‹ˆá‹­áˆ  #/ 10 20  á‹ˆá‹­áˆ  #/ 10 20 31")
         return
 
-    # DB ላይ ያሉ current winners ያምጣ (ለ reverse ያስፈልጋሉ)
+    # DB áˆ‹á‹­ á‹«áˆ‰ current winners á‹«áˆáŒ£ (áˆˆ reverse á‹«áˆµáˆáˆáŒ‹áˆ‰)
     game_id = settings["id"]
     conn = get_conn()
     cur = conn.cursor()
@@ -2490,7 +2631,7 @@ async def handle_winner_correction_reply(update: Update, ctx: ContextTypes.DEFAU
     cur.close()
     conn.close()
 
-    # previous_winners format ለ handle_winner_correction
+    # previous_winners format áˆˆ handle_winner_correction
     prev_by_place = {}
     for place, telegram_id, user_name, prize in winner_rows:
         if place not in prev_by_place:
@@ -2594,19 +2735,19 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
             half_map = {row[0]: row[4] for row in existing_rows}
             was_paid1 = bool(paid_map.get(1, False))
 
-            # FIX: admin ብዙ ጊዜ ሙሉውን board ጽሁፍ ኮፒ አድርጎ (የፈለገውን 1 መስመር
-            # ብቻ ቀይሮ) reply ያደርጋል — ስለዚህ _parse_board_text() ያልተነኩትንም
-            # መስመሮች (ሁሉንም ቁጥሮች) ጭምር ይመልሳል። ይህ line ከ DB ውስጥ ካለው ጋር
-            # ፍጹም ተመሳሳይ (ምንም ያልተቀየረ) ከሆነ ጨርሶ አንንካውም — አለበለዚያ
-            # admin_remove_player+register_number (is_nekay ሁልጊዜ FALSE
-            # አድርጎ ስለሚያስገባ) ያልተነኩ ቁጥሮች ላይ ያለውን is_nekay ሁኔታ ያጠፋዋል
-            # (ይህ ነው ነቃይ list ሙሉ ለሙሉ ድንገት ይጠፋ የነበረው ትክክለኛ ምክንያት)።
+            # FIX: admin á‰¥á‹™ áŒŠá‹œ áˆ™áˆ‰á‹áŠ• board áŒ½áˆá áŠ®á’ áŠ á‹µáˆ­áŒŽ (á‹¨áˆáˆˆáŒˆá‹áŠ• 1 áˆ˜áˆµáˆ˜áˆ­
+            # á‰¥á‰» á‰€á‹­áˆ®) reply á‹«á‹°áˆ­áŒ‹áˆ â€” áˆµáˆˆá‹šáˆ… _parse_board_text() á‹«áˆá‰°áŠáŠ©á‰µáŠ•áˆ
+            # áˆ˜áˆµáˆ˜áˆ®á‰½ (áˆáˆ‰áŠ•áˆ á‰áŒ¥áˆ®á‰½) áŒ­áˆáˆ­ á‹­áˆ˜áˆáˆ³áˆá¢ á‹­áˆ… line áŠ¨ DB á‹áˆµáŒ¥ áŠ«áˆˆá‹ áŒ‹áˆ­
+            # ááŒ¹áˆ á‰°áˆ˜áˆ³áˆ³á‹­ (áˆáŠ•áˆ á‹«áˆá‰°á‰€á‹¨áˆ¨) áŠ¨áˆ†áŠ áŒ¨áˆ­áˆ¶ áŠ áŠ•áŠ•áŠ«á‹áˆ â€” áŠ áˆˆá‰ áˆˆá‹šá‹«
+            # admin_remove_player+register_number (is_nekay áˆáˆáŒŠá‹œ FALSE
+            # áŠ á‹µáˆ­áŒŽ áˆµáˆˆáˆšá‹«áˆµáŒˆá‰£) á‹«áˆá‰°áŠáŠ© á‰áŒ¥áˆ®á‰½ áˆ‹á‹­ á‹«áˆˆá‹áŠ• is_nekay áˆáŠ”á‰³ á‹«áŒ á‹á‹‹áˆ
+            # (á‹­áˆ… áŠá‹ áŠá‰ƒá‹­ list áˆ™áˆ‰ áˆˆáˆ™áˆ‰ á‹µáŠ•áŒˆá‰µ á‹­áŒ á‹ á‹¨áŠá‰ áˆ¨á‹ á‰µáŠ­áŠ­áˆˆáŠ› áˆáŠ­áŠ•á‹«á‰µ)á¢
             #
-            # FIX #2: is_half ደግሞ ማነጻጸር አለበት — ከዚህ በፊት ስም/paid ብቻ ነበር
-            # የሚነጻጸረው፣ ስለዚህ "በሙሉ የነበረ ቁጥር ወደ ግማሽ መቀየር" (ስም/paid
-            # ተመሳሳይ ሆኖ is_half ብቻ ሲቀየር) ጨርሶ "ምንም አልተቀየረም" ተብሎ ይታለፍ
-            # ነበር — admin መጀመሪያ ባዶ አድርጎ ከዚያ እንደገና ሲጽፍ ብቻ ይሰራ የነበረው
-            # ለዚህ ነው።
+            # FIX #2: is_half á‹°áŒáˆž áˆ›áŠáŒ»áŒ¸áˆ­ áŠ áˆˆá‰ á‰µ â€” áŠ¨á‹šáˆ… á‰ áŠá‰µ áˆµáˆ/paid á‰¥á‰» áŠá‰ áˆ­
+            # á‹¨áˆšáŠáŒ»áŒ¸áˆ¨á‹á£ áˆµáˆˆá‹šáˆ… "á‰ áˆ™áˆ‰ á‹¨áŠá‰ áˆ¨ á‰áŒ¥áˆ­ á‹ˆá‹° áŒáˆ›áˆ½ áˆ˜á‰€á‹¨áˆ­" (áˆµáˆ/paid
+            # á‰°áˆ˜áˆ³áˆ³á‹­ áˆ†áŠ– is_half á‰¥á‰» áˆ²á‰€á‹¨áˆ­) áŒ¨áˆ­áˆ¶ "áˆáŠ•áˆ áŠ áˆá‰°á‰€á‹¨áˆ¨áˆ" á‰°á‰¥áˆŽ á‹­á‰³áˆˆá
+            # áŠá‰ áˆ­ â€” admin áˆ˜áŒ€áˆ˜áˆªá‹« á‰£á‹¶ áŠ á‹µáˆ­áŒŽ áŠ¨á‹šá‹« áŠ¥áŠ•á‹°áŒˆáŠ“ áˆ²áŒ½á á‰¥á‰» á‹­áˆ°áˆ« á‹¨áŠá‰ áˆ¨á‹
+            # áˆˆá‹šáˆ… áŠá‹á¢
             current_name1 = name_map.get(1)
             current_paid1 = bool(paid_map.get(1, False))
             current_is_half1 = bool(half_map.get(1, False))
@@ -2617,9 +2758,9 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
                     and name2 == current_name2 and paid2 == current_paid2):
                 continue
 
-            # FIX: slot1/slot2 ን ተነጣጥሎ ማነጻጸር (ከዚህ በፊት ሁለቱም slots
-            # ላይ ትንሽ ለውጥ እንኳ ቢኖር ሁለቱም ይሰረዙ ነበር — ስለዚህ ያልተነካው slot
-            # (ለምሳሌ nekay/unpaid የሆነ) ጭምር ይጠፋ ነበር)
+            # FIX: slot1/slot2 áŠ• á‰°áŠáŒ£áŒ¥áˆŽ áˆ›áŠáŒ»áŒ¸áˆ­ (áŠ¨á‹šáˆ… á‰ áŠá‰µ áˆáˆˆá‰±áˆ slots
+            # áˆ‹á‹­ á‰µáŠ•áˆ½ áˆˆá‹áŒ¥ áŠ¥áŠ•áŠ³ á‰¢áŠ–áˆ­ áˆáˆˆá‰±áˆ á‹­áˆ°áˆ¨á‹™ áŠá‰ áˆ­ â€” áˆµáˆˆá‹šáˆ… á‹«áˆá‰°áŠáŠ«á‹ slot
+            # (áˆˆáˆáˆ³áˆŒ nekay/unpaid á‹¨áˆ†áŠ) áŒ­áˆáˆ­ á‹­áŒ á‹ áŠá‰ áˆ­)
             slot1_changed = not (name1 == current_name1 and paid1 == current_paid1
                                  and is_half1 == current_is_half1)
             slot2_changed = not (name2 == current_name2 and paid2 == current_paid2)
@@ -2727,14 +2868,14 @@ async def handle_admin_board_reply(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 
 # ============================================================
-# OWNER REASSIGNMENT — admin replies to a REAL USER's message with
+# OWNER REASSIGNMENT â€” admin replies to a REAL USER's message with
 # "#/ 01 21 31+1" to attach that user's telegram_id to numbers that
 # were registered manually (board edit / /register) without a real
-# telegram user_id. Only fixes ownership (user_id) — user_name and
+# telegram user_id. Only fixes ownership (user_id) â€” user_name and
 # paid status entered by the admin are left untouched.
-#   #/ 01        → number 1, all slots → this user
-#   #/ 31+1      → number 31, slot 1 only → this user
-#   #/ 11        → if number 11 already belongs to someone else,
+#   #/ 01        â†’ number 1, all slots â†’ this user
+#   #/ 31+1      â†’ number 31, slot 1 only â†’ this user
+#   #/ 11        â†’ if number 11 already belongs to someone else,
 #                   ownership is transferred to this user
 # ============================================================
 
@@ -2745,32 +2886,31 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     text = msg.text.strip()
 
-    # ✅ FIX: 2 ሙሉ በሙሉ የተለያዩ syntax — እንዳይምታቱ (ይህ ፍተሻ ቀድሞ እንዲደረግ
-    # ተንቀሳቅሷል፣ ስለዚህ "#" ባልጀመረ message ላይ ዋጋ የሌለው DB call አይደረግም)
-    #   "#<amount>"   (ስላሽ የለውም) → Winner ክፍያ ብቻ, ለምሳሌ #300
-    #   "#/ NUM ..."  (ስላሽ አለው)  → Owner reassignment ብቻ, ለምሳሌ #/ 01 21 31+1
-    #   "#name <ስም>"  → FIX #3: name override, ለምሳሌ #name አበበ ወይም #name አበበ ከበደ
-    #                    "#name" ብቻ (ስም ሳይከተል) → override reset
-    #   "##cancel"    → payment-fingerprint feature: ያ user's fingerprint ያጠፋል
-    #   "##<SMS text>" → payment-fingerprint feature: admin ራሱ የደረሰውን SMS
-    #                    ጽሁፍ ኮፒ አድርጎ reply ያደርጋል → AI parse → confirm_payment
-    #                    + fingerprint learn (ወደፊት "ልኬያለው" ራስ-ሰር እንዲሆን)
-    #   "#እሺ/#eshi NUM[+SLOT][✅] ..." → NEW: reply-to-user (ተይዞብሃል ያለበት
-    #                    ኦርጅናል message ላይ reply) ባለቤት+ስም ይተካል፣ ✅ ካለ paid
-    #                    ተብሎ ይመዘገባል፣ ቀደም ያለው bot rejection message ይጠፋል፣
-    #                    "NUM ተይዞልሃል 🙏" አዲስ message ይላካል። "#" prefix ግድ
-    #                    ነው (ያለ # ብቻውን "እሺ" ተራ ወሬ/reply ጋር እንዳይምታታ)
+    # âœ… FIX: 2 áˆ™áˆ‰ á‰ áˆ™áˆ‰ á‹¨á‰°áˆˆá‹«á‹© syntax â€” áŠ¥áŠ•á‹³á‹­áˆá‰³á‰± (á‹­áˆ… áá‰°áˆ» á‰€á‹µáˆž áŠ¥áŠ•á‹²á‹°áˆ¨áŒ
+    # á‰°áŠ•á‰€áˆ³á‰…áˆ·áˆá£ áˆµáˆˆá‹šáˆ… "#" á‰£áˆáŒ€áˆ˜áˆ¨ message áˆ‹á‹­ á‹‹áŒ‹ á‹¨áˆŒáˆˆá‹ DB call áŠ á‹­á‹°áˆ¨áŒáˆ)
+    #   (#<amount> winner áŠ­áá‹« á‰°á‹ˆáŒá‹·áˆ â€” áˆˆá‹šá‹« ðŸ”¥ reaction á‹­áŒ á‰€áˆ™)
+    #   "#/ NUM ..."  (áˆµáˆ‹áˆ½ áŠ áˆˆá‹)  â†’ Owner reassignment á‰¥á‰», áˆˆáˆáˆ³áˆŒ #/ 01 21 31+1
+    #   "#name <áˆµáˆ>"  â†’ FIX #3: name override, áˆˆáˆáˆ³áˆŒ #name áŠ á‰ á‰  á‹ˆá‹­áˆ #name áŠ á‰ á‰  áŠ¨á‰ á‹°
+    #                    "#name" á‰¥á‰» (áˆµáˆ áˆ³á‹­áŠ¨á‰°áˆ) â†’ override reset
+    #   "##cancel"    â†’ payment-fingerprint feature: á‹« user's fingerprint á‹«áŒ á‹áˆ
+    #   "##<SMS text>" â†’ payment-fingerprint feature: admin áˆ«áˆ± á‹¨á‹°áˆ¨áˆ°á‹áŠ• SMS
+    #                    áŒ½áˆá áŠ®á’ áŠ á‹µáˆ­áŒŽ reply á‹«á‹°áˆ­áŒ‹áˆ â†’ AI parse â†’ confirm_payment
+    #                    + fingerprint learn (á‹ˆá‹°áŠá‰µ "áˆáŠ¬á‹«áˆˆá‹" áˆ«áˆµ-áˆ°áˆ­ áŠ¥áŠ•á‹²áˆ†áŠ•)
+    #   "# NUM[+SLOT][âœ…] ..." â†’ reply-to-user (á‰°á‹­á‹žá‰¥áˆƒáˆ á‹«áˆˆá‰ á‰µ
+    #                    áŠ¦áˆ­áŒ…áŠ“áˆ message áˆ‹á‹­ reply) á‰£áˆˆá‰¤á‰µ+áˆµáˆ á‹­á‰°áŠ«áˆá£ âœ… áŠ«áˆˆ paid
+    #                    á‰°á‰¥áˆŽ á‹­áˆ˜á‹˜áŒˆá‰£áˆá£ á‰€á‹°áˆ á‹«áˆˆá‹ bot rejection message á‹­áŒ á‹áˆá£
+    #                    "NUM á‰°á‹­á‹žáˆáˆƒáˆ ðŸ™" áŠ á‹²áˆµ message á‹­áˆ‹áŠ«áˆá¢ "#" prefix áŒá‹µ
+    #                    áŠá‹á¢
     is_sms_cancel_form = text.lower().startswith("##cancel")
     is_sms_paste_form = text.startswith("##") and not is_sms_cancel_form
     is_name_form = text.lower().startswith("#name")
-    is_eshi_form = text.startswith("#እሺ") or text.lower().startswith("#eshi")
-    is_payment_form = (
-        text.startswith("#") and not text.startswith("#/")
-        and not is_name_form and not text.startswith("##")
-        and not is_eshi_form
-    )
     is_owner_form = text.startswith("#/")
-    if not (is_payment_form or is_owner_form or is_name_form or is_sms_cancel_form or is_sms_paste_form or is_eshi_form):
+    # "# NUM[+SLOT][âœ…] ..." â€” á‰£áˆˆá‰¤á‰µ+áˆµáˆ áˆ˜á‰°áŠªá‹« (á‹¨á‰€á‹µáˆžá‹ #eshi/#áŠ¥áˆº áˆµáˆ« áŠ áˆáŠ• á‰  "#" á‰¥á‰»)
+    is_eshi_form = (
+        text.startswith("#") and not text.startswith("#/")
+        and not text.startswith("##") and not is_name_form
+    )
+    if not (is_owner_form or is_name_form or is_sms_cancel_form or is_sms_paste_form or is_eshi_form):
         return
 
     logging.info(f"[OwnerReply] Triggered: text={text!r} chat={update.effective_chat.id} user={update.effective_user.id}")
@@ -2789,26 +2929,26 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_group_active(group_id):
         logging.info(f"[OwnerReply] Rejected: group {group_id} not active")
         if is_eshi_form:
-            await msg.reply_text("❌ ንቁ ጨዋታ የለም (active game required)")
+            await msg.reply_text("âŒ áŠ•á‰ áŒ¨á‹‹á‰³ á‹¨áˆˆáˆ (active game required)")
         return
 
     # winner-correction replies (reply to the BOT's Winners announcement)
-    # are handled by handle_winner_correction_reply — this handler is only
+    # are handled by handle_winner_correction_reply â€” this handler is only
     # for replies to a REAL USER's message (ownership fix / payment).
     if not msg.reply_to_message:
         logging.info("[OwnerReply] Rejected: not a reply to any message")
         if is_eshi_form:
-            await msg.reply_text("❌ #እሺ የተጠቃሚውን message ላይ reply ተደርጎ መጻፍ አለበት")
+            await msg.reply_text("âŒ # á‹¨á‰°áŒ á‰ƒáˆšá‹áŠ• message áˆ‹á‹­ reply á‰°á‹°áˆ­áŒŽ áˆ˜áŒ»á áŠ áˆˆá‰ á‰µ")
         return
     if not msg.reply_to_message.from_user:
         logging.info("[OwnerReply] Rejected: reply_to_message has no from_user")
         if is_eshi_form:
-            await msg.reply_text("❌ ይህ message ላይ reply ማድረግ አይቻልም")
+            await msg.reply_text("âŒ á‹­áˆ… message áˆ‹á‹­ reply áˆ›á‹µáˆ¨áŒ áŠ á‹­á‰»áˆáˆ")
         return
     if msg.reply_to_message.from_user.is_bot:
         logging.info("[OwnerReply] Rejected: replied-to message is from the bot (handled elsewhere)")
         if is_eshi_form:
-            await msg.reply_text("❌ #እሺ የ bot message ላይ ሳይሆን የተጠቃሚውን ኦርጅናል message ላይ reply መደረግ አለበት")
+            await msg.reply_text("âŒ # á‹¨ bot message áˆ‹á‹­ áˆ³á‹­áˆ†áŠ• á‹¨á‰°áŒ á‰ƒáˆšá‹áŠ• áŠ¦áˆ­áŒ…áŠ“áˆ message áˆ‹á‹­ reply áˆ˜á‹°áˆ¨áŒ áŠ áˆˆá‰ á‰µ")
         return
 
     owner = msg.reply_to_message.from_user
@@ -2817,11 +2957,11 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     import re as _re_owner
 
     # ============================================================
-    # FIX #3: "#name <name>" — name override reply-to-user command
-    # "#name" ብቻ (ስም ሳይከተል) → override ይጠፋል፣ ወደ original ስም-መለያ logic
-    # ይመለሳል (parsed_name ራሱ አልተነካም)። admin ደጋግሞ ሊቀይረው ይችላል — ሁልጊዜ
-    # የመጨረሻው ትዕዛዝ ይሰራል። admin's own "#name ..." message ወዲያውኑ ይጠፋል
-    # (ልክ እንደ #/ እና # ትዕዛዞች)።
+    # FIX #3: "#name <name>" â€” name override reply-to-user command
+    # "#name" á‰¥á‰» (áˆµáˆ áˆ³á‹­áŠ¨á‰°áˆ) â†’ override á‹­áŒ á‹áˆá£ á‹ˆá‹° original áˆµáˆ-áˆ˜áˆˆá‹« logic
+    # á‹­áˆ˜áˆˆáˆ³áˆ (parsed_name áˆ«áˆ± áŠ áˆá‰°áŠáŠ«áˆ)á¢ admin á‹°áŒ‹áŒáˆž áˆŠá‰€á‹­áˆ¨á‹ á‹­á‰½áˆ‹áˆ â€” áˆáˆáŒŠá‹œ
+    # á‹¨áˆ˜áŒ¨áˆ¨áˆ»á‹ á‰µá‹•á‹›á‹ á‹­áˆ°áˆ«áˆá¢ admin's own "#name ..." message á‹ˆá‹²á‹«á‹áŠ‘ á‹­áŒ á‹áˆ
+    # (áˆáŠ­ áŠ¥áŠ•á‹° #/ áŠ¥áŠ“ # á‰µá‹•á‹›á‹žá‰½)á¢
     # ============================================================
     if is_name_form:
         body = text[len("#name"):].strip()
@@ -2836,8 +2976,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ============================================================
-    # "##cancel" — admin የተሳሳተ fingerprint (ስም/last4) ካስቀመጠ ለዚህ user
-    # (reply-to-user) ያለውን fingerprint ሙሉ በሙሉ ያጠፋል።
+    # "##cancel" â€” admin á‹¨á‰°áˆ³áˆ³á‰° fingerprint (áˆµáˆ/last4) áŠ«áˆµá‰€áˆ˜áŒ  áˆˆá‹šáˆ… user
+    # (reply-to-user) á‹«áˆˆá‹áŠ• fingerprint áˆ™áˆ‰ á‰ áˆ™áˆ‰ á‹«áŒ á‹áˆá¢
     # ============================================================
     if is_sms_cancel_form:
         delete_user_fingerprint(group_id, owner_id)
@@ -2846,26 +2986,26 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except Exception:
             pass
         winner_name = owner.first_name or owner.username or "Unknown"
-        await _send_temp_admin_message(ctx.bot, group_id, f"✅ {winner_name} fingerprint ጠፋ")
+        await _send_temp_admin_message(ctx.bot, group_id, f"âœ… {winner_name} fingerprint áŒ á‹")
         return
 
     # ============================================================
-    # "##<SMS text>" — admin የደረሰውን ትክክለኛ SMS ጽሁፍ ኮፒ አድርጎ user's
-    # message ላይ reply ያደርጋል። AI (Groq) parse ያደርገዋል፣ ስም/last4
-    # ካጣ ብቻ (URL ካለ) Jina+Groq ሙሉ receipt ያመጣል፣ ከዛ reply-to ያለው
-    # owner_id ላይ በቀጥታ confirm_payment() ተጠርቶ fingerprint ይማራል።
+    # "##<SMS text>" â€” admin á‹¨á‹°áˆ¨áˆ°á‹áŠ• á‰µáŠ­áŠ­áˆˆáŠ› SMS áŒ½áˆá áŠ®á’ áŠ á‹µáˆ­áŒŽ user's
+    # message áˆ‹á‹­ reply á‹«á‹°áˆ­áŒ‹áˆá¢ AI (Groq) parse á‹«á‹°áˆ­áŒˆá‹‹áˆá£ áˆµáˆ/last4
+    # áŠ«áŒ£ á‰¥á‰» (URL áŠ«áˆˆ) Jina+Groq áˆ™áˆ‰ receipt á‹«áˆ˜áŒ£áˆá£ áŠ¨á‹› reply-to á‹«áˆˆá‹
+    # owner_id áˆ‹á‹­ á‰ á‰€áŒ¥á‰³ confirm_payment() á‰°áŒ áˆ­á‰¶ fingerprint á‹­áˆ›áˆ«áˆá¢
     # ============================================================
     if is_sms_paste_form:
         sms_text = text[2:].strip()
         if not sms_text:
-            await msg.reply_text("❌ ምሳሌ: ##<SMS ጽሁፍ ኮፒ አድርገህ ለጥፍ>")
+            await msg.reply_text("âŒ áˆáˆ³áˆŒ: ##<SMS áŒ½áˆá áŠ®á’ áŠ á‹µáˆ­áŒˆáˆ… áˆˆáŒ¥á>")
             return
 
         settings_for_sms = get_active_settings(group_id=group_id)
         result = await handle_admin_sms_paste(ctx.bot, msg, sms_text, owner_id, group_id)
 
         if not result.get("success"):
-            await msg.reply_text("❌ SMS ሊተነተን አልቻለም — ጽሁፉን እንደገና ኮፒ አድርገህ ላክ")
+            await msg.reply_text("âŒ SMS áˆŠá‰°áŠá‰°áŠ• áŠ áˆá‰»áˆˆáˆ â€” áŒ½áˆá‰áŠ• áŠ¥áŠ•á‹°áŒˆáŠ“ áŠ®á’ áŠ á‹µáˆ­áŒˆáˆ… áˆ‹áŠ­")
             return
 
         try:
@@ -2876,99 +3016,19 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         winner_name = owner.first_name or owner.username or "Unknown"
         amount = result.get("amount")
         await _send_temp_admin_message(
-            ctx.bot, group_id, f"✅ {winner_name} → ETB {amount} ተረጋግጧል (SMS)"
+            ctx.bot, group_id, f"âœ… {winner_name} â†’ ETB {amount} á‰°áˆ¨áŒ‹áŒáŒ§áˆ (SMS)"
         )
 
         if settings_for_sms:
             await _refresh_board(ctx, settings_for_sms, group_id)
         return
 
-    if is_payment_form:
-        # ✅ WINNER PAYMENT/CORRECTION: "#<amount>" (ስላሽ የለውም) — reply
-        # ተደረገበት ሰው real winner ሆኖ ብቻ ይሰራል። AI/userbot ሳይጠቀም admin ራሱ
-        # ስንት ብር እንደላከ በ reply ያረጋግጣል። ይህ active game መኖር አያስፈልገውም
-        # (ገንዘቡ ቀድሞ ለተመዘገበ winner ብቻ ስለሚሰራ)። ድጋሚ ተመሳሳይ ሰው (የትኛውም
-        # message ላይ) #<new_amount> ቢልክ፣ ቀድሞ የተላከው ይሻራል (reverse) እና
-        # አዲሱ amount ብቻ ተቀናሽ ይደረጋል (ድምር ሳይሆን ትክክለኛው የመጨረሻ amount ብቻ
-        # ውጤት ይሆናል)።
-        #
-        # FIX: አንድ ሰው ብዙ places (ለምሳሌ 2ኛ እና 3ኛ፣ ወይም 1ኛ እና 2ኛ) በአንድ ጊዜ
-        # ካሸነፈ፣ ልክ እንደ userbot2.py's process_winner_payment style ሁሉንም
-        # tied ቦታዎች ድምር አድርጎ በአንድ payment (single deduct + single
-        # announcement) ይይዛል፣ ምንም ቦታ ሳይዘነጋ።
-        body = text[1:].strip()
-        amount_match = _re_owner.match(r'^(\d+(?:\.\d+)?)$', body)
-        if not amount_match:
-            await msg.reply_text("❌ ምሳሌ: #300  (ለ winner ክፍያ ብቻ፣ ቁጥር ብቻ ጻፍ)")
-            return
-
-        all_winner_records = get_recent_winners_for_user(group_id, owner_id)
-        if not all_winner_records:
-            logging.info(f"[OwnerReply] Payment rejected: telegram_id {owner_id} has no recent winner record with prize_balance>0 in group {group_id}")
-            await msg.reply_text("❌ ይህ ሰው በቅርብ ጊዜ winner አይደለም — ክፍያ አይሰራም!")
-            return
-
-        new_amount = float(amount_match.group(1))
-
-        # tied ቦታዎች ካሉ (ተመሳሳይ game_id+telegram_id) mark_winner_sent
-        # single call ሁሉንም rows ወደ ተመሳሳይ sent_amount ስለሚያደርግ፣ ድርብ-ቁጥር
-        # እንዳይፈጠር prev_sent የሚሰላው በ MAX (ድምር ሳይሆን) ነው።
-        prev_sent = max((w["sent_amount"] for w in all_winner_records), default=0.0)
-        primary = all_winner_records[0]  # ዝቅተኛው place (1ኛ ቀዳሚ)
-        win_game_id = primary["game_id"]
-        places = sorted(set(w["place"] for w in all_winner_records))
-        delta = new_amount - prev_sent
-
-        result = deduct_winner_balance(win_game_id, owner_id, delta, group_id=group_id)
-        new_balance = result["new_balance"]
-
-        # ሁሉንም tied places (ምናልባትም የተለያዩ game_id ቢኖራቸውም) sent=TRUE
-        # እና sent_amount=new_amount አድርጎ ምልክት ያድርግ
-        distinct_game_ids = set(w["game_id"] for w in all_winner_records)
-        for gid in distinct_game_ids:
-            mark_winner_sent(gid, owner_id, new_amount)
-
-        try:
-            from ai_fallback import log_transaction
-            log_transaction(
-                group_id=group_id, game_id=win_game_id,
-                telegram_id=owner_id, amount=-delta,
-                reason="winner_sent" if prev_sent == 0 else "winner_sent_correction",
-                done_by="admin", balance_after=new_balance,
-            )
-        except Exception as _log_err:
-            logging.warning(f"[log_transaction] Error: {_log_err}")
-
-        place_label = " & ".join(
-            {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(p, f"{p}ኛ") for p in places
-        )
-        winner_name = owner.first_name or owner.username or "Unknown"
-
-        if prev_sent > 0 and prev_sent != new_amount:
-            out_text = f"✏️ {place_label} winner: {winner_name} → ተስተካክሏል: ETB {prev_sent:.0f} → ETB {new_amount:.0f}"
-        else:
-            out_text = f"💸 {place_label} winner: {winner_name} → ETB {new_amount:.0f} ተልኳል"
-
-        # ✅ ተቀባይነት ስላገኘ ብቻ admin's own "#<amount>" message ይጠፋል
-        try:
-            await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
-        except Exception:
-            pass
-
-        # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
-        await _send_temp_admin_message(ctx.bot, group_id, out_text)
-
-        fresh = get_active_settings(group_id=group_id)
-        if fresh:
-            await _refresh_board(ctx, fresh, group_id)
-        return
-
     # ============================================================
-    # NEW — "እሺ/eshi NUM[+SLOT][✅] ..." REPLACEMENT (reply-to-user's own
-    # "01" attempt message, ልክ ካለፈው ወይም ገና ካለው rejection ("ተይዞብሃል") ጋር)።
-    # ባለቤት+ስም ይተካል፣ ✅ ካለ ያ ቁጥር paid ተብሎ ይመዘገባል (ካልሆነ unpaid ይሆናል)፣
-    # ቀደም ያለው bot rejection message ይጠፋል፣ "NUM ተይዞልሃል 🙏" አዲስ message
-    # ለ user ይላካል፣ board ላይ ስም ይቀየራል።
+    # NEW â€” "# NUM[+SLOT][âœ…] ..." REPLACEMENT (reply-to-user's own
+    # "01" attempt message, áˆáŠ­ áŠ«áˆˆáˆá‹ á‹ˆá‹­áˆ áŒˆáŠ“ áŠ«áˆˆá‹ rejection ("á‰°á‹­á‹žá‰¥áˆƒáˆ") áŒ‹áˆ­)á¢
+    # á‰£áˆˆá‰¤á‰µ+áˆµáˆ á‹­á‰°áŠ«áˆá£ âœ… áŠ«áˆˆ á‹« á‰áŒ¥áˆ­ paid á‰°á‰¥áˆŽ á‹­áˆ˜á‹˜áŒˆá‰£áˆ (áŠ«áˆáˆ†áŠ unpaid á‹­áˆ†áŠ“áˆ)á£
+    # á‰€á‹°áˆ á‹«áˆˆá‹ bot rejection message á‹­áŒ á‹áˆá£ "NUM á‰°á‹­á‹žáˆáˆƒáˆ ðŸ™" áŠ á‹²áˆµ message
+    # áˆˆ user á‹­áˆ‹áŠ«áˆá£ board áˆ‹á‹­ áˆµáˆ á‹­á‰€á‹¨áˆ«áˆá¢
     # ============================================================
     if is_eshi_form:
         settings_eshi = get_active_settings(group_id=group_id)
@@ -2976,14 +3036,11 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             return
         game_id_eshi = settings_eshi["id"]
 
-        if text.startswith("#እሺ"):
-            eshi_body = text[len("#እሺ"):].strip()
-        else:
-            eshi_body = text[len("#eshi"):].strip()
+        eshi_body = text[1:].strip()
 
         eshi_parts = [p for p in _re_owner.split(r'[,\s]+', eshi_body.strip()) if p]
         if not eshi_parts:
-            await msg.reply_text("❌ ምሳሌ: #እሺ 01 ወይም #እሺ 01+2 06✅")
+            await msg.reply_text("âŒ áˆáˆ³áˆŒ: # 01 á‹ˆá‹­áˆ # 01+2 06âœ…")
             return
 
         target_name = owner.first_name or owner.username or "Unknown"
@@ -2991,8 +3048,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         assigned = []
         errors = []
         for part in eshi_parts:
-            mark_paid = "✅" in part
-            clean_part = part.replace("✅", "")
+            mark_paid = "âœ…" in part
+            clean_part = part.replace("âœ…", "")
             slot_match = _re_owner.match(r'^(\d+)\+(\d+)$', clean_part)
             if slot_match:
                 number = int(slot_match.group(1))
@@ -3020,10 +3077,10 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
 
             if not is_half:
-                # FIX: ሙሉ (full) ከሆነ — ነባር slot(s) (ባዶ፣ ግማሽ፣ ወይም ሙሉ
-                # ይሁኑ) ምንም ይሁኑ ንፁህ በአንድ full row ይተካል። admin_replace_owner
-                # ብቻ ቢጠቀም (UPDATE ብቻ) is_half አይነካም/ ተጨማሪ slot2 row
-                # አይጠፋም ነበር — ስለዚህ ግማሽ→ሙሉ change ፈጽሞ አይሰራም ነበር።
+                # FIX: áˆ™áˆ‰ (full) áŠ¨áˆ†áŠ â€” áŠá‰£áˆ­ slot(s) (á‰£á‹¶á£ áŒáˆ›áˆ½á£ á‹ˆá‹­áˆ áˆ™áˆ‰
+                # á‹­áˆáŠ‘) áˆáŠ•áˆ á‹­áˆáŠ‘ áŠ•ááˆ… á‰ áŠ áŠ•á‹µ full row á‹­á‰°áŠ«áˆá¢ admin_replace_owner
+                # á‰¥á‰» á‰¢áŒ á‰€áˆ (UPDATE á‰¥á‰») is_half áŠ á‹­áŠáŠ«áˆ/ á‰°áŒ¨áˆ›áˆª slot2 row
+                # áŠ á‹­áŒ á‹áˆ áŠá‰ áˆ­ â€” áˆµáˆˆá‹šáˆ… áŒáˆ›áˆ½â†’áˆ™áˆ‰ change áˆáŒ½áˆž áŠ á‹­áˆ°áˆ«áˆ áŠá‰ áˆ­á¢
                 found = False
                 try:
                     conn_full = get_conn()
@@ -3050,10 +3107,10 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 continue
 
             if slot is None and is_half:
-                # FIX: "01+" (የትኛው slot እንዳልገለጽክ) ሲባል — ነባር registration
-                # ካለ (ለምሳሌ slot1=አበበ)፣ ክፍት slot ን (slot2) ብቻ ነው መያዝ
-                # ያለበት — ነባሩን (አበበን) ጨርሶ መተካት የለበትም። የትኛው slot ክፍት
-                # እንደሆነ አረጋግጦ ብቻ ይነካል።
+                # FIX: "01+" (á‹¨á‰µáŠ›á‹ slot áŠ¥áŠ•á‹³áˆáŒˆáˆˆáŒ½áŠ­) áˆ²á‰£áˆ â€” áŠá‰£áˆ­ registration
+                # áŠ«áˆˆ (áˆˆáˆáˆ³áˆŒ slot1=áŠ á‰ á‰ )á£ áŠ­áá‰µ slot áŠ• (slot2) á‰¥á‰» áŠá‹ áˆ˜á‹«á‹
+                # á‹«áˆˆá‰ á‰µ â€” áŠá‰£áˆ©áŠ• (áŠ á‰ á‰ áŠ•) áŒ¨áˆ­áˆ¶ áˆ˜á‰°áŠ«á‰µ á‹¨áˆˆá‰ á‰µáˆá¢ á‹¨á‰µáŠ›á‹ slot áŠ­áá‰µ
+                # áŠ¥áŠ•á‹°áˆ†áŠ áŠ áˆ¨áŒ‹áŒáŒ¦ á‰¥á‰» á‹­áŠáŠ«áˆá¢
                 try:
                     conn_chk = get_conn()
                     cur_chk = conn_chk.cursor()
@@ -3074,7 +3131,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 elif not existing_slots_eshi:
                     slot = 1
                 else:
-                    errors.append(part + " (ሙሉ ተይዟል)")
+                    errors.append(part + " (áˆ™áˆ‰ á‰°á‹­á‹Ÿáˆ)")
                     continue
 
             found = admin_replace_owner(
@@ -3083,11 +3140,11 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             )
 
             if not found:
-                # NEW: ቁጥሩ ባዶ (ምንም registration ስላልነበረ replace ያልተሳካ)
-                # ከሆነ — replace ብቻ ሳይሆን አዲስ registration ደግሞ ይፍጠር
-                # (register_number()'s force_slot path is_nekay=TRUE የሚጠይቅ
-                # ስለሆነ እና ሌላኛው slot ነባር ቢሆን ትክክል ስለማይሰራ፣ በቀጥታ INSERT
-                # እንጠቀማለን — admin override ስለሆነ balance አይነካም)
+                # NEW: á‰áŒ¥áˆ© á‰£á‹¶ (áˆáŠ•áˆ registration áˆµáˆ‹áˆáŠá‰ áˆ¨ replace á‹«áˆá‰°áˆ³áŠ«)
+                # áŠ¨áˆ†áŠ â€” replace á‰¥á‰» áˆ³á‹­áˆ†áŠ• áŠ á‹²áˆµ registration á‹°áŒáˆž á‹­ááŒ áˆ­
+                # (register_number()'s force_slot path is_nekay=TRUE á‹¨áˆšáŒ á‹­á‰…
+                # áˆµáˆˆáˆ†áŠ áŠ¥áŠ“ áˆŒáˆ‹áŠ›á‹ slot áŠá‰£áˆ­ á‰¢áˆ†áŠ• á‰µáŠ­áŠ­áˆ áˆµáˆˆáˆ›á‹­áˆ°áˆ«á£ á‰ á‰€áŒ¥á‰³ INSERT
+                # áŠ¥áŠ•áŒ á‰€áˆ›áˆˆáŠ• â€” admin override áˆµáˆˆáˆ†áŠ balance áŠ á‹­áŠáŠ«áˆ)
                 reg_slot = slot if slot is not None else 1
                 inserted = False
                 try:
@@ -3116,10 +3173,10 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         if not assigned:
             if errors:
-                await msg.reply_text(f"❌ ያልተገኘ: {', '.join(errors)}")
+                await msg.reply_text(f"âŒ á‹«áˆá‰°áŒˆáŠ˜: {', '.join(errors)}")
             return
 
-        # ቀደም ያለው bot "ተይዞብሃል" rejection message ካለ ይጠፋ
+        # á‰€á‹°áˆ á‹«áˆˆá‹ bot "á‰°á‹­á‹žá‰¥áˆƒáˆ" rejection message áŠ«áˆˆ á‹­áŒ á‹
         rejection_key = (group_id, msg.reply_to_message.message_id)
         old_rejection_msg_id = _taken_rejection_msgs.pop(rejection_key, None)
         if old_rejection_msg_id:
@@ -3128,21 +3185,21 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             except Exception:
                 pass
 
-        # admin's own "እሺ ..." command message ይጠፋ
+        # admin's own "# ..." command message á‹­áŒ á‹
         try:
             await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
         except Exception:
             pass
 
-        # አዲስ "NUM ተይዞልሃል 🙏" confirmation ለ user (reply-to ኦርጅናል message)
+        # áŠ á‹²áˆµ "NUM á‰°á‹­á‹žáˆáˆƒáˆ ðŸ™" confirmation áˆˆ user (reply-to áŠ¦áˆ­áŒ…áŠ“áˆ message)
         numbers_label = " ".join(assigned)
         try:
-            await msg.reply_to_message.reply_text(f"{numbers_label} ተይዞልሃል 🙏")
+            await msg.reply_to_message.reply_text(f"{numbers_label} á‰°á‹­á‹žáˆáˆƒáˆ ðŸ™")
         except Exception as e:
             logging.warning(f"[Eshi] confirmation reply error: {e}")
 
         if errors:
-            await _send_temp_admin_message(ctx.bot, group_id, f"❌ ያልተገኘ: {', '.join(errors)}")
+            await _send_temp_admin_message(ctx.bot, group_id, f"âŒ á‹«áˆá‰°áŒˆáŠ˜: {', '.join(errors)}")
 
         fresh = get_active_settings(group_id=group_id)
         if fresh:
@@ -3150,8 +3207,8 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     # ============================================================
-    # OWNER REASSIGNMENT — "#/ NUM NUM+SLOT" ብቻ (ስላሽ አለው)፣ active
-    # game ያስፈልገዋል (total_numbers ማረጋገጥ ስላለበት)
+    # OWNER REASSIGNMENT â€” "#/ NUM NUM+SLOT" á‰¥á‰» (áˆµáˆ‹áˆ½ áŠ áˆˆá‹)á£ active
+    # game á‹«áˆµáˆáˆáŒˆá‹‹áˆ (total_numbers áˆ›áˆ¨áŒ‹áŒˆáŒ¥ áˆµáˆ‹áˆˆá‰ á‰µ)
     # ============================================================
     settings = get_active_settings(group_id=group_id)
     if not settings:
@@ -3160,7 +3217,7 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     parts = text[2:].strip().split()
     if not parts:
-        await msg.reply_text("❌ ምሳሌ: #/ 01 21 31+1")
+        await msg.reply_text("âŒ áˆáˆ³áˆŒ: #/ 01 21 31+1")
         return
 
     assigned = []
@@ -3192,22 +3249,22 @@ async def handle_owner_reply(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     reply_lines = []
     if assigned:
-        reply_lines.append(f"✅ {', '.join(assigned)} → ባለቤት ተስተካክሏል!")
+        reply_lines.append(f"âœ… {', '.join(assigned)} â†’ á‰£áˆˆá‰¤á‰µ á‰°áˆµá‰°áŠ«áŠ­áˆáˆ!")
     if errors:
-        reply_lines.append(f"❌ ያልተገኘ: {', '.join(errors)}")
+        reply_lines.append(f"âŒ á‹«áˆá‰°áŒˆáŠ˜: {', '.join(errors)}")
 
     if assigned:
-        # ✅ ተቀባይነት ስላገኘ (ቢያንስ አንድ ቁጥር ስለተስተካከለ) admin's own
-        # "#/ ..." message ይጠፋል — ልክ እንደ board reply
+        # âœ… á‰°á‰€á‰£á‹­áŠá‰µ áˆµáˆ‹áŒˆáŠ˜ (á‰¢á‹«áŠ•áˆµ áŠ áŠ•á‹µ á‰áŒ¥áˆ­ áˆµáˆˆá‰°áˆµá‰°áŠ«áŠ¨áˆˆ) admin's own
+        # "#/ ..." message á‹­áŒ á‹áˆ â€” áˆáŠ­ áŠ¥áŠ•á‹° board reply
         try:
             await ctx.bot.delete_message(chat_id=group_id, message_id=msg.message_id)
         except Exception:
             pass
         if reply_lines:
-            # FIX #4: admin confirmation message ከ1.5-2 ሰከንድ በኋላ ራሱ ይጠፋል
+            # FIX #4: admin confirmation message áŠ¨1.5-2 áˆ°áŠ¨áŠ•á‹µ á‰ áŠ‹áˆ‹ áˆ«áˆ± á‹­áŒ á‹áˆ
             await _send_temp_admin_message(ctx.bot, group_id, "\n".join(reply_lines))
     elif reply_lines:
-        # ምንም ካልተስተካከለ message እንዳለ ይቆያል (admin ምን እንደጻፈ እንዲያይ)
+        # áˆáŠ•áˆ áŠ«áˆá‰°áˆµá‰°áŠ«áŠ¨áˆˆ message áŠ¥áŠ•á‹³áˆˆ á‹­á‰†á‹«áˆ (admin áˆáŠ• áŠ¥áŠ•á‹°áŒ»áˆ áŠ¥áŠ•á‹²á‹«á‹­)
         await msg.reply_text("\n".join(reply_lines))
 
 
@@ -3221,7 +3278,7 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /remove 5  ወይም  /remove 5:1 10 15:2  ወይም  5+1 15+2")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /remove 5  á‹ˆá‹­áˆ  /remove 5:1 10 15:2  á‹ˆá‹­áˆ  5+1 15+2")
         return
 
     settings = get_active_settings(group_id=group_id)
@@ -3239,14 +3296,14 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 number = int(num_str)
                 slot = int(slot_str)
             elif "+" in part:
-                # ✅ FIX: NUM+SLOT (ለምሳሌ 5+1 ወይም 5+2) — ልክ እንደ /nekay slot መለያ
+                # âœ… FIX: NUM+SLOT (áˆˆáˆáˆ³áˆŒ 5+1 á‹ˆá‹­áˆ 5+2) â€” áˆáŠ­ áŠ¥áŠ•á‹° /nekay slot áˆ˜áˆˆá‹«
                 num_str, slot_str = part.split("+", 1)
                 number = int(num_str)
                 slot = int(slot_str)
             else:
                 number = int(part)
                 slot = None
-            # ✅ FIX: 1-5 ቡድን ቢሆን (numbers_per_person>1)፣ group start ይሆናል
+            # âœ… FIX: 1-5 á‰¡á‹µáŠ• á‰¢áˆ†áŠ• (numbers_per_person>1)á£ group start á‹­áˆ†áŠ“áˆ
             actual_num = get_group_start(number, per_person) if per_person > 1 else number
             admin_remove_player(settings["id"], actual_num, slot)
             label = f"{format_number(actual_num)}:{slot}" if slot else format_number(actual_num)
@@ -3254,17 +3311,17 @@ async def handle_remove(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         except ValueError:
             errors.append(part)
 
-    # ✅ FIX: duplicate board — _check_all_paid_and_resend እዚህ መጠራት
-    # የለበትም ነበር (ማስወገድ ውጤት "ሁሉም ተከፍሏል" ፈጽሞ ማምጣት ስለማይችል፣ ያንን
-    # ይህ function ራሱ ካስፈለገ resend ስለሚያደርግ ከ _refresh_board's edit ጋር
-    # ግጭት ውስጥ ገብቶ 2 board messages ይፈጥር ነበር)
+    # âœ… FIX: duplicate board â€” _check_all_paid_and_resend áŠ¥á‹šáˆ… áˆ˜áŒ áˆ«á‰µ
+    # á‹¨áˆˆá‰ á‰µáˆ áŠá‰ áˆ­ (áˆ›áˆµá‹ˆáŒˆá‹µ á‹áŒ¤á‰µ "áˆáˆ‰áˆ á‰°áŠ¨ááˆáˆ" áˆáŒ½áˆž áˆ›áˆáŒ£á‰µ áˆµáˆˆáˆ›á‹­á‰½áˆá£ á‹«áŠ•áŠ•
+    # á‹­áˆ… function áˆ«áˆ± áŠ«áˆµáˆáˆˆáŒˆ resend áˆµáˆˆáˆšá‹«á‹°áˆ­áŒ áŠ¨ _refresh_board's edit áŒ‹áˆ­
+    # áŒáŒ­á‰µ á‹áˆµáŒ¥ áŒˆá‰¥á‰¶ 2 board messages á‹­áˆáŒ¥áˆ­ áŠá‰ áˆ­)
     await _refresh_board(ctx, settings, group_id)
 
     msg = ""
     if removed:
-        msg += f"✅ {', '.join(removed)} ተወጣ!"
+        msg += f"âœ… {', '.join(removed)} á‰°á‹ˆáŒ£!"
     if errors:
-        msg += f"\n❌ ያልተቀበለ: {', '.join(errors)}"
+        msg += f"\nâŒ á‹«áˆá‰°á‰€á‰ áˆˆ: {', '.join(errors)}"
     await update.message.reply_text(msg)
 
 
@@ -3274,7 +3331,7 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /paid 5 10 15  ወይም  /paid 5:2  ወይም  5+2")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /paid 5 10 15  á‹ˆá‹­áˆ  /paid 5:2  á‹ˆá‹­áˆ  5+2")
         return
 
     is_paid = update.message.text.startswith("/paid")
@@ -3293,14 +3350,14 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 number = int(num_str)
                 slot = int(slot_str)
             elif "+" in part:
-                # ✅ FIX: NUM+SLOT (ለምሳሌ 5+1 ወይም 5+2) — ልክ እንደ /nekay slot መለያ
+                # âœ… FIX: NUM+SLOT (áˆˆáˆáˆ³áˆŒ 5+1 á‹ˆá‹­áˆ 5+2) â€” áˆáŠ­ áŠ¥áŠ•á‹° /nekay slot áˆ˜áˆˆá‹«
                 num_str, slot_str = part.split("+", 1)
                 number = int(num_str)
                 slot = int(slot_str)
             else:
                 number = int(part)
                 slot = 1
-            # ✅ FIX: 1-5 ቡድን ቢሆን (numbers_per_person>1)፣ group start ይሆናል
+            # âœ… FIX: 1-5 á‰¡á‹µáŠ• á‰¢áˆ†áŠ• (numbers_per_person>1)á£ group start á‹­áˆ†áŠ“áˆ
             actual_num = get_group_start(number, per_person) if per_person > 1 else number
             admin_mark_paid(settings["id"], actual_num, slot, is_paid)
             updated.append((actual_num, slot))
@@ -3338,11 +3395,11 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if fresh:
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
-    mark = "✅" if is_paid else "❌"
+    mark = "âœ…" if is_paid else "âŒ"
     updated_str = ", ".join(f"{format_number(n)}:{s}" for n, s in updated)
     msg = f"{mark} {updated_str} updated!"
     if errors:
-        msg += f"\n❌ ያልተቀበለ: {', '.join(errors)}"
+        msg += f"\nâŒ á‹«áˆá‰°á‰€á‰ áˆˆ: {', '.join(errors)}"
     await update.message.reply_text(msg)
 
 
@@ -3352,15 +3409,15 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     settings = get_active_settings(group_id=group_id)
     if not settings:
-        await update.message.reply_text("❌ Active game የለም!")
+        await update.message.reply_text("âŒ Active game á‹¨áˆˆáˆ!")
         return
 
-    # pre-booking mode — registrations ቀድሞ አሉ፣ board ብቻ ይላክ
+    # pre-booking mode â€” registrations á‰€á‹µáˆž áŠ áˆ‰á£ board á‰¥á‰» á‹­áˆ‹áŠ­
     if group_id in prebooking_groups:
         prebooking_groups.discard(group_id)
         clear_prize_balance(group_id)
 
-        # balance ካለው pre-booked registrations ✅ ያደርጋቸዋል
+        # balance áŠ«áˆˆá‹ pre-booked registrations âœ… á‹«á‹°áˆ­áŒ‹á‰¸á‹‹áˆ
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
@@ -3388,7 +3445,7 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         new_msg = await ctx.bot.send_message(chat_id=group_id, text=board_text)
         update_board_message_id(settings["id"], new_msg.message_id)
         update_remaining_message_id(settings["id"], None)
-        await update.message.reply_text("✅ አዲስ ጨዋታ ተጀምሯል!")
+        await update.message.reply_text("âœ… áŠ á‹²áˆµ áŒ¨á‹‹á‰³ á‰°áŒ€áˆáˆ¯áˆ!")
         return
 
     clear_prize_balance(group_id)
@@ -3416,7 +3473,7 @@ async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     update_board_message_id(settings["id"], new_msg.message_id)
     update_remaining_message_id(settings["id"], None)
 
-    await update.message.reply_text("✅ አዲስ ጨዋታ ተጀምሯል!")
+    await update.message.reply_text("âœ… áŠ á‹²áˆµ áŒ¨á‹‹á‰³ á‰°áŒ€áˆáˆ¯áˆ!")
 
 
 async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3426,7 +3483,7 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     parts = update.message.text.strip().split()
     if len(parts) < 3:
-        await update.message.reply_text("❌ ምሳሌ: /register 5 አበበ  ወይም  /register 5 10 15+ አበበ")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /register 5 áŠ á‰ á‰   á‹ˆá‹­áˆ  /register 5 10 15+ áŠ á‰ á‰ ")
         return
 
     user_name = parts[-1]
@@ -3434,7 +3491,7 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     settings = get_active_settings(group_id=group_id)
     if not settings:
-        await update.message.reply_text("❌ Active game የለም!")
+        await update.message.reply_text("âŒ Active game á‹¨áˆˆáˆ!")
         return
 
     per_person = settings["numbers_per_person"]
@@ -3464,7 +3521,7 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if not registered:
         if failed:
-            await update.message.reply_text(f"❌ {', '.join(failed)} ቀድሞ ተወስዷል!")
+            await update.message.reply_text(f"âŒ {', '.join(failed)} á‰€á‹µáˆž á‰°á‹ˆáˆµá‹·áˆ!")
         return
 
     await _refresh_board(ctx, settings, group_id)
@@ -3474,9 +3531,9 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
 
     reg_list = ", ".join(format_number(n) + ("+" if h else "") for n, h in registered)
-    msg = f"✅ {reg_list} → {user_name} ተመዘገበ!"
+    msg = f"âœ… {reg_list} â†’ {user_name} á‰°áˆ˜á‹˜áŒˆá‰ !"
     if failed:
-        msg += f"\n❌ {', '.join(failed)} ቀድሞ ተወስዷል!"
+        msg += f"\nâŒ {', '.join(failed)} á‰€á‹µáˆž á‰°á‹ˆáˆµá‹·áˆ!"
     await update.message.reply_text(msg)
 
 
@@ -3486,7 +3543,7 @@ async def handle_register(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_enable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Main admin á‰¥á‰» áŠá‹!")
         return
 
     parts = update.message.text.strip().split()
@@ -3495,22 +3552,22 @@ async def handle_enable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             gid = update.effective_chat.id
             gname = update.effective_chat.title or str(gid)
             enable_group(gid, gname)
-            await update.message.reply_text(f"✅ Group {gname} enabled!")
+            await update.message.reply_text(f"âœ… Group {gname} enabled!")
             return
-        await update.message.reply_text("❌ ምሳሌ: /enable -100123456789")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /enable -100123456789")
         return
 
     try:
         gid = int(parts[1])
         enable_group(gid)
-        await update.message.reply_text(f"✅ Group {gid} enabled!")
+        await update.message.reply_text(f"âœ… Group {gid} enabled!")
     except ValueError:
-        await update.message.reply_text("❌ Group ID ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ Group ID á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
 
 
 async def handle_disable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Main admin á‰¥á‰» áŠá‹!")
         return
 
     parts = update.message.text.strip().split()
@@ -3518,17 +3575,17 @@ async def handle_disable(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if update.effective_chat.type != "private":
             gid = update.effective_chat.id
             disable_group(gid)
-            await update.message.reply_text(f"✅ Group {gid} disabled!")
+            await update.message.reply_text(f"âœ… Group {gid} disabled!")
             return
-        await update.message.reply_text("❌ ምሳሌ: /disable -100123456789")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /disable -100123456789")
         return
 
     try:
         gid = int(parts[1])
         disable_group(gid)
-        await update.message.reply_text(f"✅ Group {gid} disabled!")
+        await update.message.reply_text(f"âœ… Group {gid} disabled!")
     except ValueError:
-        await update.message.reply_text("❌ Group ID ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ Group ID á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
 
 
 async def handle_enablelist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3537,10 +3594,10 @@ async def handle_enablelist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     groups = get_enabled_groups()
     if not groups:
-        await update.message.reply_text("📋 Enabled group የለም።")
+        await update.message.reply_text("ðŸ“‹ Enabled group á‹¨áˆˆáˆá¢")
         return
 
-    lines = ["📋 Enabled Groups:\n"]
+    lines = ["ðŸ“‹ Enabled Groups:\n"]
     for i, g in enumerate(groups, 1):
         name = g["group_name"] or "Unknown"
         enabled_at = g["enabled_at"].strftime("%Y-%m-%d %H:%M") if g["enabled_at"] else "?"
@@ -3551,12 +3608,12 @@ async def handle_enablelist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_addadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Main admin á‰¥á‰» áŠá‹!")
         return
 
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /addadmin 123456789")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /addadmin 123456789")
         return
 
     try:
@@ -3565,12 +3622,12 @@ async def handle_addadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             int(parts[2]) if len(parts) > 2 else None
         )
         if not gid:
-            await update.message.reply_text("❌ Group ID ያስፈልጋል: /addadmin USER_ID GROUP_ID")
+            await update.message.reply_text("âŒ Group ID á‹«áˆµáˆáˆáŒ‹áˆ: /addadmin USER_ID GROUP_ID")
             return
         add_group_admin(gid, admin_id)
-        await update.message.reply_text(f"✅ {admin_id} group admin ሆኗል!")
+        await update.message.reply_text(f"âœ… {admin_id} group admin áˆ†áŠ—áˆ!")
     except (ValueError, IndexError):
-        await update.message.reply_text("❌ ትክክለኛ ID ጻፍ!")
+        await update.message.reply_text("âŒ á‰µáŠ­áŠ­áˆˆáŠ› ID áŒ»á!")
 
 
 async def handle_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3578,7 +3635,7 @@ async def handle_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /removeadmin 123456789")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /removeadmin 123456789")
         return
     try:
         admin_id = int(parts[1])
@@ -3586,12 +3643,12 @@ async def handle_removeadmin(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             int(parts[2]) if len(parts) > 2 else None
         )
         if not gid:
-            await update.message.reply_text("❌ Group ID ያስፈልጋል")
+            await update.message.reply_text("âŒ Group ID á‹«áˆµáˆáˆáŒ‹áˆ")
             return
         remove_group_admin(gid, admin_id)
-        await update.message.reply_text(f"✅ {admin_id} admin ተወጣ!")
+        await update.message.reply_text(f"âœ… {admin_id} admin á‰°á‹ˆáŒ£!")
     except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ ID ጻፍ!")
+        await update.message.reply_text("âŒ á‰µáŠ­áŠ­áˆˆáŠ› ID áŒ»á!")
 
 
 async def handle_userlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3600,17 +3657,17 @@ async def handle_userlist(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if not group_id:
-        await update.message.reply_text("❌ Group ውስጥ ብቻ ይሰራል!")
+        await update.message.reply_text("âŒ Group á‹áˆµáŒ¥ á‰¥á‰» á‹­áˆ°áˆ«áˆ!")
         return
 
     users = get_usernames(group_id)
     if not users:
-        await update.message.reply_text("📋 Username የለም።")
+        await update.message.reply_text("ðŸ“‹ Username á‹¨áˆˆáˆá¢")
         return
 
-    lines = [f"👥 Members ({len(users)} total):\n"]
+    lines = [f"ðŸ‘¥ Members ({len(users)} total):\n"]
     for u in users:
-        badge = "🆕" if not u["is_read"] else "  "
+        badge = "ðŸ†•" if not u["is_read"] else "  "
         lines.append(f"{badge} @{u['username']}")
 
     await update.message.reply_text("\n".join(lines))
@@ -3622,10 +3679,10 @@ async def handle_clearusers(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id, group_id):
         return
     if not group_id:
-        await update.message.reply_text("❌ Group ውስጥ ብቻ ይሰራል!")
+        await update.message.reply_text("âŒ Group á‹áˆµáŒ¥ á‰¥á‰» á‹­áˆ°áˆ«áˆ!")
         return
     clear_usernames(group_id)
-    await update.message.reply_text("✅ Username list ጸዳ!")
+    await update.message.reply_text("âœ… Username list áŒ¸á‹³!")
 
 
 async def handle_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3634,19 +3691,19 @@ async def handle_activity(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     activities = get_activity()
     if not activities:
-        await update.message.reply_text("📊 Activity data የለም።")
+        await update.message.reply_text("ðŸ“Š Activity data á‹¨áˆˆáˆá¢")
         return
 
-    lines = ["📊 Group Activity:\n"]
+    lines = ["ðŸ“Š Group Activity:\n"]
     for a in activities:
         name = a.get("group_name") or str(a["group_id"])
         last = a["last_active"].strftime("%m/%d %H:%M") if a["last_active"] else "?"
         lines.append(
-            f"📌 {name}\n"
-            f"   💬 Messages: {a['messages'] or 0}\n"
-            f"   📝 Registrations: {a['registrations'] or 0}\n"
-            f"   💰 Payments: {a['payments'] or 0}\n"
-            f"   🕐 Last active: {last}"
+            f"ðŸ“Œ {name}\n"
+            f"   ðŸ’¬ Messages: {a['messages'] or 0}\n"
+            f"   ðŸ“ Registrations: {a['registrations'] or 0}\n"
+            f"   ðŸ’° Payments: {a['payments'] or 0}\n"
+            f"   ðŸ• Last active: {last}"
         )
 
     await update.message.reply_text("\n\n".join(lines))
@@ -3657,12 +3714,12 @@ async def handle_dbstatus(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     statuses = get_db_status()
-    lines = ["🗄️ Database Status:\n"]
+    lines = ["ðŸ—„ï¸ Database Status:\n"]
     for s in statuses:
         if s.get("error"):
-            lines.append(f"DB{s['index']}: ❌ Error")
+            lines.append(f"DB{s['index']}: âŒ Error")
             continue
-        active = "🟢 ACTIVE" if s["is_active"] else ("🔴 FULL" if s["is_full"] else "⚪ Standby")
+        active = "ðŸŸ¢ ACTIVE" if s["is_active"] else ("ðŸ”´ FULL" if s["is_full"] else "âšª Standby")
         lines.append(
             f"DB{s['index']}: {active}\n"
             f"   Rows: {s['row_count']:,} / {s['limit']:,} ({s['percent']}%)"
@@ -3677,15 +3734,15 @@ async def handle_dbclear(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /dbclear 2  (DB2 ያጸዳል)")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /dbclear 2  (DB2 á‹«áŒ¸á‹³áˆ)")
         return
 
     try:
         db_num = int(parts[1])
         clear_db_data(db_num)
-        await update.message.reply_text(f"✅ DB{db_num} ጸዳ! (usernames ይቀራሉ)")
+        await update.message.reply_text(f"âœ… DB{db_num} áŒ¸á‹³! (usernames á‹­á‰€áˆ«áˆ‰)")
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
 
 
 async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3699,26 +3756,26 @@ async def handle_winners(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         group_id = get_admin_group_id(user_id)
         if not group_id:
-            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
             return
 
     winners = get_recent_winners(group_id, hours=24)
 
     if not winners:
-        await update.message.reply_text("🏆 Last 24hr winners የሉም።")
+        await update.message.reply_text("ðŸ† Last 24hr winners á‹¨áˆ‰áˆá¢")
         return
 
-    medals = {1: "🥇", 2: "🥈", 3: "🥉"}
-    lines = ["🏆 Last 24hr Winners:\n"]
+    medals = {1: "ðŸ¥‡", 2: "ðŸ¥ˆ", 3: "ðŸ¥‰"}
+    lines = ["ðŸ† Last 24hr Winners:\n"]
     for w in winners:
-        medal = medals.get(w["place"], "🎖️")
+        medal = medals.get(w["place"], "ðŸŽ–ï¸")
         balance = w["balance"]
-        sent_mark = "✅" if w["sent"] else "⚠️ ያልተላከ"
+        sent_mark = "âœ…" if w["sent"] else "âš ï¸ á‹«áˆá‰°áˆ‹áŠ¨"
         time_str = w["created_at"].strftime("%H:%M") if w["created_at"] else "?"
-        line = f"{medal} {w['place']}ኛ: {w['user_name']} — ETB {w['prize']} {sent_mark}"
+        line = f"{medal} {w['place']}áŠ›: {w['user_name']} â€” ETB {w['prize']} {sent_mark}"
         if balance > 0:
-            line += f"\n   💳 ቀሪ balance: ETB {balance}"
-        line += f"\n   🕐 {time_str}"
+            line += f"\n   ðŸ’³ á‰€áˆª balance: ETB {balance}"
+        line += f"\n   ðŸ• {time_str}"
         lines.append(line)
 
     await update.message.reply_text("\n\n".join(lines))
@@ -3734,7 +3791,7 @@ async def handle_on(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id, group_id):
         return
     set_group_active(group_id, True)
-    await update.message.reply_text("✅ Bot on ሆኗል!")
+    await update.message.reply_text("âœ… Bot on áˆ†áŠ—áˆ!")
 
 
 async def handle_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3742,7 +3799,7 @@ async def handle_off(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id, group_id):
         return
     set_group_active(group_id, False)
-    await update.message.reply_text("🔴 Bot off ሆኗል!")
+    await update.message.reply_text("ðŸ”´ Bot off áˆ†áŠ—áˆ!")
 
 
 async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3756,21 +3813,21 @@ async def handle_clearbalance(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         group_id = get_admin_group_id(user_id)
         if not group_id:
-            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
             return
 
     parts = update.message.text.strip().split()
 
     if len(parts) == 1:
         clear_balance_all(group_id)
-        await update.message.reply_text("✅ ሁሉም balance ጸዳ!")
+        await update.message.reply_text("âœ… áˆáˆ‰áˆ balance áŒ¸á‹³!")
     else:
         username = parts[1].lstrip("@")
         success = clear_balance_by_username(group_id, username)
         if success:
-            await update.message.reply_text(f"✅ @{username} balance ጸዳ!")
+            await update.message.reply_text(f"âœ… @{username} balance áŒ¸á‹³!")
         else:
-            await update.message.reply_text(f"❌ @{username} አልተገኘም!")
+            await update.message.reply_text(f"âŒ @{username} áŠ áˆá‰°áŒˆáŠ˜áˆ!")
 
 
 async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3780,34 +3837,34 @@ async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     group_id = get_admin_group_id(user_id)
     if not group_id:
-        await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+        await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
         return
 
     report = get_report(group_id)
-    lines = ["📊 Report (Last 24hr)\n"]
+    lines = ["ðŸ“Š Report (Last 24hr)\n"]
 
     if report["games_count"] > 0:
         lines.append(
-            f"🎮 ጨዋታዎች: {report['games_count']}\n"
-            f"💰 Total bet: ETB {report['total_bet']:,.0f}\n"
-            f"🏆 Prize total: ETB {report['prize_total']:,.0f}\n"
-            f"📈 Profit: ETB {report['profit']:,.0f}"
+            f"ðŸŽ® áŒ¨á‹‹á‰³á‹Žá‰½: {report['games_count']}\n"
+            f"ðŸ’° Total bet: ETB {report['total_bet']:,.0f}\n"
+            f"ðŸ† Prize total: ETB {report['prize_total']:,.0f}\n"
+            f"ðŸ“ˆ Profit: ETB {report['profit']:,.0f}"
         )
     else:
-        lines.append("🎮 ዛሬ ጨዋታ አልተጫወተም")
+        lines.append("ðŸŽ® á‹›áˆ¬ áŒ¨á‹‹á‰³ áŠ áˆá‰°áŒ«á‹ˆá‰°áˆ")
 
     active = report.get("active")
     if active:
-        lines.append("\n⚡ Active Game (Real-time)")
-        lines.append(f"📝 Registered: {active['total_slots']}")
+        lines.append("\nâš¡ Active Game (Real-time)")
+        lines.append(f"ðŸ“ Registered: {active['total_slots']}")
         if active["counted"]:
             lines.append(
-                f"💰 Total bet: ETB {active['total_bet']:,.0f}\n"
-                f"🏆 Prize: ETB {active['prize_total']:,.0f}\n"
-                f"📈 Profit: ETB {active['profit']:,.0f}"
+                f"ðŸ’° Total bet: ETB {active['total_bet']:,.0f}\n"
+                f"ðŸ† Prize: ETB {active['prize_total']:,.0f}\n"
+                f"ðŸ“ˆ Profit: ETB {active['profit']:,.0f}"
             )
         else:
-            lines.append(f"⚠️ 15+ ሲሆን profit ይታያል ({active['total_slots']}/15)")
+            lines.append(f"âš ï¸ 15+ áˆ²áˆ†áŠ• profit á‹­á‰³á‹«áˆ ({active['total_slots']}/15)")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -3819,15 +3876,15 @@ async def handle_report(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_setwarnmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not is_main_admin(update.effective_user.id):
-        await update.message.reply_text("❌ Main admin ብቻ ነው!")
+        await update.message.reply_text("âŒ Main admin á‰¥á‰» áŠá‹!")
         return
 
     parts = update.message.text.strip().split()
     if len(parts) < 2:
         await update.message.reply_text(
-            "❌ ምሳሌ: /setwarnmedia 2\n"
-            "ከዛ photo/video/sticker ይላኩ\n"
-            "Available: 0.5, 1, 2, 3, 5, 10 ደቂቃ"
+            "âŒ áˆáˆ³áˆŒ: /setwarnmedia 2\n"
+            "áŠ¨á‹› photo/video/sticker á‹­áˆ‹áŠ©\n"
+            "Available: 0.5, 1, 2, 3, 5, 10 á‹°á‰‚á‰ƒ"
         )
         return
 
@@ -3836,13 +3893,13 @@ async def handle_setwarnmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if mins < 0.5 or mins > 10:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ 0.5 እስከ 10 ብቻ!")
+        await update.message.reply_text("âŒ 0.5 áŠ¥áˆµáŠ¨ 10 á‰¥á‰»!")
         return
 
     ctx.user_data["setwarn_minutes"] = mins
     await update.message.reply_text(
-        f"✅ {mins} ደቂቃ ተዘጋጅቷል!\n"
-        f"አሁን photo/video/sticker/gif ይላኩ"
+        f"âœ… {mins} á‹°á‰‚á‰ƒ á‰°á‹˜áŒ‹áŒ…á‰·áˆ!\n"
+        f"áŠ áˆáŠ• photo/video/sticker/gif á‹­áˆ‹áŠ©"
     )
 
 
@@ -3883,7 +3940,7 @@ async def handle_warnmedia_upload(update: Update, ctx: ContextTypes.DEFAULT_TYPE
 
     set_warning_media(mins, file_id, media_type, update.effective_user.id)
     ctx.user_data.pop("setwarn_minutes", None)
-    await msg.reply_text(f"✅ {mins} ደቂቃ warning media ተቀምጧል! ({media_type})")
+    await msg.reply_text(f"âœ… {mins} á‹°á‰‚á‰ƒ warning media á‰°á‰€áˆáŒ§áˆ! ({media_type})")
 
 
 async def handle_listwarnmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -3892,12 +3949,12 @@ async def handle_listwarnmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     medias = get_all_warning_media()
     if not medias:
-        await update.message.reply_text("📋 Warning media የለም።")
+        await update.message.reply_text("ðŸ“‹ Warning media á‹¨áˆˆáˆá¢")
         return
 
-    lines = ["📋 Warning Media:\n"]
+    lines = ["ðŸ“‹ Warning Media:\n"]
     for m in medias:
-        lines.append(f"⏱️ {m['minutes']} ደቂቃ — {m['media_type']}")
+        lines.append(f"â±ï¸ {m['minutes']} á‹°á‰‚á‰ƒ â€” {m['media_type']}")
 
     await update.message.reply_text("\n".join(lines))
 
@@ -3908,15 +3965,15 @@ async def handle_deletewarnmedia(update: Update, ctx: ContextTypes.DEFAULT_TYPE)
 
     parts = update.message.text.strip().split()
     if len(parts) < 2:
-        await update.message.reply_text("❌ ምሳሌ: /deletewarnmedia 2")
+        await update.message.reply_text("âŒ áˆáˆ³áˆŒ: /deletewarnmedia 2")
         return
 
     try:
         mins = float(parts[1])
         delete_warning_media(mins)
-        await update.message.reply_text(f"✅ {mins} ደቂቃ warning media ጠፋ!")
+        await update.message.reply_text(f"âœ… {mins} á‹°á‰‚á‰ƒ warning media áŒ á‹!")
     except ValueError:
-        await update.message.reply_text("❌ ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
 
 
 # ============================================================
@@ -3941,17 +3998,17 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         settings = get_active_settings(group_id=group_id)
         if settings:
             photo_uid = update.message.photo[-1].file_unique_id
-            # ✅ used ፎቶ ከሆነ (ቀድሞ real winner አምጥቶ የነበረ) AI ጨርሶ አንጠራም
+            # âœ… used áŽá‰¶ áŠ¨áˆ†áŠ (á‰€á‹µáˆž real winner áŠ áˆáŒ¥á‰¶ á‹¨áŠá‰ áˆ¨) AI áŒ¨áˆ­áˆ¶ áŠ áŠ•áŒ áˆ«áˆ
             if photo_uid in handled_winner_photos or is_winner_photo_used(photo_uid):
                 return
 
             winner_found = await handle_winner_photo(ctx.bot, update.message, settings, group_id=group_id)
             if winner_found:
-                # ✅ winner ሲገኝ ብቻ ነው "used" የሚደረገው — not-lottery/failed ፎቶ
-                # ድጋሚ መላክ ቢቻል (retry) እንዲኖር used አይደረግም
+                # âœ… winner áˆ²áŒˆáŠ á‰¥á‰» áŠá‹ "used" á‹¨áˆšá‹°áˆ¨áŒˆá‹ â€” not-lottery/failed áŽá‰¶
+                # á‹µáŒ‹áˆš áˆ˜áˆ‹áŠ­ á‰¢á‰»áˆ (retry) áŠ¥áŠ•á‹²áŠ–áˆ­ used áŠ á‹­á‹°áˆ¨áŒáˆ
                 handled_winner_photos.add(photo_uid)
                 save_winner_photo(photo_uid, group_id=group_id)
-                # announcement ወዲያውኑ ተላከ — board 30 seconds ቆይቶ ይምጣ
+                # announcement á‹ˆá‹²á‹«á‹áŠ‘ á‰°áˆ‹áŠ¨ â€” board 30 seconds á‰†á‹­á‰¶ á‹­áˆáŒ£
                 winner_pending_groups.add(group_id)
                 try:
                     await asyncio.sleep(30)
@@ -4000,12 +4057,12 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                     "game_id": settings2["id"], "settings": settings2,
                     "group_id": group_id, "user_name": q_user_name
                 }
-                # FIX: መጀመሪያ እንደተጻፈው ወዲያውኑ ይመዘገባል፣ ጥያቄው ከዚያ በኋላ ብቻ
+                # FIX: áˆ˜áŒ€áˆ˜áˆªá‹« áŠ¥áŠ•á‹°á‰°áŒ»áˆá‹ á‹ˆá‹²á‹«á‹áŠ‘ á‹­áˆ˜á‹˜áŒˆá‰£áˆá£ áŒ¥á‹«á‰„á‹ áŠ¨á‹šá‹« á‰ áŠ‹áˆ‹ á‰¥á‰»
                 await process_registration(ctx, settings2, numbers, q_user_id, q_user_name, group_id, q_msg)
                 if ambiguous == "all_half":
-                    await q_msg.reply_text("ሁሉንም በግማሽ ነው? (አዎ/አይደለም)")
+                    await q_msg.reply_text("áˆáˆ‰áŠ•áˆ á‰ áŒáˆ›áˆ½ áŠá‹? (áŠ á‹Ž/áŠ á‹­á‹°áˆˆáˆ)")
                 elif ambiguous == "last_half":
-                    await q_msg.reply_text(f"{format_number(ambiguous_number)} ብቻ በግማሽ ነው? (አዎ/አይደለም)")
+                    await q_msg.reply_text(f"{format_number(ambiguous_number)} á‰¥á‰» á‰ áŒáˆ›áˆ½ áŠá‹? (áŠ á‹Ž/áŠ á‹­á‹°áˆˆáˆ)")
             else:
                 await process_registration(ctx, settings2, numbers, q_user_id, q_user_name, group_id, q_msg)
 
@@ -4015,12 +4072,12 @@ async def handle_group_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 # ============================================================
-# DAILY PROFIT: ጨዋታው ካለቀ (ሁሉም ✅ ሆነው) በኋላ admin በ /setgame ላይ
-# ካስገባው profit_per_game (ቋሚ ቁጥር) ውጪ ምንም ስሌት አይደረግም። 1 ጨዋታ = 1 ጊዜ
-# profit_per_game ይደመራል። ትሪገር ሁለት ቦታ ነው (የትኛውም መጀመሪያ ቢደርስ)፦
-#   1) ሁሉም ✅ ሆነው live/pre-booking ሲጀምር (handle_video_chat_started)
-#   2) Live ካልተጠቀሙ፣ ሁሉም ✅ ሆነው ውጤት (winner photo) ሲላክ (_auto_newgame)
-# profit_counted_games (in-memory set) ተመሳሳይ game_id ድጋሚ እንዳይቆጠር ይጠብቃል።
+# DAILY PROFIT: áŒ¨á‹‹á‰³á‹ áŠ«áˆˆá‰€ (áˆáˆ‰áˆ âœ… áˆ†áŠá‹) á‰ áŠ‹áˆ‹ admin á‰  /setgame áˆ‹á‹­
+# áŠ«áˆµáŒˆá‰£á‹ profit_per_game (á‰‹áˆš á‰áŒ¥áˆ­) á‹áŒª áˆáŠ•áˆ áˆµáˆŒá‰µ áŠ á‹­á‹°áˆ¨áŒáˆá¢ 1 áŒ¨á‹‹á‰³ = 1 áŒŠá‹œ
+# profit_per_game á‹­á‹°áˆ˜áˆ«áˆá¢ á‰µáˆªáŒˆáˆ­ áˆáˆˆá‰µ á‰¦á‰³ áŠá‹ (á‹¨á‰µáŠ›á‹áˆ áˆ˜áŒ€áˆ˜áˆªá‹« á‰¢á‹°áˆ­áˆµ)á¦
+#   1) áˆáˆ‰áˆ âœ… áˆ†áŠá‹ live/pre-booking áˆ²áŒ€áˆáˆ­ (handle_video_chat_started)
+#   2) Live áŠ«áˆá‰°áŒ á‰€áˆ™á£ áˆáˆ‰áˆ âœ… áˆ†áŠá‹ á‹áŒ¤á‰µ (winner photo) áˆ²áˆ‹áŠ­ (_auto_newgame)
+# profit_counted_games (in-memory set) á‰°áˆ˜áˆ³áˆ³á‹­ game_id á‹µáŒ‹áˆš áŠ¥áŠ•á‹³á‹­á‰†áŒ áˆ­ á‹­áŒ á‰¥á‰ƒáˆá¢
 # ============================================================
 
 def _maybe_record_game_profit(group_id: int, game_id: int, settings: dict):
@@ -4068,12 +4125,12 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
         except Exception:
             pass
 
-    # pre-booking mode — registrations ቀድሞ አሉ፣ board ብቻ ይላክ
+    # pre-booking mode â€” registrations á‰€á‹µáˆž áŠ áˆ‰á£ board á‰¥á‰» á‹­áˆ‹áŠ­
     if _group_id in prebooking_groups:
         prebooking_groups.discard(_group_id)
         clear_prize_balance(_group_id)
 
-        # balance ካለው pre-booked registrations ✅ ያደርጋቸዋል
+        # balance áŠ«áˆˆá‹ pre-booked registrations âœ… á‹«á‹°áˆ­áŒ‹á‰¸á‹‹áˆ
         conn = get_conn()
         cur = conn.cursor()
         cur.execute("""
@@ -4113,13 +4170,13 @@ async def _auto_newgame(bot, settings: dict, group_id: int = None):
 
 async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if update.effective_chat.type != "private":
-        await update.message.reply_text("❌ Private chat ብቻ ነው!")
+        await update.message.reply_text("âŒ Private chat á‰¥á‰» áŠá‹!")
         return ConversationHandler.END
 
     user_id = update.effective_user.id
     group_id = get_admin_group_id(user_id)
     if not group_id:
-        await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+        await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
         return ConversationHandler.END
 
     ctx.user_data["send_group_id"] = group_id
@@ -4129,7 +4186,7 @@ async def send_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def _send_show_places(update, ctx, group_id: int):
     settings = get_active_settings(group_id=group_id)
     if not settings:
-        await update.message.reply_text("❌ Active game የለም!")
+        await update.message.reply_text("âŒ Active game á‹¨áˆˆáˆ!")
         return ConversationHandler.END
 
     ctx.user_data["send_settings"] = settings
@@ -4138,13 +4195,13 @@ async def _send_show_places(update, ctx, group_id: int):
     prize_2nd = settings.get("prize_2nd")
     prize_3rd = settings.get("prize_3rd")
 
-    lines = ["💸 ለማን ብር ትልካለህ?"]
-    lines.append(f"1 — 1ኛ winner (prize: {prize_1st} ብር)")
+    lines = ["ðŸ’¸ áˆˆáˆ›áŠ• á‰¥áˆ­ á‰µáˆáŠ«áˆˆáˆ…?"]
+    lines.append(f"1 â€” 1áŠ› winner (prize: {prize_1st} á‰¥áˆ­)")
     if prize_2nd:
-        lines.append(f"2 — 2ኛ winner (prize: {prize_2nd} ብር)")
+        lines.append(f"2 â€” 2áŠ› winner (prize: {prize_2nd} á‰¥áˆ­)")
     if prize_3rd:
-        lines.append(f"3 — 3ኛ winner (prize: {prize_3rd} ብር)")
-    lines.append("\n(1, 2, ወይም 3 ጻፍ)")
+        lines.append(f"3 â€” 3áŠ› winner (prize: {prize_3rd} á‰¥áˆ­)")
+    lines.append("\n(1, 2, á‹ˆá‹­áˆ 3 áŒ»á)")
 
     await update.message.reply_text("\n".join(lines))
     return ASK_SEND_PLACE
@@ -4153,7 +4210,7 @@ async def _send_show_places(update, ctx, group_id: int):
 async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text not in ("1", "2", "3"):
-        await update.message.reply_text("❌ 1, 2, ወይም 3 ብቻ ጻፍ!")
+        await update.message.reply_text("âŒ 1, 2, á‹ˆá‹­áˆ 3 á‰¥á‰» áŒ»á!")
         return ASK_SEND_PLACE
 
     place = int(text)
@@ -4167,7 +4224,7 @@ async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     winners = get_winners_by_place(settings["id"], place)
     if not winners:
-        await update.message.reply_text(f"❌ {place}ኛ winner አልተመዘገበም!")
+        await update.message.reply_text(f"âŒ {place}áŠ› winner áŠ áˆá‰°áˆ˜á‹˜áŒˆá‰ áˆ!")
         return ConversationHandler.END
 
     ctx.user_data["send_place"] = place
@@ -4180,18 +4237,18 @@ async def send_ask_place(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         balance = winner.get("balance", 0)
         await update.message.reply_text(
-            f"👤 {place}ኛ: {winner['user_name']}\n"
-            f"💳 አሁን balance: ETB {balance}\n\n"
-            f"💸 ስንት ብር ላካህ? (ቁጥር ጻፍ)"
+            f"ðŸ‘¤ {place}áŠ›: {winner['user_name']}\n"
+            f"ðŸ’³ áŠ áˆáŠ• balance: ETB {balance}\n\n"
+            f"ðŸ’¸ áˆµáŠ•á‰µ á‰¥áˆ­ áˆ‹áŠ«áˆ…? (á‰áŒ¥áˆ­ áŒ»á)"
         )
         return ASK_SEND_AMOUNT
 
     ctx.user_data["send_winners_list"] = winners
-    lines = [f"⚠️ {place}ኛ ቦታ ላይ {len(winners)} ሰው አለ (tie)፦\n"]
+    lines = [f"âš ï¸ {place}áŠ› á‰¦á‰³ áˆ‹á‹­ {len(winners)} áˆ°á‹ áŠ áˆˆ (tie)á¦\n"]
     for i, w in enumerate(winners, 1):
         bal = w.get("balance", 0)
         lines.append(f"{i}. {w['user_name']} (balance: ETB {bal})")
-    lines.append("\nማንን ትልካለህ? ቁጥር ጻፍ (1, 2, ...)")
+    lines.append("\náˆ›áŠ•áŠ• á‰µáˆáŠ«áˆˆáˆ…? á‰áŒ¥áˆ­ áŒ»á (1, 2, ...)")
     await update.message.reply_text("\n".join(lines))
     return ASK_SEND_WINNER
 
@@ -4205,7 +4262,7 @@ async def send_ask_winner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if idx < 1 or idx > len(winners):
             raise ValueError
     except ValueError:
-        await update.message.reply_text(f"❌ 1 እስከ {len(winners)} ቁጥር ብቻ ጻፍ!")
+        await update.message.reply_text(f"âŒ 1 áŠ¥áˆµáŠ¨ {len(winners)} á‰áŒ¥áˆ­ á‰¥á‰» áŒ»á!")
         return ASK_SEND_WINNER
 
     winner = winners[idx - 1]
@@ -4215,9 +4272,9 @@ async def send_ask_winner(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     balance = winner.get("balance", 0)
     await update.message.reply_text(
-        f"👤 {place}ኛ: {winner['user_name']}\n"
-        f"💳 አሁን balance: ETB {balance}\n\n"
-        f"💸 ስንት ብር ላካህ? (ቁጥር ጻፍ)"
+        f"ðŸ‘¤ {place}áŠ›: {winner['user_name']}\n"
+        f"ðŸ’³ áŠ áˆáŠ• balance: ETB {balance}\n\n"
+        f"ðŸ’¸ áˆµáŠ•á‰µ á‰¥áˆ­ áˆ‹áŠ«áˆ…? (á‰áŒ¥áˆ­ áŒ»á)"
     )
     return ASK_SEND_AMOUNT
 
@@ -4228,7 +4285,7 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         if amount <= 0:
             raise ValueError
     except ValueError:
-        await update.message.reply_text("❌ ትክክለኛ ቁጥር ጻፍ!")
+        await update.message.reply_text("âŒ á‰µáŠ­áŠ­áˆˆáŠ› á‰áŒ¥áˆ­ áŒ»á!")
         return ASK_SEND_AMOUNT
 
     place = ctx.user_data["send_place"]
@@ -4253,21 +4310,21 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as _log_err:
         logging.warning(f"[log_transaction] Error: {_log_err}")
 
-    place_label = {1: "1ኛ", 2: "2ኛ", 3: "3ኛ"}.get(place, f"{place}ኛ")
+    place_label = {1: "1áŠ›", 2: "2áŠ›", 3: "3áŠ›"}.get(place, f"{place}áŠ›")
 
     lines = [
-        f"✅ {place_label} winner: {user_name}",
-        f"💸 የላካህ: ETB {amount}",
-        f"💳 ቀሪ balance: ETB {new_balance}",
+        f"âœ… {place_label} winner: {user_name}",
+        f"ðŸ’¸ á‹¨áˆ‹áŠ«áˆ…: ETB {amount}",
+        f"ðŸ’³ á‰€áˆª balance: ETB {new_balance}",
     ]
     await update.message.reply_text("\n".join(lines))
 
     if group_id:
         try:
             announcement = (
-                f"💸 {place_label} winner ብር ተላከ!\n"
-                f"👤 {user_name}\n"
-                f"💰 ETB {amount}"
+                f"ðŸ’¸ {place_label} winner á‰¥áˆ­ á‰°áˆ‹áŠ¨!\n"
+                f"ðŸ‘¤ {user_name}\n"
+                f"ðŸ’° ETB {amount}"
             )
             await ctx.bot.send_message(chat_id=group_id, text=announcement)
         except Exception:
@@ -4281,7 +4338,7 @@ async def send_ask_amount(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancel_send(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❌ /send ተሰርዟል።")
+    await update.message.reply_text("âŒ /send á‰°áˆ°áˆ­á‹Ÿáˆá¢")
     return ConversationHandler.END
 
 
@@ -4300,71 +4357,71 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     else:
         group_id = get_admin_group_id(user_id)
         if not group_id:
-            await update.message.reply_text("❌ Admin የሆንክበት group የለም!")
+            await update.message.reply_text("âŒ Admin á‹¨áˆ†áŠ•áŠ­á‰ á‰µ group á‹¨áˆˆáˆ!")
             return
 
     is_main = is_main_admin(user_id)
 
     text = (
-        "🤖 Commands:\n\n"
-        "🎮 *Game*\n"
-        "/setgame — አዲስ game settings ያቀናብራል\n"
-        "/newgame — ቁጥሮችን ጠርጎ አዲስ ጨዋታ ይጀምራል\n"
-        "/setcountdown 2 — countdown ደቂቃ ይቀይራል (0=አጥፋ)\n"
-        "/showslots on/off — sub-slots ላይ ስም ያሳያል/ያጠፋል\n"
-        "/nekay 5 10+ 15 — manually ነቃይ ያደርጋል\n"
-        "/status — ሁሉንም commands ያሳያል\n\n"
-        "👤 *ምዝገባ*\n"
-        "/register 5 10+ አበበ — ቁጥር manually ይመዘግባል\n"
-        "  • + = ግማሽ (ለምሳሌ 5+)\n\n"
-        "💰 *ክፍያ*\n"
-        "/paid 5 10 15 — ብዙ ቁጥሮች paid ያደርጋል\n"
-        "/paid 5:2 — slot 2 paid ያደርጋል\n"
-        "/unpaid 5 10 — ብዙ ቁጥሮች unpaid ያደርጋል\n\n"
-        "🗑️ *አስተዳደር*\n"
-        "/remove 5 — ቁጥር ከ board ያስወጣል\n"
-        "/remove 5:1 — slot 1 ብቻ ያስወጣል\n"
-        "/on — Bot ያስነሳል\n"
-        "/off — Bot ያቆማል\n"
-        "/clearbalance — ሁሉም balance ያጸዳል\n"
-        "/clearbalance @username — አንድ user balance ያጸዳል\n\n"
-        "👥 *Members*\n"
-        "/userlist — username ዝርዝር\n"
-        "/clearusers — username list ያጸዳል\n\n"
-        "📊 *Report*\n"
-        "/report — real-time profit + games (last 24hr)\n\n"
-        "🏆 *Winner*\n"
-        "/winners — last 24hr winners\n"
-        "/send — winner ብር ይላካል (private chat ብቻ)\n\n"
-        "💸 *Winner Auto-Sender (userbot2)*\n"
-        "/setwinnerapi api_id api_hash — winner API ያስቀምጣል (main admin)\n"
-        "/startsession2 +phone — winner session ይጀምራል (private chat)\n"
-        "/verifycode2 +phone code — session ያረጋግጣል\n"
-        "/verify2fa2 +phone password — 2FA ካለ\n"
-        "/listsessions2 — group ይህ sessions ዝርዝር\n"
-        "/removesession2 +phone — session ያስወግዳል\n\n"
-        "✏️ *Manual Board Edit*\n"
-        "Board copy አርጎ edit አርጎ bot message ላይ reply አርግ\n"
-        "Bot automatically ይቀይረዋል!\n"
+        "ðŸ¤– Commands:\n\n"
+        "ðŸŽ® *Game*\n"
+        "/setgame â€” áŠ á‹²áˆµ game settings á‹«á‰€áŠ“á‰¥áˆ«áˆ\n"
+        "/newgame â€” á‰áŒ¥áˆ®á‰½áŠ• áŒ áˆ­áŒŽ áŠ á‹²áˆµ áŒ¨á‹‹á‰³ á‹­áŒ€áˆáˆ«áˆ\n"
+        "/setcountdown 2 â€” countdown á‹°á‰‚á‰ƒ á‹­á‰€á‹­áˆ«áˆ (0=áŠ áŒ¥á‹)\n"
+        "/showslots on/off â€” sub-slots áˆ‹á‹­ áˆµáˆ á‹«áˆ³á‹«áˆ/á‹«áŒ á‹áˆ\n"
+        "/nekay 5 10+ 15 â€” manually áŠá‰ƒá‹­ á‹«á‹°áˆ­áŒ‹áˆ\n"
+        "/status â€” áˆáˆ‰áŠ•áˆ commands á‹«áˆ³á‹«áˆ\n\n"
+        "ðŸ‘¤ *áˆá‹áŒˆá‰£*\n"
+        "/register 5 10+ áŠ á‰ á‰  â€” á‰áŒ¥áˆ­ manually á‹­áˆ˜á‹˜áŒá‰£áˆ\n"
+        "  â€¢ + = áŒáˆ›áˆ½ (áˆˆáˆáˆ³áˆŒ 5+)\n\n"
+        "ðŸ’° *áŠ­áá‹«*\n"
+        "/paid 5 10 15 â€” á‰¥á‹™ á‰áŒ¥áˆ®á‰½ paid á‹«á‹°áˆ­áŒ‹áˆ\n"
+        "/paid 5:2 â€” slot 2 paid á‹«á‹°áˆ­áŒ‹áˆ\n"
+        "/unpaid 5 10 â€” á‰¥á‹™ á‰áŒ¥áˆ®á‰½ unpaid á‹«á‹°áˆ­áŒ‹áˆ\n\n"
+        "ðŸ—‘ï¸ *áŠ áˆµá‰°á‹³á‹°áˆ­*\n"
+        "/remove 5 â€” á‰áŒ¥áˆ­ áŠ¨ board á‹«áˆµá‹ˆáŒ£áˆ\n"
+        "/remove 5:1 â€” slot 1 á‰¥á‰» á‹«áˆµá‹ˆáŒ£áˆ\n"
+        "/on â€” Bot á‹«áˆµáŠáˆ³áˆ\n"
+        "/off â€” Bot á‹«á‰†áˆ›áˆ\n"
+        "/clearbalance â€” áˆáˆ‰áˆ balance á‹«áŒ¸á‹³áˆ\n"
+        "/clearbalance @username â€” áŠ áŠ•á‹µ user balance á‹«áŒ¸á‹³áˆ\n\n"
+        "ðŸ‘¥ *Members*\n"
+        "/userlist â€” username á‹áˆ­á‹áˆ­\n"
+        "/clearusers â€” username list á‹«áŒ¸á‹³áˆ\n\n"
+        "ðŸ“Š *Report*\n"
+        "/report â€” real-time profit + games (last 24hr)\n\n"
+        "ðŸ† *Winner*\n"
+        "/winners â€” last 24hr winners\n"
+        "/send â€” winner á‰¥áˆ­ á‹­áˆ‹áŠ«áˆ (private chat á‰¥á‰»)\n\n"
+        "ðŸ’¸ *Winner Auto-Sender (userbot2)*\n"
+        "/setwinnerapi api_id api_hash â€” winner API á‹«áˆµá‰€áˆáŒ£áˆ (main admin)\n"
+        "/startsession2 +phone â€” winner session á‹­áŒ€áˆáˆ«áˆ (private chat)\n"
+        "/verifycode2 +phone code â€” session á‹«áˆ¨áŒ‹áŒáŒ£áˆ\n"
+        "/verify2fa2 +phone password â€” 2FA áŠ«áˆˆ\n"
+        "/listsessions2 â€” group á‹­áˆ… sessions á‹áˆ­á‹áˆ­\n"
+        "/removesession2 +phone â€” session á‹«áˆµá‹ˆáŒá‹³áˆ\n\n"
+        "âœï¸ *Manual Board Edit*\n"
+        "Board copy áŠ áˆ­áŒŽ edit áŠ áˆ­áŒŽ bot message áˆ‹á‹­ reply áŠ áˆ­áŒ\n"
+        "Bot automatically á‹­á‰€á‹­áˆ¨á‹‹áˆ!\n"
     )
 
     if is_main:
         text += (
-            "\n🔧 *Main Admin*\n"
-            "/enable — group ያስነሳል\n"
-            "/disable — group ያጠፋል\n"
-            "/enablelist — enabled groups ዝርዝር\n"
-            "/addadmin USER_ID — group admin ይጨምራል\n"
-            "/removeadmin USER_ID — group admin ያስወጣል\n"
-            "/activity — group activity ያሳያል\n"
-            "/dbstatus — DB status ያሳያል\n"
-            "/dbclear N — DBN ያጸዳል (username ሳይነካ)\n"
-            "/setwarnmedia 2 — warning media ያስቀምጣል\n"
-            "/listwarnmedia — warning media ዝርዝር\n"
-            "/deletewarnmedia 2 — warning media ያጸዳል\n"
-            "/setcompletesticker — ሁሉም ✅ ሲሆን sticker ያስቀምጣል\n"
-            "/listcompletestickers — complete stickers ዝርዝር\n"
-            "/removecompletesticker N — sticker #N ያስወጣል\n"
+            "\nðŸ”§ *Main Admin*\n"
+            "/enable â€” group á‹«áˆµáŠáˆ³áˆ\n"
+            "/disable â€” group á‹«áŒ á‹áˆ\n"
+            "/enablelist â€” enabled groups á‹áˆ­á‹áˆ­\n"
+            "/addadmin USER_ID â€” group admin á‹­áŒ¨áˆáˆ«áˆ\n"
+            "/removeadmin USER_ID â€” group admin á‹«áˆµá‹ˆáŒ£áˆ\n"
+            "/activity â€” group activity á‹«áˆ³á‹«áˆ\n"
+            "/dbstatus â€” DB status á‹«áˆ³á‹«áˆ\n"
+            "/dbclear N â€” DBN á‹«áŒ¸á‹³áˆ (username áˆ³á‹­áŠáŠ«)\n"
+            "/setwarnmedia 2 â€” warning media á‹«áˆµá‰€áˆáŒ£áˆ\n"
+            "/listwarnmedia â€” warning media á‹áˆ­á‹áˆ­\n"
+            "/deletewarnmedia 2 â€” warning media á‹«áŒ¸á‹³áˆ\n"
+            "/setcompletesticker â€” áˆáˆ‰áˆ âœ… áˆ²áˆ†áŠ• sticker á‹«áˆµá‰€áˆáŒ£áˆ\n"
+            "/listcompletestickers â€” complete stickers á‹áˆ­á‹áˆ­\n"
+            "/removecompletesticker N â€” sticker #N á‹«áˆµá‹ˆáŒ£áˆ\n"
         )
 
     await update.message.reply_text(text, parse_mode="Markdown")
@@ -4376,8 +4433,8 @@ async def handle_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def handle_admin_group_video(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Admin group ላይ 30+ seconds video ሲልክ → ቀደም ያለውን board ይሰርዛል፣
-    አዲሱን board ከታች ይላካል (አንድ ጊዜ ብቻ per game)
+    Admin group áˆ‹á‹­ 30+ seconds video áˆ²áˆáŠ­ â†’ á‰€á‹°áˆ á‹«áˆˆá‹áŠ• board á‹­áˆ°áˆ­á‹›áˆá£
+    áŠ á‹²áˆ±áŠ• board áŠ¨á‰³á‰½ á‹­áˆ‹áŠ«áˆ (áŠ áŠ•á‹µ áŒŠá‹œ á‰¥á‰» per game)
     """
     msg = update.message
     group_id = update.effective_chat.id
@@ -4394,7 +4451,7 @@ async def handle_admin_group_video(update: Update, ctx: ContextTypes.DEFAULT_TYP
     if not video:
         return
 
-    # duration check — 30 seconds+
+    # duration check â€” 30 seconds+
     duration = getattr(video, "duration", None)
     if not duration or duration < 30:
         return
@@ -4405,12 +4462,12 @@ async def handle_admin_group_video(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
     game_id = settings["id"]
 
-    # አንድ ጊዜ ብቻ per game
+    # áŠ áŠ•á‹µ áŒŠá‹œ á‰¥á‰» per game
     if _gk(group_id, game_id) in handled_video_boards:
         return
     handled_video_boards.add(_gk(group_id, game_id))
 
-    # ቀደም ያለውን board ይሰርዝ
+    # á‰€á‹°áˆ á‹«áˆˆá‹áŠ• board á‹­áˆ°áˆ­á‹
     board_msg_id = settings.get("board_message_id")
     if board_msg_id:
         try:
@@ -4418,7 +4475,7 @@ async def handle_admin_group_video(update: Update, ctx: ContextTypes.DEFAULT_TYP
         except Exception:
             pass
 
-    # አዲሱን board ከታች ይላክ
+    # áŠ á‹²áˆ±áŠ• board áŠ¨á‰³á‰½ á‹­áˆ‹áŠ­
     taken = get_taken_numbers(game_id)
     paid = get_paid_numbers(game_id)
     board_text = build_board(settings, taken, paid)
@@ -4429,8 +4486,8 @@ async def handle_admin_group_video(update: Update, ctx: ContextTypes.DEFAULT_TYP
 
 async def handle_video_chat_started(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """
-    Admin live ሲጀምር + ሁሉም ቁጥሮች ✅ ከሆኑ → silent pre-booking mode ይጀምር።
-    Board አይላክም፣ ሰዎች ቁጥር መያዝ ይችላሉ፣ /newgame ሲል board ይታያል።
+    Admin live áˆ²áŒ€áˆáˆ­ + áˆáˆ‰áˆ á‰áŒ¥áˆ®á‰½ âœ… áŠ¨áˆ†áŠ‘ â†’ silent pre-booking mode á‹­áŒ€áˆáˆ­á¢
+    Board áŠ á‹­áˆ‹áŠ­áˆá£ áˆ°á‹Žá‰½ á‰áŒ¥áˆ­ áˆ˜á‹«á‹ á‹­á‰½áˆ‹áˆ‰á£ /newgame áˆ²áˆ board á‹­á‰³á‹«áˆá¢
     """
     group_id = update.effective_chat.id
 
@@ -4448,16 +4505,16 @@ async def handle_video_chat_started(update: Update, ctx: ContextTypes.DEFAULT_TY
 
     game_id = settings["id"]
 
-    # FIX: daily profit — ሁሉም ✅ ሆነው live ሲጀምር 1 ጨዋታ ተብሎ profit_per_game
-    # ይመዘገባል (registrations ከመጥፋታቸው በፊት)
+    # FIX: daily profit â€” áˆáˆ‰áˆ âœ… áˆ†áŠá‹ live áˆ²áŒ€áˆáˆ­ 1 áŒ¨á‹‹á‰³ á‰°á‰¥áˆŽ profit_per_game
+    # á‹­áˆ˜á‹˜áŒˆá‰£áˆ (registrations áŠ¨áˆ˜áŒ¥á‹á‰³á‰¸á‹ á‰ áŠá‰µ)
     _maybe_record_game_profit(group_id, game_id, settings)
 
-    # ✅ FIX: registrations ከመጥፋቱ በፊት snapshot ያድርግ — winner photo
-    # ገና ውጤቱ ካልታወቀ (ገና admin ካልላከው) በፊት pre-booking ቢጀምር፣ winner
-    # lookup snapshot ላይ ተመልክቶ ትክክለኛውን ባለቤት ማግኘት ይችላል
+    # âœ… FIX: registrations áŠ¨áˆ˜áŒ¥á‹á‰± á‰ áŠá‰µ snapshot á‹«á‹µáˆ­áŒ â€” winner photo
+    # áŒˆáŠ“ á‹áŒ¤á‰± áŠ«áˆá‰³á‹ˆá‰€ (áŒˆáŠ“ admin áŠ«áˆáˆ‹áŠ¨á‹) á‰ áŠá‰µ pre-booking á‰¢áŒ€áˆáˆ­á£ winner
+    # lookup snapshot áˆ‹á‹­ á‰°áˆ˜áˆáŠ­á‰¶ á‰µáŠ­áŠ­áˆˆáŠ›á‹áŠ• á‰£áˆˆá‰¤á‰µ áˆ›áŒáŠ˜á‰µ á‹­á‰½áˆ‹áˆ
     save_registrations_snapshot(game_id)
 
-    # silently clear registrations only (game_settings row ይቀራል)
+    # silently clear registrations only (game_settings row á‹­á‰€áˆ«áˆ)
     conn = get_conn()
     cur = conn.cursor()
     cur.execute("DELETE FROM registrations WHERE game_id=%s", (game_id,))
@@ -4467,9 +4524,9 @@ async def handle_video_chat_started(update: Update, ctx: ContextTypes.DEFAULT_TY
     cur.close()
     conn.close()
 
-    # ✅ ያለቀው ጨዋታ carry_balance እዚህ ጋር ይጸዳል (እውነተኛው ጨዋታ ያለቀበት ቦታ) —
-    # pre-booking round ራሱ ገና ስላልጀመረ፣ ከዚህ በኋላ የሚገባ ገንዘብ ሁሉ ለአዲሱ ዙር
-    # ንፁህ (ካለፈው ጨዋታ ቀሪ ሳይቀላቀል) ይሆናል
+    # âœ… á‹«áˆˆá‰€á‹ áŒ¨á‹‹á‰³ carry_balance áŠ¥á‹šáˆ… áŒ‹áˆ­ á‹­áŒ¸á‹³áˆ (áŠ¥á‹áŠá‰°áŠ›á‹ áŒ¨á‹‹á‰³ á‹«áˆˆá‰€á‰ á‰µ á‰¦á‰³) â€”
+    # pre-booking round áˆ«áˆ± áŒˆáŠ“ áˆµáˆ‹áˆáŒ€áˆ˜áˆ¨á£ áŠ¨á‹šáˆ… á‰ áŠ‹áˆ‹ á‹¨áˆšáŒˆá‰£ áŒˆáŠ•á‹˜á‰¥ áˆáˆ‰ áˆˆáŠ á‹²áˆ± á‹™áˆ­
+    # áŠ•ááˆ… (áŠ«áˆˆáˆá‹ áŒ¨á‹‹á‰³ á‰€áˆª áˆ³á‹­á‰€áˆ‹á‰€áˆ) á‹­áˆ†áŠ“áˆ
     clear_carry_balance(group_id)
 
     # in-memory state reset
@@ -4480,11 +4537,11 @@ async def handle_video_chat_started(update: Update, ctx: ContextTypes.DEFAULT_TY
     countdown_done.discard(_gk(group_id, game_id))
     _stop_inactivity_tracker(game_id, group_id)
 
-    # pre-booking mode ይጀምር
+    # pre-booking mode á‹­áŒ€áˆáˆ­
     prebooking_groups.add(group_id)
     logging.info(f"[PreBooking] Group {group_id} entered pre-booking mode (live started, all paid)")
 
-    # pre-booking media ይላካ (sticker/photo/video announcement)
+    # pre-booking media á‹­áˆ‹áŠ« (sticker/photo/video announcement)
     medias = get_prebooking_media()
     for m in medias:
         try:
@@ -4525,7 +4582,7 @@ async def sms_endpoint(request):
             except ValueError:
                 group_id = None
 
-        # bot off ሲሆን SMS ምንም አያስኬድ
+        # bot off áˆ²áˆ†áŠ• SMS áˆáŠ•áˆ áŠ á‹«áˆµáŠ¬á‹µ
         if group_id and not is_group_active(group_id):
             return web.json_response({"success": False, "reason": "bot_off"})
 
@@ -4553,7 +4610,7 @@ async def sms_endpoint(request):
 
 async def health_check(request):
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    return web.Response(text=f"🤖 Bot is running!\n🕐 Server time: {now}")
+    return web.Response(text=f"ðŸ¤– Bot is running!\nðŸ• Server time: {now}")
 
 
 _bot_instance = None
@@ -4575,8 +4632,8 @@ async def start_server():
     await runner.setup()
     site = web.TCPSite(runner, "0.0.0.0", 8080)
     await site.start()
-    print("🌐 SMS Server started on port 8080")
-    print("📱 SMS endpoint: /sms/{group_id}")
+    print("ðŸŒ SMS Server started on port 8080")
+    print("ðŸ“± SMS endpoint: /sms/{group_id}")
 
 
 # ============================================================
@@ -4674,7 +4731,7 @@ def main():
     app.add_handler(CommandHandler("on", handle_on))
     app.add_handler(CommandHandler("off", handle_off))
     app.add_handler(CommandHandler("clearbalance", handle_clearbalance))
-    # NEW: winner "🔥 reaction" balance-clear feature
+    # NEW: winner "ðŸ”¥ reaction" balance-clear feature
     app.add_handler(MessageReactionHandler(handle_winner_fire_reaction))
     app.add_handler(CommandHandler("report", handle_report))
     app.add_handler(CommandHandler("setwarnmedia", handle_setwarnmedia))
@@ -4708,14 +4765,21 @@ def main():
         handle_winner_correction_reply
     ), group=-1)
 
-    # ✅ FIX: የራሱ group (-2) ላይ መመዝገብ አለበት! python-telegram-bot በአንድ
-    # group ውስጥ የመጀመሪያውን filter-matching handler ብቻ ይጠራል — ይህ
-    # ከ handle_winner_correction_reply ጋር ተመሳሳይ group (-1) እና ተመሳሳይ
-    # filter ስለነበረው፣ ፈጽሞ አይጠራም ነበር (dead code)።
+    # âœ… FIX: á‹¨áˆ«áˆ± group (-2) áˆ‹á‹­ áˆ˜áˆ˜á‹áŒˆá‰¥ áŠ áˆˆá‰ á‰µ! python-telegram-bot á‰ áŠ áŠ•á‹µ
+    # group á‹áˆµáŒ¥ á‹¨áˆ˜áŒ€áˆ˜áˆªá‹«á‹áŠ• filter-matching handler á‰¥á‰» á‹­áŒ áˆ«áˆ â€” á‹­áˆ…
+    # áŠ¨ handle_winner_correction_reply áŒ‹áˆ­ á‰°áˆ˜áˆ³áˆ³á‹­ group (-1) áŠ¥áŠ“ á‰°áˆ˜áˆ³áˆ³á‹­
+    # filter áˆµáˆˆáŠá‰ áˆ¨á‹á£ áˆáŒ½áˆž áŠ á‹­áŒ áˆ«áˆ áŠá‰ áˆ­ (dead code)á¢
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
         handle_owner_reply
     ), group=-2)
+
+    # NEW: "ðŸ”¥16 21+" â†’ áŠá‰ƒá‹­ á‹áˆ­á‹áˆ­ áˆ›á‹áŒ« (á‹¨áˆ«áˆ± group á‹«áˆµáˆáˆáŒˆá‹‹áˆ â€” áŠ¨áˆ‹á‹­ á‹«áˆ‰á‰µ
+    # handlers áˆáˆ‰áŠ•áˆ text áˆµáˆˆáˆšá‹­á‹™)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & filters.Regex(r'^\s*ðŸ”¥'),
+        handle_unnekay_text
+    ), group=-3)
 
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
@@ -4782,16 +4846,16 @@ def main():
                     if not is_group_active(gid):
                         continue
                     report = get_report(gid)
-                    lines = ["📊 የዛሬ Daily Report\n"]
+                    lines = ["ðŸ“Š á‹¨á‹›áˆ¬ Daily Report\n"]
                     if report["games_count"] > 0:
                         lines.append(
-                            f"🎮 ጨዋታዎች: {report['games_count']}\n"
-                            f"💰 Total bet: ETB {report['total_bet']:,.0f}\n"
-                            f"🏆 Prize: ETB {report['prize_total']:,.0f}\n"
-                            f"📈 Profit: ETB {report['profit']:,.0f}"
+                            f"ðŸŽ® áŒ¨á‹‹á‰³á‹Žá‰½: {report['games_count']}\n"
+                            f"ðŸ’° Total bet: ETB {report['total_bet']:,.0f}\n"
+                            f"ðŸ† Prize: ETB {report['prize_total']:,.0f}\n"
+                            f"ðŸ“ˆ Profit: ETB {report['profit']:,.0f}"
                         )
                     else:
-                        lines.append("🎮 ዛሬ ጨዋታ አልተጫወተም")
+                        lines.append("ðŸŽ® á‹›áˆ¬ áŒ¨á‹‹á‰³ áŠ áˆá‰°áŒ«á‹ˆá‰°áˆ")
                     try:
                         admins = get_group_admins(gid)
                         for admin_id in admins:
@@ -4802,9 +4866,9 @@ def main():
                     except Exception:
                         pass
                 cleanup_old_reports()
-                # NEW: winner-🔥-reaction feature — message_senders ላይ ደግሞ
-                # ደህንነት (safety-net) periodic cleanup (clear_game ራሱ አዲስ
-                # game ሲጀመር ያ group's records ቢያጸዳም፣ ይሄ ተጨማሪ ጥንቃቄ ነው)
+                # NEW: winner-ðŸ”¥-reaction feature â€” message_senders áˆ‹á‹­ á‹°áŒáˆž
+                # á‹°áˆ…áŠ•áŠá‰µ (safety-net) periodic cleanup (clear_game áˆ«áˆ± áŠ á‹²áˆµ
+                # game áˆ²áŒ€áˆ˜áˆ­ á‹« group's records á‰¢á‹«áŒ¸á‹³áˆá£ á‹­áˆ„ á‰°áŒ¨áˆ›áˆª áŒ¥áŠ•á‰ƒá‰„ áŠá‹)
                 try:
                     cleanup_old_message_senders()
                 except Exception:
@@ -4814,10 +4878,10 @@ def main():
 
     loop.create_task(_daily_report_scheduler())
 
-    print("🤖 Bot started!")
-    # NEW: allowed_updates ግልጽ ተብሎ ካልተሰጠ Telegram የድሮውን cached setting
-    # ብቻ ይጠቀማል (message_reaction ላይካተት ይችላል) — ስለዚህ winner-🔥-reaction
-    # feature እንዲሰራ Update.ALL_TYPES ግልጽ ተብሎ ተሰጥቷል።
+    print("ðŸ¤– Bot started!")
+    # NEW: allowed_updates áŒáˆáŒ½ á‰°á‰¥áˆŽ áŠ«áˆá‰°áˆ°áŒ  Telegram á‹¨á‹µáˆ®á‹áŠ• cached setting
+    # á‰¥á‰» á‹­áŒ á‰€áˆ›áˆ (message_reaction áˆ‹á‹­áŠ«á‰°á‰µ á‹­á‰½áˆ‹áˆ) â€” áˆµáˆˆá‹šáˆ… winner-ðŸ”¥-reaction
+    # feature áŠ¥áŠ•á‹²áˆ°áˆ« Update.ALL_TYPES áŒáˆáŒ½ á‰°á‰¥áˆŽ á‰°áˆ°áŒ¥á‰·áˆá¢
     app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 
