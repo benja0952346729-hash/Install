@@ -3403,6 +3403,139 @@ async def handle_paid_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(msg)
 
 
+async def handle_approve_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """
+    "✅ 10✅ 21✅ 31✅" — admin መልእክቱ በ ✅ ሲጀምር ቁጥሮቹ እንደ ተከፈሉ ይጸድቃሉ
+    (/paid ጋር ተመሳሳይ — admin_mark_paid)። reply ቢኖርም ባይኖርም ምንም ለውጥ የለውም።
+      "✅ 10 21"       → 10 እና 21 (ከኋላ ✅ አማራጭ ነው)
+      "✅ 10+2✅"      → የ 10 slot 2 ብቻ (ግማሽ ሁለት ሰው ሲይዘው)
+    መልእክቱ ከ ✅ በኋላ ቁጥር ብቻ ካልያዘ (ለምሳሌ "✅ ተከፍሏል") ወይም ላኪው admin
+    ካልሆነ ምንም አያደርግም — መልእክቱ እንደ ድሮው ወደ ሌሎች handlers ይቀጥላል።
+    """
+    import re as _re_ap
+    from telegram.ext import ApplicationHandlerStop
+
+    msg = update.message
+    if not msg or not msg.text:
+        return
+    raw = msg.text.replace("️", "").strip()
+    if not raw.startswith("✅"):
+        return
+
+    tokens = [t for t in _re_ap.split(r'[,\s]+', raw) if t and t != "✅"]
+    tokens = [t[1:] if t.startswith("✅") else t for t in tokens]
+    tokens = [t for t in tokens if t]
+    num_re = _re_ap.compile(r'^(\d{1,4})(?:[+:](\d))?✅?$')
+    if not tokens or not all(num_re.match(t) for t in tokens):
+        return
+
+    group_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    if not is_admin(user_id, group_id):
+        return
+    if not is_group_enabled(group_id) or not is_group_active(group_id):
+        return
+    settings = get_active_settings(group_id=group_id)
+    if not settings:
+        return
+
+    game_id = settings["id"]
+    per_person = settings["numbers_per_person"]
+    total = settings["total_numbers"]
+    key = _gk(group_id, game_id)
+
+    taken = get_taken_numbers(game_id)
+    approved, already, errors = [], [], []
+
+    for tok in tokens:
+        m = num_re.match(tok)
+        number = int(m.group(1))
+        slot_req = int(m.group(2)) if m.group(2) else None
+        if number < 1 or number > total:
+            errors.append(f"{tok} (ከደረጃ ውጥ)")
+            continue
+        actual_num = get_group_start(number, per_person) if per_person > 1 else number
+        entry = taken.get(actual_num, [])
+        if not entry:
+            errors.append(f"{format_number(actual_num)} (ያልተያዘ)")
+            continue
+
+        # entry = [(user_name, is_half, slot, is_paid, pending_upgrade), ...]
+        if slot_req is not None:
+            match = [e for e in entry if e[2] == slot_req]
+            if not match:
+                errors.append(f"{format_number(actual_num)}+{slot_req} (የለም)")
+                continue
+            slot = slot_req
+            if match[0][3]:
+                already.append(f"{format_number(actual_num)}+{slot}")
+                continue
+        else:
+            unpaid = [e for e in entry if not e[3]]
+            if not unpaid:
+                already.append(format_number(actual_num))
+                continue
+            if len(unpaid) > 1:
+                n2 = format_number(actual_num)
+                errors.append(f"{n2} (ሁለት ግማሽ አለ — {n2}+1✅ ወይም {n2}+2✅ ብለው ይጽፉ)")
+                continue
+            slot = unpaid[0][2]
+
+        try:
+            admin_mark_paid(game_id, actual_num, slot, True)
+        except Exception as e:
+            logging.error(f"[Approve] admin_mark_paid failed n={actual_num} slot={slot}: {e}")
+            errors.append(f"{format_number(actual_num)} (ስህተት)")
+            continue
+        label = format_number(actual_num) + (f"+{slot}" if len(entry) > 1 else "")
+        approved.append(label)
+
+        if key in nekay_active:
+            snap = nekay_numbers.get(key, {})
+            if actual_num in snap:
+                del snap[actual_num]
+                nekay_numbers[key] = snap
+
+    if approved and key in nekay_active:
+        snap = nekay_numbers.get(key, {})
+        rem_msg_id = settings.get("remaining_message_id")
+        if rem_msg_id:
+            try:
+                await ctx.bot.delete_message(chat_id=group_id, message_id=rem_msg_id)
+            except Exception:
+                pass
+        if snap:
+            from board import build_nekay
+            nekay_list = _build_nekay_from_snap(snap)
+            new_nekay = await ctx.bot.send_message(chat_id=group_id, text=build_nekay(nekay_list))
+            update_remaining_message_id(game_id, new_nekay.message_id)
+        else:
+            update_remaining_message_id(game_id, None)
+            nekay_active.discard(key)
+            nekay_numbers.pop(key, None)
+
+    if approved:
+        await _refresh_board(ctx, settings, group_id)
+        fresh = get_active_settings(group_id=group_id)
+        if fresh:
+            await _check_all_paid_and_resend(ctx.bot, fresh, group_id)
+
+    logging.info(f"[Approve] admin={user_id} group={group_id} approved={approved} already={already} errors={errors}")
+
+    out = []
+    if approved:
+        out.append(f"✅ {', '.join(approved)} ተጸድቀዋል")
+    if already:
+        out.append(f"ℹ️ ቀድሞ የተከፈለ: {', '.join(already)}")
+    if errors:
+        out.append(f"❌ ያልተቀበለ: {', '.join(errors)}")
+    if out:
+        await msg.reply_text("\n".join(out))
+
+    # መልእክቱ ወደ booking parser እንዳይሄድ እዚሁ አቁም
+    raise ApplicationHandlerStop
+
+
 async def handle_newgame(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     group_id = update.effective_chat.id
     if not is_admin(update.effective_user.id, group_id):
@@ -4779,6 +4912,12 @@ def main():
     app.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & filters.Regex('^\\s*\U0001f525'),
         handle_unnekay_text
+    ), group=-3)
+
+    # "✅ 10✅ 21✅" → admin ቁጥሮችን እንደ ተከፈለ ያጽድቃል (reply አያስፈልግም)
+    app.add_handler(MessageHandler(
+        filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS & filters.Regex('^\\s*✅'),
+        handle_approve_text
     ), group=-3)
 
     app.add_handler(MessageHandler(
